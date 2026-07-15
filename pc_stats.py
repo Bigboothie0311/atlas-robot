@@ -39,28 +39,50 @@ def _parse_value(raw):
 
 
 def _find_child(node, text):
-    for child in node.get("Children", []):
-        if child.get("Text") == text:
+    if not isinstance(node, dict):
+        return None
+
+    children = node.get("Children", [])
+
+    if not isinstance(children, list):
+        return None
+
+    for child in children:
+        if isinstance(child, dict) and child.get("Text") == text:
             return child
+
     return None
 
 
 def _find_sensor_value(section_node, text, sensor_type):
-    if section_node is None:
+    if not isinstance(section_node, dict):
         return None
 
-    for child in section_node.get("Children", []):
-        if child.get("Text") == text and child.get("Type") == sensor_type:
+    children = section_node.get("Children", [])
+
+    if not isinstance(children, list):
+        return None
+
+    for child in children:
+        if isinstance(child, dict) and child.get("Text") == text and child.get("Type") == sensor_type:
             return child.get("Value")
 
     return None
 
 
 def _find_hardware_node(node, name):
+    if not isinstance(node, dict):
+        return None
+
     if node.get("Text") == name:
         return node
 
-    for child in node.get("Children", []):
+    children = node.get("Children", [])
+
+    if not isinstance(children, list):
+        return None
+
+    for child in children:
         found = _find_hardware_node(child, name)
 
         if found is not None:
@@ -122,10 +144,7 @@ def get_gaming_pc_stats():
     except (requests.RequestException, ValueError):
         return {"online": False}
 
-    try:
-        stats = _extract_stats(root)
-    except AttributeError:
-        return {"online": False}
+    stats = _extract_stats(root)
 
     if stats is None:
         return {"online": False}
