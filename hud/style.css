@@ -96,6 +96,11 @@ html, body {
 .panel-system  { grid-column: 3; grid-row: 2; }
 .panel-gaming-pc { grid-column: 3; grid-row: 3; }
 
+.panel-gaming-pc.offline .panel-value {
+  color: #ff5f5f;
+  text-shadow: 0 0 12px rgba(255, 95, 95, 0.5);
+}
+
 #ring-column {
   grid-column: 2;
   grid-row: 1 / span 3;

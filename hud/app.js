@@ -165,6 +165,27 @@ async function pollStats() {
     const hours = Math.floor(stats.uptime_seconds / 3600);
     const minutes = Math.floor((stats.uptime_seconds % 3600) / 60);
     document.getElementById("uptime").textContent = `${hours}h ${minutes}m`;
+
+    const gamingPc = stats.gaming_pc || { online: false };
+    const gamingPcPanel = document.querySelector(".panel-gaming-pc");
+    const gamingPcStatus = document.getElementById("gaming-pc-status");
+
+    if (gamingPc.online) {
+      gamingPcPanel.classList.remove("offline");
+      gamingPcStatus.textContent = "ONLINE";
+      document.getElementById("gaming-pc-cpu").textContent =
+        `CPU ${gamingPc.cpu_percent}% / ${gamingPc.cpu_temp_c}°C`;
+      document.getElementById("gaming-pc-gpu").textContent =
+        `GPU ${gamingPc.gpu_percent}% / ${gamingPc.gpu_temp_c}°C`;
+      document.getElementById("gaming-pc-ram").textContent =
+        `RAM ${gamingPc.ram_percent}%`;
+    } else {
+      gamingPcPanel.classList.add("offline");
+      gamingPcStatus.textContent = "OFFLINE";
+      document.getElementById("gaming-pc-cpu").textContent = "CPU -- % / -- °C";
+      document.getElementById("gaming-pc-gpu").textContent = "GPU -- % / -- °C";
+      document.getElementById("gaming-pc-ram").textContent = "RAM -- %";
+    }
   } catch (error) {
     console.error("stats poll failed", error);
   }
