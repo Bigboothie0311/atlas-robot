@@ -133,6 +133,17 @@ def speak(text):
     response.raise_for_status()
 
 
+def log_qa(question, answer):
+    try:
+        requests.post(
+            f"{HUB}/qa_log",
+            json={"question": question, "answer": answer},
+            timeout=3
+        )
+    except requests.RequestException as error:
+        print("qa_log request failed:", error, flush=True)
+
+
 def record_audio():
     print("Listening for up to 4 seconds...")
 
@@ -485,10 +496,14 @@ def run_image_search_command(query):
             continue
 
         if response.status_code == 200 and response.json().get("ok"):
-            speak(f"Here's a picture of {query}.")
+            answer = f"Here's a picture of {query}."
+            log_qa(query, answer)
+            speak(answer)
             return
 
-    speak(f"I could not find a picture of {query}.")
+    answer = f"I could not find a picture of {query}."
+    log_qa(query, answer)
+    speak(answer)
 
 
 def handle_local_command(text, model):
@@ -773,12 +788,14 @@ def handle_turn(model):
 
         if local_answer is not None:
             print("A.T.L.A.S. local command:", local_answer)
+            log_qa(text, local_answer)
             speak(local_answer)
             return
 
         answer = ask_atlas(text)
 
         print("A.T.L.A.S.:", answer)
+        log_qa(text, answer)
         speak(answer)
 
     except BudgetExceeded as error:
