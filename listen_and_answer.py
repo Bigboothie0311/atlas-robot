@@ -1,6 +1,9 @@
+import array
 import json
+import math
 import subprocess
 import sys
+import time
 import wave
 from datetime import datetime, timezone
 from pathlib import Path
@@ -144,18 +147,79 @@ def log_qa(question, answer):
         print("qa_log request failed:", error, flush=True)
 
 
-def record_audio():
-    print("Listening for up to 4 seconds...")
+RECORD_MAX_SECONDS = 8
+# Once real speech has been heard, stop after this much trailing silence
+# instead of always recording the full RECORD_MAX_SECONDS.
+RECORD_SILENCE_TIMEOUT = 1.2
+# Matches wake_listener.py's MIN_UTTERANCE_RMS — same mic, same room, already
+# tuned to separate real speech from ambient noise on this hardware.
+RECORD_MIN_SPEECH_RMS = 220
+RECORD_CHUNK_BYTES = 4000
 
-    subprocess.run([
-        "arecord",
-        "-D", MIC_DEVICE,
-        "-f", "S16_LE",
-        "-r", "16000",
-        "-c", "1",
-        "-d", "4",
-        AUDIO_PATH
-    ], check=True)
+
+def record_audio():
+    print("Listening...", flush=True)
+
+    recorder = subprocess.Popen(
+        [
+            "arecord",
+            "-D", MIC_DEVICE,
+            "-t", "raw",
+            "-f", "S16_LE",
+            "-r", "16000",
+            "-c", "1"
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL
+    )
+
+    chunks = []
+    speech_started = False
+    silence_since_speech = 0.0
+    start = time.monotonic()
+
+    try:
+        while time.monotonic() - start < RECORD_MAX_SECONDS:
+            chunk = recorder.stdout.read(RECORD_CHUNK_BYTES)
+
+            if not chunk:
+                break
+
+            chunks.append(chunk)
+
+            samples = array.array("h")
+            samples.frombytes(chunk)
+            rms = (
+                math.sqrt(sum(sample * sample for sample in samples) / len(samples))
+                if samples else 0
+            )
+            chunk_seconds = len(chunk) / 2 / 16000
+
+            if rms >= RECORD_MIN_SPEECH_RMS:
+                speech_started = True
+                silence_since_speech = 0.0
+            elif speech_started:
+                silence_since_speech += chunk_seconds
+
+                if silence_since_speech >= RECORD_SILENCE_TIMEOUT:
+                    break
+    finally:
+        if recorder.poll() is None:
+            recorder.terminate()
+
+            try:
+                recorder.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                recorder.kill()
+                recorder.wait()
+
+        recorder.stdout.close()
+
+    with wave.open(AUDIO_PATH, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(16000)
+        wav_file.writeframes(b"".join(chunks))
 
 
 def transcribe_audio(model):
@@ -769,9 +833,10 @@ def handle_turn(model):
 
         if not text:
             print(
-                "No speech detected. Returning silently to wake mode.",
+                "No speech detected. Letting the user know before returning to wake mode.",
                 flush=True
             )
+            speak("I didn't catch that.")
             return
 
         if is_vision_command(text):
