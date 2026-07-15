@@ -69,28 +69,13 @@ def _find_hardware_node(node, name):
     return None
 
 
-def get_gaming_pc_stats():
-    ip = load_gaming_pc_ip()
-
-    if not ip:
-        return {"online": False}
-
-    try:
-        response = requests.get(
-            f"http://{ip}:{LHM_PORT}/data.json",
-            timeout=LHM_TIMEOUT_SECONDS,
-        )
-        response.raise_for_status()
-        root = response.json()
-    except (requests.RequestException, ValueError):
-        return {"online": False}
-
+def _extract_stats(root):
     cpu_node = _find_hardware_node(root, CPU_HARDWARE_NAME)
     gpu_node = _find_hardware_node(root, GPU_HARDWARE_NAME)
     memory_node = _find_hardware_node(root, MEMORY_HARDWARE_NAME)
 
     if cpu_node is None or gpu_node is None or memory_node is None:
-        return {"online": False}
+        return None
 
     cpu_percent = _parse_value(
         _find_sensor_value(_find_child(cpu_node, "Load"), "CPU Total", "Load")
@@ -109,7 +94,7 @@ def get_gaming_pc_stats():
     )
 
     if None in (cpu_percent, cpu_temp_c, gpu_percent, gpu_temp_c, ram_percent):
-        return {"online": False}
+        return None
 
     return {
         "online": True,
@@ -119,3 +104,30 @@ def get_gaming_pc_stats():
         "gpu_temp_c": gpu_temp_c,
         "ram_percent": ram_percent,
     }
+
+
+def get_gaming_pc_stats():
+    ip = load_gaming_pc_ip()
+
+    if not ip:
+        return {"online": False}
+
+    try:
+        response = requests.get(
+            f"http://{ip}:{LHM_PORT}/data.json",
+            timeout=LHM_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        root = response.json()
+    except (requests.RequestException, ValueError):
+        return {"online": False}
+
+    try:
+        stats = _extract_stats(root)
+    except AttributeError:
+        return {"online": False}
+
+    if stats is None:
+        return {"online": False}
+
+    return stats
