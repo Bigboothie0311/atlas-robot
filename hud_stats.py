@@ -6,6 +6,7 @@ import psutil
 import requests
 
 from ai_tools import WEATHER_CODE_DESCRIPTIONS
+import pc_stats
 
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 
@@ -140,4 +141,5 @@ def get_hud_stats():
         "disk": get_disk_stats(),
         "network": get_network_stats(),
         "uptime_seconds": get_uptime_seconds(),
+        "gaming_pc": pc_stats.get_gaming_pc_stats(),
     }
