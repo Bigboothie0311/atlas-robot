@@ -25,7 +25,7 @@ html, body {
 #dashboard {
   display: grid;
   grid-template-columns: 1fr 1.4fr 1fr;
-  grid-template-rows: 1fr 1fr;
+  grid-template-rows: 1fr 1fr 1fr auto;
   gap: 24px;
   width: 100vw;
   height: 100vh;
@@ -72,10 +72,11 @@ html, body {
 .panel-disk    { grid-column: 1; grid-row: 2; }
 .panel-weather { grid-column: 3; grid-row: 1; }
 .panel-system  { grid-column: 3; grid-row: 2; }
+.panel-gaming-pc { grid-column: 3; grid-row: 3; }
 
 #ring-column {
   grid-column: 2;
-  grid-row: 1 / span 2;
+  grid-row: 1 / span 3;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -94,7 +95,7 @@ html, body {
   height: 100%;
 }
 
-.ring-outer, .ring-ticks, .ring-inner {
+.ring-outer, .ring-ticks, .ring-middle, .ring-inner {
   fill: none;
 }
 
@@ -118,6 +119,15 @@ html, body {
   stroke-dasharray: 240 700;
   transform-origin: 200px 200px;
   animation: spin-reverse 12s linear infinite, glow-idle 3s ease-in-out infinite;
+}
+
+.ring-middle {
+  stroke: var(--cyan);
+  stroke-width: 2;
+  stroke-dasharray: 6 10;
+  opacity: 0.55;
+  transform-origin: 200px 200px;
+  animation: spin-reverse 20s linear infinite;
 }
 
 @keyframes spin {
@@ -150,13 +160,33 @@ body.state-listening .ring-inner {
   animation: spin-reverse 12s linear infinite, glow-listening 1s ease-in-out infinite;
 }
 
+body.state-listening .ring-middle {
+  stroke: var(--amber);
+  animation: spin-reverse 8s linear infinite;
+}
+
 body.state-thinking .ring-ticks {
-  animation: spin 6s linear infinite;
+  animation: spin 4s linear infinite;
+}
+
+body.state-thinking .ring-middle {
+  animation: spin-reverse 3s linear infinite;
 }
 
 body.state-speaking .ring-inner {
   stroke: var(--green);
   animation: spin-reverse 12s linear infinite, glow-speaking 0.6s ease-in-out infinite;
+}
+
+body.state-speaking .ring-middle {
+  stroke: var(--green);
+  animation: spin-reverse 5s linear infinite;
+}
+
+body.state-listening .ring-outer,
+body.state-thinking .ring-outer,
+body.state-speaking .ring-outer {
+  animation: glow-idle 2s ease-in-out infinite;
 }
 
 #ring-center {
