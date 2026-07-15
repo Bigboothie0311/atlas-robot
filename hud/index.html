@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>A.T.L.A.S.</title>
+<link rel="stylesheet" href="/hud/static/style.css">
+</head>
+<body class="state-idle">
+  <div id="dashboard">
+    <div class="panel panel-cpu">
+      <div class="panel-label">CPU</div>
+      <div class="panel-value" id="cpu-percent">--%</div>
+      <div class="panel-sub" id="cpu-temp">-- &deg;C</div>
+    </div>
+    <div class="panel panel-disk">
+      <div class="panel-label">DISK</div>
+      <div class="panel-value" id="disk-percent">--%</div>
+      <div class="panel-sub" id="disk-detail">-- / -- GB</div>
+    </div>
+
+    <div id="ring-column">
+      <div id="ring-wrap">
+        <svg id="ring" viewBox="0 0 400 400">
+          <circle class="ring-outer" cx="200" cy="200" r="180"></circle>
+          <circle class="ring-ticks" cx="200" cy="200" r="180"></circle>
+          <circle class="ring-inner" cx="200" cy="200" r="150"></circle>
+        </svg>
+        <div id="ring-center">
+          <div id="clock">--:--:--</div>
+          <div id="date">-- -- ----</div>
+          <div id="status-label">IDLE</div>
+        </div>
+      </div>
+      <div id="qa-log"></div>
+    </div>
+
+    <div class="panel panel-weather">
+      <div class="panel-label">WEATHER &middot; HOME, CA</div>
+      <div class="panel-value" id="weather-temp">--&deg;F</div>
+      <div class="panel-sub" id="weather-condition">--</div>
+      <div class="panel-sub" id="weather-range">H -- / L --</div>
+      <div class="panel-sub" id="weather-precip">Rain --%</div>
+    </div>
+    <div class="panel panel-system">
+      <div class="panel-label">NETWORK</div>
+      <div class="panel-value" id="network-ip">--</div>
+      <div class="panel-label panel-label-spaced">UPTIME</div>
+      <div class="panel-sub" id="uptime">--</div>
+    </div>
+  </div>
+
+  <div id="image-overlay">
+    <img id="image-overlay-img" src="" alt="">
+  </div>
+
+  <script src="/hud/static/app.js"></script>
+</body>
+</html>
