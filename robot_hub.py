@@ -20,6 +20,8 @@ robot_state = {
     "speaking": False,
     "image_path": None,
     "image_caption": None,
+    "gallery_image_paths": [],
+    "gallery_caption": None,
     "qa_log": []
 }
 
@@ -28,8 +30,12 @@ QA_LOG_MAX_ENTRIES = 20
 HUD_DIR = os.path.join(os.path.dirname(__file__), "hud")
 
 image_until = 0.0
+gallery_until = 0.0
 
 IMAGE_DISPLAY_PATH_BASE = "/tmp/atlas_robot_display_image"
+GALLERY_PATH_BASE = "/tmp/atlas_robot_gallery_image_"
+GALLERY_MAX_IMAGES = 6
+GALLERY_DEFAULT_DURATION = 15
 IMAGE_MAX_BYTES = 8 * 1024 * 1024
 IMAGE_MIN_DURATION = 3
 IMAGE_MAX_DURATION = 60
@@ -58,6 +64,24 @@ def clear_expired_image_locked():
                 os.remove(old_path)
             except OSError:
                 pass
+
+
+def clear_expired_gallery_locked():
+    """Caller must hold state_lock."""
+    global gallery_until
+
+    if robot_state["gallery_image_paths"] and time.time() >= gallery_until:
+        old_paths = robot_state["gallery_image_paths"]
+        robot_state["gallery_image_paths"] = []
+        robot_state["gallery_caption"] = None
+        gallery_until = 0.0
+
+        for old_path in old_paths:
+            if old_path and os.path.exists(old_path):
+                try:
+                    os.remove(old_path)
+                except OSError:
+                    pass
 
 
 VALID_EXPRESSIONS = {
@@ -128,6 +152,7 @@ def hud_display_image():
 def get_state():
     with state_lock:
         clear_expired_image_locked()
+        clear_expired_gallery_locked()
         return jsonify(robot_state.copy())
 
 
@@ -177,6 +202,48 @@ def add_qa_log():
     return jsonify({"ok": True, "entry": entry})
 
 
+def _download_image(url, path_without_extension):
+    """Downloads url as an image if it's valid and within the size cap.
+    Returns the full path (with extension) on success, or None on failure."""
+    try:
+        response = requests.get(
+            url,
+            timeout=8,
+            stream=True,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; AtlasRobot/1.0)"}
+        )
+        response.raise_for_status()
+    except requests.RequestException:
+        return None
+
+    content_type = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
+    extension = IMAGE_EXTENSIONS.get(content_type)
+
+    if extension is None:
+        response.close()
+        return None
+
+    path = path_without_extension + extension
+    total_bytes = 0
+
+    try:
+        with open(path, "wb") as image_file:
+            for chunk in response.iter_content(chunk_size=65536):
+                total_bytes += len(chunk)
+
+                if total_bytes > IMAGE_MAX_BYTES:
+                    raise ValueError("Image exceeded the size limit")
+
+                image_file.write(chunk)
+        return path
+    except (OSError, ValueError):
+        if os.path.exists(path):
+            os.remove(path)
+        return None
+    finally:
+        response.close()
+
+
 @app.post("/show_image")
 def show_image():
     global image_until
@@ -198,52 +265,13 @@ def show_image():
             "error": "URL must be http or https"
         }), 400
 
-    try:
-        response = requests.get(
-            url,
-            timeout=8,
-            stream=True,
-            headers={"User-Agent": "Mozilla/5.0 (compatible; AtlasRobot/1.0)"}
-        )
-        response.raise_for_status()
-    except requests.RequestException as error:
+    new_path = _download_image(url, IMAGE_DISPLAY_PATH_BASE)
+
+    if new_path is None:
         return jsonify({
             "ok": False,
-            "error": f"Download failed: {error}"
+            "error": "Could not download a valid image from that URL"
         }), 502
-
-    content_type = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
-    extension = IMAGE_EXTENSIONS.get(content_type)
-
-    if extension is None:
-        response.close()
-        return jsonify({
-            "ok": False,
-            "error": f"Unsupported image type: {content_type or 'unknown'}"
-        }), 415
-
-    new_path = IMAGE_DISPLAY_PATH_BASE + extension
-    total_bytes = 0
-
-    try:
-        with open(new_path, "wb") as image_file:
-            for chunk in response.iter_content(chunk_size=65536):
-                total_bytes += len(chunk)
-
-                if total_bytes > IMAGE_MAX_BYTES:
-                    raise ValueError("Image exceeded the size limit")
-
-                image_file.write(chunk)
-    except (OSError, ValueError) as error:
-        if os.path.exists(new_path):
-            os.remove(new_path)
-
-        return jsonify({
-            "ok": False,
-            "error": str(error)
-        }), 502
-    finally:
-        response.close()
 
     with state_lock:
         old_path = robot_state["image_path"]
@@ -262,6 +290,81 @@ def show_image():
         "image_path": new_path,
         "duration": duration
     })
+
+
+@app.post("/show_images")
+def show_images():
+    global gallery_until
+
+    data = request.get_json(silent=True) or {}
+    urls = data.get("urls", [])
+    caption = str(data.get("caption", "")).strip() or None
+
+    if not isinstance(urls, list) or not urls:
+        return jsonify({
+            "ok": False,
+            "error": "urls must be a non-empty list"
+        }), 400
+
+    urls = [str(url).strip() for url in urls if str(url).strip()][:GALLERY_MAX_IMAGES]
+
+    try:
+        duration = float(data.get("duration", GALLERY_DEFAULT_DURATION))
+    except (TypeError, ValueError):
+        duration = GALLERY_DEFAULT_DURATION
+
+    duration = max(IMAGE_MIN_DURATION, min(IMAGE_MAX_DURATION, duration))
+
+    new_paths = []
+
+    for index, url in enumerate(urls):
+        if not url.lower().startswith(("http://", "https://")):
+            continue
+
+        path = _download_image(url, f"{GALLERY_PATH_BASE}{index}")
+
+        if path is not None:
+            new_paths.append(path)
+
+    if not new_paths:
+        return jsonify({
+            "ok": False,
+            "error": "No images could be downloaded"
+        }), 502
+
+    with state_lock:
+        old_paths = robot_state["gallery_image_paths"]
+        robot_state["gallery_image_paths"] = new_paths
+        robot_state["gallery_caption"] = caption
+        gallery_until = time.time() + duration
+
+        for old_path in old_paths:
+            if old_path and old_path not in new_paths and os.path.exists(old_path):
+                try:
+                    os.remove(old_path)
+                except OSError:
+                    pass
+
+    return jsonify({
+        "ok": True,
+        "count": len(new_paths),
+        "duration": duration
+    })
+
+
+@app.get("/hud/gallery_image/<int:index>")
+def hud_gallery_image(index):
+    with state_lock:
+        clear_expired_gallery_locked()
+        paths = list(robot_state["gallery_image_paths"])
+
+    if index < 0 or index >= len(paths) or not os.path.exists(paths[index]):
+        return jsonify({
+            "ok": False,
+            "error": "No gallery image at that index"
+        }), 404
+
+    return send_file(paths[index])
 
 
 @app.post("/clear_image")
