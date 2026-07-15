@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file, send_from_directory
 import subprocess
 import tempfile
 import threading
@@ -9,6 +9,8 @@ import wave
 import requests
 from piper import PiperVoice, SynthesisConfig
 
+import hud_stats
+
 app = Flask(__name__)
 
 state_lock = threading.Lock()
@@ -17,8 +19,13 @@ robot_state = {
     "expression": "happy",
     "speaking": False,
     "image_path": None,
-    "image_caption": None
+    "image_caption": None,
+    "qa_log": []
 }
+
+QA_LOG_MAX_ENTRIES = 20
+
+HUD_DIR = os.path.join(os.path.dirname(__file__), "hud")
 
 image_until = 0.0
 
@@ -26,7 +33,7 @@ IMAGE_DISPLAY_PATH_BASE = "/tmp/atlas_robot_display_image"
 IMAGE_MAX_BYTES = 8 * 1024 * 1024
 IMAGE_MIN_DURATION = 3
 IMAGE_MAX_DURATION = 60
-IMAGE_DEFAULT_DURATION = 15
+IMAGE_DEFAULT_DURATION = 10
 IMAGE_EXTENSIONS = {
     "image/jpeg": ".jpg",
     "image/png": ".png",
@@ -87,6 +94,36 @@ def status():
     return "A.T.L.A.S. ROBOT HUB ONLINE\n", 200
 
 
+@app.get("/hud")
+def hud_page():
+    return send_from_directory(HUD_DIR, "index.html")
+
+
+@app.get("/hud/static/<path:filename>")
+def hud_static(filename):
+    return send_from_directory(HUD_DIR, filename)
+
+
+@app.get("/hud/stats")
+def hud_stats_route():
+    return jsonify(hud_stats.get_hud_stats())
+
+
+@app.get("/hud/display_image")
+def hud_display_image():
+    with state_lock:
+        clear_expired_image_locked()
+        path = robot_state["image_path"]
+
+    if not path or not os.path.exists(path):
+        return jsonify({
+            "ok": False,
+            "error": "No image is currently displayed"
+        }), 404
+
+    return send_file(path)
+
+
 @app.get("/state")
 def get_state():
     with state_lock:
@@ -113,6 +150,31 @@ def set_face():
         "ok": True,
         "expression": expression
     })
+
+
+@app.post("/qa_log")
+def add_qa_log():
+    data = request.get_json(silent=True) or {}
+    question = str(data.get("question", "")).strip()
+    answer = str(data.get("answer", "")).strip()
+
+    if not question or not answer:
+        return jsonify({
+            "ok": False,
+            "error": "question and answer are required"
+        }), 400
+
+    entry = {
+        "question": question,
+        "answer": answer,
+        "timestamp": time.time()
+    }
+
+    with state_lock:
+        robot_state["qa_log"].append(entry)
+        robot_state["qa_log"] = robot_state["qa_log"][-QA_LOG_MAX_ENTRIES:]
+
+    return jsonify({"ok": True, "entry": entry})
 
 
 @app.post("/show_image")
