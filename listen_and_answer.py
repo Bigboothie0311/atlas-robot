@@ -552,7 +552,7 @@ def run_image_search_command(query):
         try:
             response = requests.post(
                 f"{HUB}/show_image",
-                json={"url": url, "caption": query, "duration": 15},
+                json={"url": url, "caption": query, "duration": 10},
                 timeout=15
             )
         except requests.RequestException as error:
@@ -566,6 +566,87 @@ def run_image_search_command(query):
             return
 
     answer = f"I could not find a picture of {query}."
+    log_qa(query, answer)
+    speak(answer)
+
+
+GALLERY_SEARCH_PREFIXES = [
+    "show me more pictures of",
+    "show me more photos of",
+    "show me more images of",
+    "show me a gallery of",
+    "show me multiple pictures of",
+    "show me multiple photos of",
+    "search for more pictures of",
+    "find more pictures of",
+    "gallery of",
+]
+
+
+def parse_gallery_search_query(text):
+    """Returns the search subject if text is a gallery/multi-image
+    request, otherwise None."""
+    normalized = text.lower().strip()
+
+    for punctuation in [",", ".", "?", "!", ";", ":"]:
+        normalized = normalized.replace(punctuation, " ")
+
+    normalized = " ".join(normalized.split())
+
+    if not normalized:
+        return None
+
+    for prefix in sorted(GALLERY_SEARCH_PREFIXES, key=len, reverse=True):
+        if normalized == prefix:
+            return None
+
+        if normalized.startswith(prefix + " "):
+            subject = normalized[len(prefix):].strip()
+
+            for filler in IMAGE_SEARCH_FILLER_WORDS:
+                if subject.startswith(filler):
+                    subject = subject[len(filler):].strip()
+
+            return subject or None
+
+    return None
+
+
+def run_gallery_search_command(query):
+    print("Running gallery search for:", query, flush=True)
+    set_face("thinking")
+
+    results = web_search.search_images(query, max_results=6)
+    urls = [result.get("image_url") or result.get("thumbnail_url") for result in results]
+    urls = [url for url in urls if url]
+
+    if not urls:
+        answer = f"I could not find any pictures of {query}."
+        log_qa(query, answer)
+        speak(answer)
+        return
+
+    try:
+        response = requests.post(
+            f"{HUB}/show_images",
+            json={"urls": urls, "caption": query, "duration": 15},
+            timeout=30
+        )
+    except requests.RequestException as error:
+        print("show_images request failed:", error, flush=True)
+        answer = f"I could not find any pictures of {query}."
+        log_qa(query, answer)
+        speak(answer)
+        return
+
+    if response.status_code == 200 and response.json().get("ok"):
+        count = response.json().get("count", 0)
+        answer = f"Here are {count} pictures of {query}."
+        log_qa(query, answer)
+        speak(answer)
+        return
+
+    answer = f"I could not find any pictures of {query}."
     log_qa(query, answer)
     speak(answer)
 
@@ -841,6 +922,12 @@ def handle_turn(model):
 
         if is_vision_command(text):
             run_vision_command()
+            return
+
+        gallery_query = parse_gallery_search_query(text)
+
+        if gallery_query is not None:
+            run_gallery_search_command(gallery_query)
             return
 
         image_query = parse_image_search_query(text)
