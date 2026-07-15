@@ -22,6 +22,7 @@ archive/
 
 # AI planning scratch docs, not part of the project itself
 docs/superpowers/
+.superpowers/
 
 # Editor/OS cruft
 .DS_Store
