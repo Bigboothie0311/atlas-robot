@@ -1,0 +1,28 @@
+# Runs the wake-word listener (wake_listener.py) on boot. Depends on
+# atlas-robot.service being up first, since it posts face/speech state
+# to that hub.
+#
+# Install:
+#   sudo cp systemd/atlas-wake.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now atlas-wake.service
+#
+# Replace YOUR_USERNAME with your actual Linux username first.
+
+[Unit]
+Description=A.T.L.A.S. Wake Word Listener
+After=network-online.target sound.target atlas-robot.service
+Wants=network-online.target
+Requires=atlas-robot.service
+
+[Service]
+Type=simple
+User=YOUR_USERNAME
+WorkingDirectory=/home/YOUR_USERNAME/atlas-robot
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/YOUR_USERNAME/atlas-robot/venv/bin/python /home/YOUR_USERNAME/atlas-robot/wake_listener.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

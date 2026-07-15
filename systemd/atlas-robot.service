@@ -1,0 +1,26 @@
+# Runs the face/speech Flask hub (robot_hub.py) on boot.
+#
+# Install:
+#   sudo cp systemd/atlas-robot.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now atlas-robot.service
+#
+# Before installing, replace YOUR_USERNAME below and in
+# atlas-wake.service with your actual Linux username, and adjust the
+# path if you cloned this repo somewhere other than your home directory.
+
+[Unit]
+Description=A.T.L.A.S. Robot Hub
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_USERNAME
+WorkingDirectory=/home/YOUR_USERNAME/atlas-robot
+ExecStart=/home/YOUR_USERNAME/atlas-robot/venv/bin/python /home/YOUR_USERNAME/atlas-robot/robot_hub.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

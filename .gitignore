@@ -1,0 +1,30 @@
+# Secrets — never commit real keys or usage data
+config/openai.env
+config/robot.env
+data/
+
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# Large model/voice binaries — downloaded separately, see README
+models/
+voices/*.onnx
+voices/*.onnx.json
+
+# Personal iteration history / editor backups — not useful to other builders
+archive/
+*.backup*
+*.bak
+*.WORKING_BACKUP.py
+*.before-*.py
+
+# AI planning scratch docs, not part of the project itself
+docs/superpowers/
+
+# Editor/OS cruft
+.DS_Store
+
+# Claude Code local settings — not part of the project
+.claude/
