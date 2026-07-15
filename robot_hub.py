@@ -167,7 +167,9 @@ def get_state():
     with state_lock:
         clear_expired_image_locked()
         clear_expired_gallery_locked()
-        return jsonify(robot_state.copy())
+        state = robot_state.copy()
+        state["gallery_until"] = gallery_until
+        return jsonify(state)
 
 
 @app.post("/face")

@@ -103,7 +103,7 @@ function applyGallery(state) {
   if (paths.length > 0) {
     overlay.classList.add("visible");
 
-    const key = `${paths.join(",")}|${state.gallery_caption || ""}`;
+    const key = `${paths.join(",")}|${state.gallery_caption || ""}|${state.gallery_until || ""}`;
     if (key === lastGalleryKey) {
       return;
     }
