@@ -7,6 +7,7 @@ numpy==2.5.1
 ddgs==9.14.4
 pygame==2.6.1
 pygltflib==1.16.5
+psutil==7.2.2
 
 # picamera2 is Raspberry Pi OS's camera stack. It ships as a system package
 # tied to libcamera and is not reliably installable from PyPI alone — see
