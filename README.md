@@ -126,10 +126,13 @@ wiring needed.
 ## Repo layout
 
 ```
-robot_hub.py       Flask hub: face state + Piper text-to-speech
+robot_hub.py       Flask hub: assistant state, Piper text-to-speech, HUD routes
+hud_stats.py        Live weather/CPU/disk/network/uptime data for the HUD
+hud/                J.A.R.V.I.S. HUD frontend (served by robot_hub.py, shown via Chromium kiosk)
 wake_listener.py   Always-on wake-word listener
 listen_and_answer.py  Records/transcribes a question, calls OpenAI, speaks the answer
 ai_tools.py        Tool functions the model can call (weather, web search)
+web_search.py       Text/image web search (DuckDuckGo, no API key)
 vision_test.py     Camera capture + image description
 config/            Env-style config files (see setup below)
 systemd/           Unit file templates for running on boot
@@ -141,7 +144,7 @@ systemd/           Unit file templates for running on boot
 
 ```bash
 sudo apt update
-sudo apt install -y python3-venv python3-pip alsa-utils python3-picamera2 --no-install-recommends
+sudo apt install -y python3-venv python3-pip alsa-utils python3-picamera2 chromium --no-install-recommends
 ```
 
 `picamera2` is tightly coupled to Raspberry Pi OS's `libcamera` stack and
@@ -251,17 +254,27 @@ Say "hey atlas", wait for the listening cue, then ask a question.
 
 ### 8. Run on boot (optional)
 
-Unit file templates are in `systemd/`. Replace `YOUR_USERNAME` in both files
-with your Linux username first, then:
+Unit file templates are in `systemd/`. Replace `YOUR_USERNAME` in all three
+files with your Linux username first, then:
 
 ```bash
-sudo cp systemd/atlas-robot.service systemd/atlas-wake.service /etc/systemd/system/
+sudo cp systemd/atlas-robot.service systemd/atlas-wake.service systemd/atlas-hud.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now atlas-robot.service
 sudo systemctl enable --now atlas-wake.service
+sudo systemctl enable --now atlas-hud.service
 ```
 
-Logs: `journalctl -u atlas-robot -f` / `journalctl -u atlas-wake -f`.
+`atlas-hud.service` runs the HUD in Chromium under `cage`, a minimal Wayland
+kiosk compositor. Install both and enable `seatd` first, so `cage` can get
+DRM/VT permission to draw fullscreen:
+
+```bash
+sudo apt install -y cage seatd
+sudo systemctl enable --now seatd
+```
+
+Logs: `journalctl -u atlas-robot -f` / `journalctl -u atlas-wake -f` / `journalctl -u atlas-hud -f`.
 
 ## Tuning the wake word
 

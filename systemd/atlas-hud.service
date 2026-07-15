@@ -1,0 +1,29 @@
+# Runs the J.A.R.V.I.S. HUD (Chromium kiosk under cage) on boot.
+#
+# Install:
+#   sudo cp systemd/atlas-hud.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now atlas-hud.service
+#
+# Before installing, replace YOUR_USERNAME below with your actual Linux
+# username (matching atlas-robot.service and atlas-wake.service).
+#
+# Requires `cage` and `seatd` (see README.md) and the `chromium` package.
+
+[Unit]
+Description=A.T.L.A.S. JARVIS HUD Kiosk
+After=network-online.target atlas-robot.service
+Wants=network-online.target
+Requires=atlas-robot.service
+
+[Service]
+Type=simple
+User=YOUR_USERNAME
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+ExecStartPre=/bin/sleep 2
+ExecStart=/usr/bin/cage -- /usr/bin/chromium --kiosk --no-first-run --disable-restore-session-state --ozone-platform=wayland --start-fullscreen http://127.0.0.1:5051/hud
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

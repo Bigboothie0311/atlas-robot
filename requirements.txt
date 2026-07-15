@@ -5,18 +5,8 @@ openai==2.45.0
 piper-tts==1.4.2
 numpy==2.5.1
 ddgs==9.14.4
-pygame==2.6.1
-pygltflib==1.16.5
 psutil==7.2.2
 
 # picamera2 is Raspberry Pi OS's camera stack. It ships as a system package
 # tied to libcamera and is not reliably installable from PyPI alone — see
 # README.md for the apt-based install command instead of `pip install`.
-
-# PyOpenGL: if this venv was created with --system-site-packages (needed
-# for picamera2), `pip install PyOpenGL` may silently resolve to an older
-# apt-provided copy at /usr/lib/python3/dist-packages that lacks working
-# OSMesa support. Force a venv-local copy with:
-#   pip install --ignore-installed PyOpenGL PyOpenGL_accelerate
-PyOpenGL==3.1.10
-PyOpenGL_accelerate==3.1.10
