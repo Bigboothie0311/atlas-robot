@@ -299,3 +299,34 @@ body.state-speaking #status-label  { color: var(--green); }
   max-height: 100%;
   object-fit: contain;
 }
+
+#gallery-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: #000;
+  align-items: center;
+  justify-content: center;
+  padding: 40px;
+}
+
+#gallery-overlay.visible {
+  display: flex;
+}
+
+#gallery-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  grid-template-rows: repeat(2, 1fr);
+  gap: 20px;
+  width: 100%;
+  height: 100%;
+}
+
+#gallery-grid img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border: 1px solid var(--cyan-dim);
+  border-radius: 6px;
+}

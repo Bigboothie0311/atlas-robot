@@ -94,6 +94,25 @@ function applyImage(state) {
   }
 }
 
+function applyGallery(state) {
+  const overlay = document.getElementById("gallery-overlay");
+  const grid = document.getElementById("gallery-grid");
+  const paths = state.gallery_image_paths || [];
+
+  if (paths.length > 0) {
+    grid.innerHTML = "";
+    for (let i = 0; i < paths.length; i++) {
+      const img = document.createElement("img");
+      img.src = `/hud/gallery_image/${i}?t=${Date.now()}`;
+      grid.appendChild(img);
+    }
+    overlay.classList.add("visible");
+  } else {
+    overlay.classList.remove("visible");
+    grid.innerHTML = "";
+  }
+}
+
 function applyQaLog(state) {
   const entries = state.qa_log || [];
   const container = document.getElementById("qa-log");
@@ -131,6 +150,7 @@ async function pollState() {
     const state = await response.json();
     applyState(state);
     applyImage(state);
+    applyGallery(state);
     applyQaLog(state);
   } catch (error) {
     console.error("state poll failed", error);
