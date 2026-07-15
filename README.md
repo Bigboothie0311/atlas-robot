@@ -3,6 +3,7 @@
 A.T.L.A.S. is a Raspberry Pi desk assistant that listens for a wake word,
 answers questions out loud using OpenAI, looks through a camera when asked,
 and tracks a simple "face expression" state you can render however you like.
+all work snd ideas are my Own vibe coded with claude.
 
 ## What it does
 
