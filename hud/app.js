@@ -1,6 +1,44 @@
 const STATE_POLL_MS = 1000;
 const STATS_POLL_MS = 5000;
 
+const COSMETIC_TERMINAL_LINES = [
+  "CALIBRATING NEURAL ARRAY... OK",
+  "SYNC UPLINK 4/4",
+  "BUFFER 0x7F2A ALIGNED",
+  "RUNNING DIAGNOSTIC SWEEP...",
+  "MEMORY LATTICE STABLE",
+  "DECRYPTING TELEMETRY STREAM",
+  "PHASE ARRAY LOCKED",
+  "QUANTUM CACHE WARM",
+  "SIGNAL INTEGRITY 99.7%",
+  "RECALIBRATING SENSOR ARRAY",
+  "HANDSHAKE COMPLETE 0xA3",
+  "OPTIMIZING PATHFINDING MATRIX",
+  "SUBROUTINE 12 NOMINAL",
+  "COOLANT FLOW NOMINAL",
+  "AUX CORE SPINNING UP",
+  "INDEXING KNOWLEDGE GRAPH",
+  "NETWORK MESH STABLE",
+  "ENCRYPTION KEYS ROTATED",
+];
+
+const COSMETIC_TERMINAL_MAX_LINES = 60;
+const COSMETIC_TERMINAL_INTERVAL_MS = 350;
+
+function addCosmeticTerminalLine() {
+  const container = document.getElementById("cosmetic-terminal-lines");
+  const line = document.createElement("div");
+  const phrase = COSMETIC_TERMINAL_LINES[Math.floor(Math.random() * COSMETIC_TERMINAL_LINES.length)];
+  line.textContent = `> ${phrase}`;
+  container.appendChild(line);
+
+  while (container.children.length > COSMETIC_TERMINAL_MAX_LINES) {
+    container.removeChild(container.firstChild);
+  }
+
+  container.scrollTop = container.scrollHeight;
+}
+
 let lastQaTimestamp = 0;
 
 function pad(value) {
@@ -140,3 +178,6 @@ setInterval(pollState, STATE_POLL_MS);
 
 pollStats();
 setInterval(pollStats, STATS_POLL_MS);
+
+addCosmeticTerminalLine();
+setInterval(addCosmeticTerminalLine, COSMETIC_TERMINAL_INTERVAL_MS);

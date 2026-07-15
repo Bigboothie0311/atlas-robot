@@ -68,6 +68,28 @@ html, body {
   margin-top: 2px;
 }
 
+#cosmetic-terminal {
+  grid-column: 1 / span 3;
+  grid-row: 4;
+  border: 1px solid var(--cyan-dim);
+  border-radius: 6px;
+  padding: 10px 22px;
+  background: linear-gradient(180deg, rgba(52, 226, 255, 0.04), rgba(52, 226, 255, 0.01));
+  height: 110px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+#cosmetic-terminal-lines {
+  flex: 1;
+  overflow-y: hidden;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--cyan);
+  opacity: 0.75;
+}
+
 .panel-cpu     { grid-column: 1; grid-row: 1; }
 .panel-disk    { grid-column: 1; grid-row: 2; }
 .panel-weather { grid-column: 3; grid-row: 1; }
