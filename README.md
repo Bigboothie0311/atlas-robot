@@ -37,16 +37,91 @@ no code was copied from another project.
   hub of your own. See [Optional: 3D printer integration](#optional-3d-printer-integration)
   below — you do not need this to use the rest of the project.
 
-## Hardware used in the reference build
+## Bill of materials
 
-- Raspberry Pi 5 (should work on any Pi capable of running Python 3.11+
-  and a camera; adjust audio device names for your hardware)
-- USB microphone (any class-compliant USB mic works — see
-  [Finding your audio device names](#finding-your-audio-device-names))
-- I2S amplifier/speaker (reference build uses a MAX98357A I2S DAC/amp
-  board); a USB speaker or HDMI audio also works with a device name change
-- Raspberry Pi Camera Module (OV5647/CSI, via `picamera2`)
-- A face display of your choice — not included, see above
+| Part | Notes |
+|---|---|
+| Raspberry Pi 5 (4GB or 8GB) | Reference build. A Pi 4 also works — see notes below. |
+| microSD card, 32GB+ (A2 rated recommended) | For Raspberry Pi OS |
+| USB-C power supply, 5V/5A (27W) | The **official Raspberry Pi 5 PSU** is strongly recommended — underpowered supplies cause random USB/camera glitches |
+| Raspberry Pi Camera Module (any CSI camera, e.g. OV5647 or the official Camera Module 3) | Connects to the Pi's CSI port with a ribbon cable |
+| USB microphone | Any class-compliant USB mic/USB sound-card-plus-mic combo works |
+| MAX98357A I2S mono amplifier breakout board | e.g. Adafruit #3006 or any generic MAX98357A board |
+| Small 4Ω or 8Ω speaker, 3W (matched to your amp board) | Solder or JST-connect to the amp board's speaker output |
+| Jumper wires (female-female, 4+) | For amp board ↔ Pi GPIO header |
+| Enclosure of your choice | Not covered here — any box/3D-printed case that fits a Pi, camera, mic, and speaker works. If you want a face expression display, you'll need to add your own small screen and write a renderer that polls `robot_hub.py`'s `/state` endpoint — that part isn't included in this repo. |
+
+A Pi 4 will run everything here, but you'll need `python3-picamera2` compiled
+for your OS release and slightly lower expectations for Vosk/Piper latency —
+the reference build uses a Pi 5.
+
+## Assembly
+
+### 1. Camera
+
+Connect the CSI ribbon cable to the Pi's camera port (blue side of the
+cable faces the Ethernet port on a Pi 5) and to the camera module's
+connector. Do this with the Pi powered off.
+
+### 2. MAX98357A amplifier → speaker
+
+Wire the speaker to the amp board's speaker output terminals (polarity
+doesn't matter for a simple 2-wire speaker). Then wire the amp board to the
+Pi's 40-pin GPIO header:
+
+| MAX98357A pin | Pi 40-pin header pin | Purpose |
+|---|---|---|
+| VIN | Pin 2 or 4 (5V) | Power |
+| GND | Pin 6 (or any GND pin) | Ground |
+| BCLK | Pin 12 (GPIO18) | I2S bit clock |
+| LRC | Pin 35 (GPIO19) | I2S word select |
+| DIN | Pin 40 (GPIO21) | I2S data |
+| GAIN | Leave unconnected | Unconnected = 9dB gain (a common default) |
+| SD | Leave unconnected | The config below uses "no shutdown pin" mode |
+
+Do this with the Pi powered off as well.
+
+### 3. Microphone
+
+Just plug the USB microphone into any USB port after first boot — no
+wiring needed.
+
+## Flash and configure Raspberry Pi OS
+
+1. Flash **Raspberry Pi OS (64-bit)** to the microSD card using
+   [Raspberry Pi Imager](https://www.raspberrypi.com/software/). In the
+   Imager's advanced options (gear icon / Ctrl+Shift+X) you can pre-set a
+   hostname, enable SSH, and set your Wi-Fi credentials so it boots headless.
+2. Boot the Pi, log in (via SSH or a monitor+keyboard), and update it:
+   ```bash
+   sudo apt update && sudo apt full-upgrade -y
+   ```
+3. Enable the camera and I2S audio. Edit the boot config:
+   ```bash
+   sudo nano /boot/firmware/config.txt
+   ```
+   Make sure these lines are present (camera is usually auto-detected
+   already; add the `dtoverlay` line for the amp board):
+   ```
+   camera_auto_detect=1
+   dtoverlay=max98357a,no-sdmode
+   ```
+4. Reboot: `sudo reboot`
+5. After reboot, confirm the camera is detected:
+   ```bash
+   libcamera-hello --list-cameras
+   ```
+   and confirm the amp shows up as a playback device:
+   ```bash
+   aplay -l
+   ```
+   You should see an entry like `MAX98357A`. Note its card number — you'll
+   need it for `robot_hub.py`'s speaker device string.
+6. Plug in the USB microphone and confirm it's detected:
+   ```bash
+   arecord -l
+   ```
+   Note its card name — you'll need it for `MIC_DEVICE` in the code.
 
 ## Repo layout
 
@@ -107,34 +182,62 @@ cd ..
 
 If you pick a different voice, update `PIPER_MODEL` in `robot_hub.py`.
 
-### 4. Configure your API key and name
+### 4. Get an OpenAI API key
+
+The voice Q&A and camera-description features call the OpenAI API, which is
+separate from a ChatGPT subscription and billed per request (this project's
+built-in budget cap, described above, keeps that predictable).
+
+1. Go to [platform.openai.com](https://platform.openai.com/) and sign up or
+   log in.
+2. Add a payment method: **Settings → Billing → Payment methods**, and add
+   at least a small starting credit. The API will not respond without
+   billing set up, even for very small requests.
+3. (Recommended) While you're in Billing, set a **usage limit** — a monthly
+   dollar cap after which OpenAI itself stops serving requests. This is a
+   second safety net on top of this project's own local budget tracker.
+4. Create a key: go to
+   [platform.openai.com/api-keys](https://platform.openai.com/api-keys),
+   click **Create new secret key**, name it (e.g. "atlas-robot"), and copy
+   it immediately — OpenAI only shows it once.
+5. Check which models your account can use and pick one that supports the
+   [Responses API](https://platform.openai.com/docs/api-reference/responses)
+   with vision input (needed for `vision_test.py`); a small/cheap model is
+   plenty for this use case. You'll set this as `MODEL_NAME` below.
+
+### 5. Configure your API key and name
 
 ```bash
 cp config/openai.env.example config/openai.env
 cp config/robot.env.example config/robot.env
 ```
 
-Edit `config/openai.env` and paste in your
-[OpenAI API key](https://platform.openai.com/api-keys). Edit
-`config/robot.env` and set `OWNER_NAME` to whatever you'd like the assistant
-to call you. Both files are gitignored — they'll never accidentally get
-committed.
-
-Also check `MODEL_NAME` near the top of `listen_and_answer.py` — set it to
-whatever OpenAI model you have access to and want to pay for.
-
-### 5. Finding your audio device names
-
-List your devices and update the constants at the top of each file:
-
-```bash
-arecord -l   # microphone -> MIC_DEVICE in wake_listener.py and listen_and_answer.py
-aplay -l     # speaker    -> the "-D" device in robot_hub.py's aplay call
+Edit `config/openai.env` and paste in the API key you just created:
+```
+OPENAI_API_KEY=sk-...your-key...
 ```
 
-Device strings look like `plughw:CARD=<name>,DEV=0`.
+Edit `config/robot.env` and set `OWNER_NAME` to whatever you'd like the
+assistant to call you. Both files are gitignored — they'll never
+accidentally get committed if you push your own changes back to a fork.
 
-### 6. Try it manually before installing services
+Then open `listen_and_answer.py` and set two things near the top to match
+what you found in step 4:
+- `MODEL_NAME` — the OpenAI model you picked
+- `MONTHLY_LIMIT_USD` — your own local monthly spending cap in dollars
+
+### 6. Set your audio device names in code
+
+You already found these card names in the "Flash and configure" section
+above. Update the code to match:
+
+- In `robot_hub.py`, the `aplay` call uses `-D plughw:0,0` — change the `0,0`
+  to match your MAX98357A card/device number from `aplay -l`.
+- In `wake_listener.py` and `listen_and_answer.py`, set `MIC_DEVICE` to your
+  USB microphone's card name from `arecord -l`, in the form
+  `plughw:CARD=<name>,DEV=0`.
+
+### 7. Try it manually before installing services
 
 ```bash
 # Terminal 1
@@ -146,7 +249,7 @@ python wake_listener.py
 
 Say "hey atlas", wait for the listening cue, then ask a question.
 
-### 7. Run on boot (optional)
+### 8. Run on boot (optional)
 
 Unit file templates are in `systemd/`. Replace `YOUR_USERNAME` in both files
 with your Linux username first, then:
