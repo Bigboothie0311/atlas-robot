@@ -23,6 +23,10 @@ archive/
 # AI planning scratch docs, not part of the project itself
 docs/superpowers/
 
+# Blender debug renders — regenerate with assets/build_head.py; only the
+# final assets/head.glb is committed
+assets/build/
+
 # Editor/OS cruft
 .DS_Store
 

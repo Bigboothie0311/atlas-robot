@@ -10,6 +10,7 @@ from openai import OpenAI
 from vosk import Model, KaldiRecognizer
 
 import ai_tools
+import web_search
 
 
 HUB = "http://127.0.0.1:5051"
@@ -396,6 +397,100 @@ def run_vision_command():
     )
 
 
+IMAGE_SEARCH_PREFIXES = [
+    "show me a picture of",
+    "show me a photo of",
+    "show me an image of",
+    "show me pictures of",
+    "show me photos of",
+    "show me images of",
+    "search for a picture of",
+    "search for a photo of",
+    "search for an image of",
+    "search the web for a picture of",
+    "find a picture of",
+    "find a photo of",
+    "find an image of",
+    "look up a picture of",
+    "look up an image of",
+    "picture of",
+    "photo of",
+    "image of",
+    "pictures of",
+    "photos of",
+    "images of",
+]
+
+IMAGE_SEARCH_FILLER_WORDS = ("a ", "an ", "the ", "of ")
+
+
+def parse_image_search_query(text):
+    """Returns the search subject if text is an image-search request,
+    otherwise None."""
+    normalized = text.lower().strip()
+
+    for punctuation in [",", ".", "?", "!", ";", ":"]:
+        normalized = normalized.replace(punctuation, " ")
+
+    normalized = " ".join(normalized.split())
+
+    if not normalized:
+        return None
+
+    if normalized.startswith("what does ") and normalized.endswith(" look like"):
+        subject = normalized[len("what does "):-len(" look like")].strip()
+
+        for filler in IMAGE_SEARCH_FILLER_WORDS:
+            if subject.startswith(filler):
+                subject = subject[len(filler):].strip()
+
+        return subject or None
+
+    for prefix in sorted(IMAGE_SEARCH_PREFIXES, key=len, reverse=True):
+        if normalized == prefix:
+            return None
+
+        if normalized.startswith(prefix + " "):
+            subject = normalized[len(prefix):].strip()
+
+            for filler in IMAGE_SEARCH_FILLER_WORDS:
+                if subject.startswith(filler):
+                    subject = subject[len(filler):].strip()
+
+            return subject or None
+
+    return None
+
+
+def run_image_search_command(query):
+    print("Running image search for:", query, flush=True)
+    set_face("thinking")
+
+    results = web_search.search_images(query, max_results=6)
+
+    for result in results:
+        url = result.get("image_url") or result.get("thumbnail_url")
+
+        if not url:
+            continue
+
+        try:
+            response = requests.post(
+                f"{HUB}/show_image",
+                json={"url": url, "caption": query, "duration": 15},
+                timeout=15
+            )
+        except requests.RequestException as error:
+            print("show_image request failed:", error, flush=True)
+            continue
+
+        if response.status_code == 200 and response.json().get("ok"):
+            speak(f"Here's a picture of {query}.")
+            return
+
+    speak(f"I could not find a picture of {query}.")
+
+
 def handle_local_command(text, model):
     normalized = text.lower().strip()
 
@@ -666,6 +761,12 @@ def handle_turn(model):
 
         if is_vision_command(text):
             run_vision_command()
+            return
+
+        image_query = parse_image_search_query(text)
+
+        if image_query is not None:
+            run_image_search_command(image_query)
             return
 
         local_answer = handle_local_command(text, model)
