@@ -49,16 +49,36 @@ IMAGE_EXTENSIONS = {
 }
 
 
-def clear_expired_image_locked():
-    """Caller must hold state_lock."""
+def clear_image_state_locked():
+    """Caller must hold state_lock. Unconditionally clears any active single
+    image, deleting its file if present. Used both for expiry and to keep
+    the single-image and gallery overlays mutually exclusive."""
     global image_until
 
-    if robot_state["image_path"] is not None and time.time() >= image_until:
-        old_path = robot_state["image_path"]
-        robot_state["image_path"] = None
-        robot_state["image_caption"] = None
-        image_until = 0.0
+    old_path = robot_state["image_path"]
+    robot_state["image_path"] = None
+    robot_state["image_caption"] = None
+    image_until = 0.0
 
+    if old_path and os.path.exists(old_path):
+        try:
+            os.remove(old_path)
+        except OSError:
+            pass
+
+
+def clear_gallery_state_locked():
+    """Caller must hold state_lock. Unconditionally clears any active
+    gallery, deleting its files if present. Used both for expiry and to
+    keep the single-image and gallery overlays mutually exclusive."""
+    global gallery_until
+
+    old_paths = robot_state["gallery_image_paths"]
+    robot_state["gallery_image_paths"] = []
+    robot_state["gallery_caption"] = None
+    gallery_until = 0.0
+
+    for old_path in old_paths:
         if old_path and os.path.exists(old_path):
             try:
                 os.remove(old_path)
@@ -66,22 +86,16 @@ def clear_expired_image_locked():
                 pass
 
 
+def clear_expired_image_locked():
+    """Caller must hold state_lock."""
+    if robot_state["image_path"] is not None and time.time() >= image_until:
+        clear_image_state_locked()
+
+
 def clear_expired_gallery_locked():
     """Caller must hold state_lock."""
-    global gallery_until
-
     if robot_state["gallery_image_paths"] and time.time() >= gallery_until:
-        old_paths = robot_state["gallery_image_paths"]
-        robot_state["gallery_image_paths"] = []
-        robot_state["gallery_caption"] = None
-        gallery_until = 0.0
-
-        for old_path in old_paths:
-            if old_path and os.path.exists(old_path):
-                try:
-                    os.remove(old_path)
-                except OSError:
-                    pass
+        clear_gallery_state_locked()
 
 
 VALID_EXPRESSIONS = {
@@ -274,6 +288,8 @@ def show_image():
         }), 502
 
     with state_lock:
+        clear_gallery_state_locked()
+
         old_path = robot_state["image_path"]
         robot_state["image_path"] = new_path
         robot_state["image_caption"] = caption
@@ -333,6 +349,8 @@ def show_images():
         }), 502
 
     with state_lock:
+        clear_image_state_locked()
+
         old_paths = robot_state["gallery_image_paths"]
         robot_state["gallery_image_paths"] = new_paths
         robot_state["gallery_caption"] = caption
