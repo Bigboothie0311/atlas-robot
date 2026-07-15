@@ -40,6 +40,7 @@ function addCosmeticTerminalLine() {
 }
 
 let lastQaTimestamp = 0;
+let lastGalleryKey = null;
 
 function pad(value) {
   return String(value).padStart(2, "0");
@@ -100,14 +101,22 @@ function applyGallery(state) {
   const paths = state.gallery_image_paths || [];
 
   if (paths.length > 0) {
+    overlay.classList.add("visible");
+
+    const key = `${paths.join(",")}|${state.gallery_caption || ""}`;
+    if (key === lastGalleryKey) {
+      return;
+    }
+    lastGalleryKey = key;
+
     grid.innerHTML = "";
     for (let i = 0; i < paths.length; i++) {
       const img = document.createElement("img");
       img.src = `/hud/gallery_image/${i}?t=${Date.now()}`;
       grid.appendChild(img);
     }
-    overlay.classList.add("visible");
   } else {
+    lastGalleryKey = null;
     overlay.classList.remove("visible");
     grid.innerHTML = "";
   }
