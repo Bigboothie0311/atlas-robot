@@ -149,8 +149,11 @@ def log_qa(question, answer):
 
 RECORD_MAX_SECONDS = 8
 # Once real speech has been heard, stop after this much trailing silence
-# instead of always recording the full RECORD_MAX_SECONDS.
-RECORD_SILENCE_TIMEOUT = 1.2
+# instead of always recording the full RECORD_MAX_SECONDS. 1.2s cut users
+# off mid-sentence during a normal thinking pause (confirmed via journalctl:
+# "what AI model are you currently using and" got cut off there) — 2.0s
+# gives more room for a natural pause without waiting for the full 8s cap.
+RECORD_SILENCE_TIMEOUT = 2.0
 # Matches wake_listener.py's MIN_UTTERANCE_RMS — same mic, same room, already
 # tuned to separate real speech from ambient noise on this hardware.
 RECORD_MIN_SPEECH_RMS = 220
@@ -815,12 +818,12 @@ def ask_atlas(question):
         f"You are A.T.L.A.S., {owner_name}'s helpful desk robot assistant. "
         f"Today's date is {today}. "
         "Answer naturally in plain spoken English. "
-        "Keep ordinary answers to one or two concise sentences because "
-        "they will be spoken aloud. Do not use markdown, headings, "
-        "bullets, citations, or special formatting. Be friendly, useful, "
-        "direct, and honest when uncertain. Use your tools when a "
-        "question needs live or current information, such as weather "
-        "or recent events."
+        "Give a real, informative answer — three to five sentences for "
+        "ordinary questions, since it will be spoken aloud rather than "
+        "read. Do not use markdown, headings, bullets, citations, or "
+        "special formatting. Be friendly, useful, direct, and honest "
+        "when uncertain. Use your tools when a question needs live or "
+        "current information, such as weather or recent events."
     )
 
     response = client.responses.create(
@@ -829,7 +832,7 @@ def ask_atlas(question):
         instructions=instructions,
         input=question,
         tools=ai_tools.TOOLS,
-        max_output_tokens=120
+        max_output_tokens=300
     )
 
     total_input_tokens = int(
@@ -862,7 +865,7 @@ def ask_atlas(question):
                 }
             ],
             tools=ai_tools.TOOLS,
-            max_output_tokens=120
+            max_output_tokens=300
         )
 
         total_input_tokens += int(

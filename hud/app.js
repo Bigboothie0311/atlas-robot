@@ -1,6 +1,25 @@
 const STATE_POLL_MS = 1000;
 const STATS_POLL_MS = 5000;
 
+// The dashboard is built at a fixed 1920x1080 design size (see #dashboard
+// in style.css). Real screens vary a lot — this kiosk has run on a
+// 1920x1080 dev monitor and an 800x480 panel so far — so scale the whole
+// page down to fit whatever the actual screen is, instead of maintaining
+// a separate layout per resolution.
+const DESIGN_WIDTH = 1920;
+const DESIGN_HEIGHT = 1080;
+
+function applyViewportScale() {
+  const scale = Math.min(
+    window.innerWidth / DESIGN_WIDTH,
+    window.innerHeight / DESIGN_HEIGHT
+  );
+  document.documentElement.style.zoom = scale;
+}
+
+applyViewportScale();
+window.addEventListener("resize", applyViewportScale);
+
 const COSMETIC_TERMINAL_LINES = [
   "CALIBRATING NEURAL ARRAY... OK",
   "SYNC UPLINK 4/4",

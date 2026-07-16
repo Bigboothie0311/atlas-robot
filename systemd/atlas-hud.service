@@ -20,10 +20,19 @@ Requires=atlas-robot.service
 Type=simple
 User=YOUR_USERNAME
 Environment=XDG_RUNTIME_DIR=/run/user/1000
-ExecStartPre=/bin/sleep 2
+# A cold-boot HDMI display can take several seconds to complete its
+# handshake after power-on. A blind fixed sleep here isn't long enough on
+# some screens — cage fails immediately ("Unable to open Wayland socket")
+# if it starts before the DRM connector reports "connected", and it then
+# takes several retry cycles (each gated by RestartSec) to eventually
+# succeed once the display is actually ready. Poll the connector status
+# directly instead of guessing a sleep duration — up to 30s, falling
+# through either way so a genuinely stuck/disconnected display doesn't
+# block startup forever (Restart=on-failure below is still the safety net).
+ExecStartPre=/bin/bash -c 'for i in $(seq 1 30); do grep -q ^connected /sys/class/drm/card*-HDMI-*/status 2>/dev/null && break; sleep 1; done'
 ExecStart=/usr/bin/cage -- /usr/bin/chromium --kiosk --no-first-run --disable-restore-session-state --ozone-platform=wayland --start-fullscreen http://127.0.0.1:5051/hud
 Restart=on-failure
-RestartSec=5
+RestartSec=2
 
 [Install]
 WantedBy=multi-user.target
