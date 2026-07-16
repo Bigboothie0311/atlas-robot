@@ -138,14 +138,22 @@ PIPER_DATA_DIR = "/home/atlas/atlas-robot/voices"
 PIPER_VOLUME = 0.75
 PIPER_MODEL_PATH = f"{PIPER_DATA_DIR}/{PIPER_MODEL}.onnx"
 
-# HDMI0 (vc4hdmi0, card 2) — routes speech through the connected screen's
-# speakers instead of the GPIO/I2S MAX98357A amp (card 0). Check `aplay -l`
-# if the card number ever shifts (e.g. after a reboot or hardware change).
-AUDIO_DEVICE = "plughw:2,0"
+# HDMI1 (vc4hdmi1, card 3) — routes speech through the connected screen's
+# speakers instead of the GPIO/I2S MAX98357A amp (card 0). Switched from
+# card 2 (vc4hdmi0) on 2026-07-16 after the HDMI cable moved to the other
+# port (confirmed via /sys/class/drm/card1-HDMI-A-*/status — A-1 read
+# "disconnected", A-2 read "connected"). Check `aplay -l` if the card
+# number ever shifts again (e.g. after a reboot or hardware change).
+AUDIO_DEVICE = "plughw:3,0"
 
 piper_lock = threading.Lock()
 playback_lock = threading.Lock()
 _current_playback_process = None
+# aplay exits with code 1 both for a genuine device error and for being
+# killed via /interrupt (confirmed empirically — SIGTERM doesn't produce a
+# distinguishable negative returncode, aplay catches it and exits 1 itself).
+# This flag is the only reliable way to tell the two apart.
+_playback_was_interrupted = False
 
 try:
     piper_voice = PiperVoice.load(PIPER_MODEL_PATH)
@@ -530,13 +538,16 @@ def _speak_text(text):
     same state/expression handling and the same piper_lock. Playback can be
     cut short by POST /interrupt (e.g. a barge-in wake word) — that's a
     normal early return, not a failure."""
-    global _current_playback_process
+    global _current_playback_process, _playback_was_interrupted
 
     if piper_voice is None:
         raise RuntimeError("Piper voice is not loaded")
 
     wav_path = None
     previous_expression = "happy"
+
+    with playback_lock:
+        _playback_was_interrupted = False
 
     try:
         with state_lock:
@@ -576,6 +587,24 @@ def _speak_text(text):
 
             with playback_lock:
                 _current_playback_process = None
+                was_interrupted = _playback_was_interrupted
+
+            # aplay exits with the same code 1 whether it was killed via
+            # /interrupt (an intentional barge-in) or genuinely failed to
+            # open the device — the exit code alone can't tell them apart,
+            # so the explicit flag set by /interrupt is what decides
+            # whether a nonzero exit here is expected or a real failure
+            # that needs to surface instead of a silent "ok".
+            if (
+                process.returncode is not None
+                and process.returncode != 0
+                and not was_interrupted
+            ):
+                raise RuntimeError(
+                    f"aplay exited with code {process.returncode} — "
+                    f"check that AUDIO_DEVICE ({AUDIO_DEVICE}) is still "
+                    "valid with 'aplay -l'"
+                )
     finally:
         with state_lock:
             robot_state["speaking"] = False
@@ -587,11 +616,16 @@ def _speak_text(text):
 
 @app.post("/interrupt")
 def interrupt():
+    global _playback_was_interrupted
+
     with playback_lock:
         process = _current_playback_process
 
     if process is None or process.poll() is not None:
         return jsonify({"ok": True, "interrupted": False})
+
+    with playback_lock:
+        _playback_was_interrupted = True
 
     process.terminate()
 
