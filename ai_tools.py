@@ -28,27 +28,44 @@ WEATHER_CODE_DESCRIPTIONS = {
     99: "thunderstorms with heavy hail",
 }
 
+# Matches hud_stats.py's HOME_LATITUDE/LONGITUDE — the robot's own
+# physical location, used as the default so the model never has to ask the
+# user where they are just to answer "what's the weather".
+HOME_LATITUDE = 0.0
+HOME_LONGITUDE = -0.0
+HOME_LOCATION_NAME = "home"
+
 TOOLS = [
     {
         "type": "function",
         "name": "get_weather",
         "description": (
-            "Get the current weather conditions and temperature for a "
-            "specific city or location."
+            "Get the weather forecast for today or tomorrow, for a "
+            "specific city or the user's home location."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "location": {
-                    "type": "string",
+                    "type": ["string", "null"],
                     "description": (
                         "City name, optionally with state or country for "
                         "disambiguation, e.g. 'Denver, Colorado' or "
-                        "'Paris, France'."
+                        "'Paris, France'. Omit (pass null) to use the "
+                        "user's home location — always do this unless the "
+                        "user names a different place."
                     ),
-                }
+                },
+                "day": {
+                    "type": ["string", "null"],
+                    "enum": ["today", "tomorrow", None],
+                    "description": (
+                        "Which day's forecast to get. Defaults to today "
+                        "if omitted."
+                    ),
+                },
             },
-            "required": ["location"],
+            "required": ["location", "day"],
             "additionalProperties": False,
         },
         "strict": True,
@@ -74,35 +91,48 @@ def geocode(location):
     return geo_response.json().get("results") or []
 
 
-def get_weather(location):
-    # Open-Meteo's geocoding search does not handle "City, US-State"
-    # (e.g. "Denver, Colorado" returns nothing, though "Denver" alone and
-    # "Paris, France" both work). Fall back to the text before the first
-    # comma when the full string comes up empty.
-    results = geocode(location)
+def get_weather(location, day):
+    day = (day or "today").strip().lower()
 
-    if results is None:
-        return "I could not check the weather right now."
-
-    if not results and "," in location:
-        results = geocode(location.split(",", 1)[0].strip())
+    if location:
+        # Open-Meteo's geocoding search does not handle "City, US-State"
+        # (e.g. "Denver, Colorado" returns nothing, though "Denver" alone
+        # and "Paris, France" both work). Fall back to the text before the
+        # first comma when the full string comes up empty.
+        results = geocode(location)
 
         if results is None:
             return "I could not check the weather right now."
 
-    if not results:
-        return f"I could not find a location called {location}."
+        if not results and "," in location:
+            results = geocode(location.split(",", 1)[0].strip())
 
-    place = results[0]
+            if results is None:
+                return "I could not check the weather right now."
+
+        if not results:
+            return f"I could not find a location called {location}."
+
+        place = results[0]
+        latitude, longitude = place["latitude"], place["longitude"]
+        place_name = place.get("name", location)
+    else:
+        latitude, longitude = HOME_LATITUDE, HOME_LONGITUDE
+        place_name = HOME_LOCATION_NAME
 
     try:
         forecast_response = requests.get(
             FORECAST_URL,
             params={
-                "latitude": place["latitude"],
-                "longitude": place["longitude"],
+                "latitude": latitude,
+                "longitude": longitude,
                 "current": "temperature_2m,weather_code",
+                "daily": (
+                    "weather_code,temperature_2m_max,temperature_2m_min,"
+                    "precipitation_probability_max"
+                ),
                 "temperature_unit": "fahrenheit",
+                "forecast_days": 2,
             },
             timeout=8,
         )
@@ -110,7 +140,33 @@ def get_weather(location):
     except requests.RequestException:
         return "I could not check the weather right now."
 
-    current = forecast_response.json().get("current", {})
+    payload = forecast_response.json()
+    location_phrase = "" if place_name == HOME_LOCATION_NAME else f" in {place_name}"
+
+    if day == "tomorrow":
+        daily = payload.get("daily", {})
+        codes = daily.get("weather_code") or []
+        highs = daily.get("temperature_2m_max") or []
+        lows = daily.get("temperature_2m_min") or []
+        precip = daily.get("precipitation_probability_max") or []
+
+        if len(codes) < 2 or len(highs) < 2 or len(lows) < 2:
+            return "I could not check tomorrow's weather right now."
+
+        condition = WEATHER_CODE_DESCRIPTIONS.get(codes[1], "unknown conditions")
+        rain_chance = precip[1] if len(precip) > 1 else None
+        rain_phrase = (
+            f" There's a {round(rain_chance)} percent chance of rain."
+            if rain_chance is not None else ""
+        )
+
+        return (
+            f"Tomorrow{location_phrase} looks {condition}, with a high of "
+            f"{round(highs[1])} and a low of {round(lows[1])} degrees "
+            f"Fahrenheit.{rain_phrase}"
+        )
+
+    current = payload.get("current", {})
     temperature = current.get("temperature_2m")
     code = current.get("weather_code")
 
@@ -118,16 +174,15 @@ def get_weather(location):
         return "I could not check the weather right now."
 
     condition = WEATHER_CODE_DESCRIPTIONS.get(code, "unknown conditions")
-    place_name = place.get("name", location)
 
     return (
         f"It is currently {round(temperature)} degrees Fahrenheit "
-        f"and {condition} in {place_name}."
+        f"and {condition}{location_phrase}."
     )
 
 
 def run_tool_call(name, arguments):
     if name == "get_weather":
-        return get_weather(arguments.get("location", ""))
+        return get_weather(arguments.get("location"), arguments.get("day"))
 
     return f"Unknown tool: {name}"

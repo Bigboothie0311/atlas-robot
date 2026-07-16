@@ -1052,6 +1052,24 @@ def ask_atlas(question):
     return answer
 
 
+# If Atlas asks a clarifying question, keep listening instead of going back
+# to idle and forcing the user to say the wake word again just to answer.
+# Capped so a model that keeps asking questions can't loop forever.
+MAX_FOLLOW_UP_ROUNDS = 3
+
+
+def _answer_and_speak(text, model):
+    """Runs the ask-AI-and-speak-it sequence for one question. Returns
+    (answer, interrupted) so callers can react to a barge-in."""
+    answer = ask_atlas(text)
+
+    print("A.T.L.A.S.:", answer)
+    log_qa(text, answer)
+    interrupted = speak_with_barge_in(answer, model)
+
+    return answer, interrupted
+
+
 def handle_turn(model):
     try:
         maybe_speak_greeting()
@@ -1114,16 +1132,37 @@ def handle_turn(model):
             speak(local_answer)
             return
 
-        answer = ask_atlas(text)
-
-        print("A.T.L.A.S.:", answer)
-        log_qa(text, answer)
-        interrupted = speak_with_barge_in(answer, model)
+        answer, interrupted = _answer_and_speak(text, model)
 
         if interrupted:
             print("Barge-in: cutting turn short to listen again.", flush=True)
             handle_turn(model)
             return
+
+        follow_ups_remaining = MAX_FOLLOW_UP_ROUNDS
+
+        while answer.strip().endswith("?") and follow_ups_remaining > 0:
+            follow_ups_remaining -= 1
+            print(
+                "Atlas asked a follow-up question — staying in listening mode.",
+                flush=True
+            )
+            set_face("listening")
+            record_audio()
+
+            set_face("thinking")
+            text = transcribe_audio(model)
+
+            if not text:
+                speak("I didn't catch that.")
+                break
+
+            answer, interrupted = _answer_and_speak(text, model)
+
+            if interrupted:
+                print("Barge-in: cutting turn short to listen again.", flush=True)
+                handle_turn(model)
+                return
 
     except BudgetExceeded as error:
         print("Budget protection:", error)
