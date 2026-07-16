@@ -65,6 +65,16 @@ function pad(value) {
   return String(value).padStart(2, "0");
 }
 
+// Matches robot_hub.py's QUIET_HOURS_START/END — same overnight window gets
+// a dimmer, calmer look here and a softer, shorter-spoken voice there.
+const QUIET_HOURS_START = 23;
+const QUIET_HOURS_END = 6;
+
+function isQuietHours(now) {
+  const hour = now.getHours();
+  return hour >= QUIET_HOURS_START || hour < QUIET_HOURS_END;
+}
+
 function updateClock() {
   const now = new Date();
   const hours = pad(now.getHours());
@@ -77,7 +87,11 @@ function updateClock() {
                    "August", "September", "October", "November", "December"];
   document.getElementById("date").textContent =
     `${days[now.getDay()]}, ${months[now.getMonth()]} ${now.getDate()}`;
+
+  document.body.classList.toggle("quiet-hours", isQuietHours(now));
 }
+
+const STATE_CLASSES = ["state-idle", "state-listening", "state-thinking", "state-speaking"];
 
 function applyState(state) {
   const expression = state.expression || "happy";
@@ -97,7 +111,10 @@ function applyState(state) {
     label = "THINKING";
   }
 
-  document.body.className = stateClass;
+  // Only touch the state-* classes here — updateClock owns quiet-hours, so
+  // this can't be a wholesale className overwrite anymore.
+  document.body.classList.remove(...STATE_CLASSES);
+  document.body.classList.add(stateClass);
   document.getElementById("status-label").textContent = label;
 }
 

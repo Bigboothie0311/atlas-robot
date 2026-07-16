@@ -1,15 +1,22 @@
-import array
 import json
-import math
 import subprocess
-import sys
 import time
 from pathlib import Path
 
 import requests
-from vosk import Model, KaldiRecognizer
+from vosk import Model
 
 import listen_and_answer
+from wake_detection import (
+    WAKE_PHRASE,
+    MIN_WORD_CONFIDENCE,
+    MIN_UTTERANCE_RMS,
+    MIN_PARTIAL_HITS,
+    AUDIO_CHUNK_BYTES,
+    pcm_rms,
+    stop_recorder,
+    create_recognizer,
+)
 
 
 HUB = "http://127.0.0.1:5051"
@@ -24,14 +31,7 @@ VISION_TRIGGER = Path("/tmp/atlas_robot_vision.trigger")
 # MIC_DEVICE = "plughw:CARD=camera,DEV=0"
 MIC_DEVICE = "plughw:CARD=Device,DEV=0"  # SuziePi USB mic
 
-WAKE_PHRASE = "hey atlas"
-MIN_WORD_CONFIDENCE = 0.82
-MIN_UTTERANCE_RMS = 220
-MIN_PARTIAL_HITS = 2
-
 SPEAKER_COOLDOWN_SECONDS = 1.5
-
-AUDIO_CHUNK_BYTES = 4000
 
 
 def set_face(expression):
@@ -62,48 +62,6 @@ def robot_is_speaking():
 
     except requests.RequestException:
         return False
-
-
-def pcm_rms(audio_data):
-    samples = array.array("h")
-    samples.frombytes(audio_data)
-
-    if sys.byteorder == "big":
-        samples.byteswap()
-
-    if not samples:
-        return 0
-
-    mean_square = sum(
-        sample * sample for sample in samples
-    ) / len(samples)
-
-    return int(math.sqrt(mean_square))
-
-
-def stop_recorder(process):
-    if process.poll() is None:
-        process.terminate()
-
-        try:
-            process.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
-
-    if process.stdout:
-        process.stdout.close()
-
-
-def create_recognizer(model):
-    recognizer = KaldiRecognizer(
-        model,
-        16000,
-        '["hey atlas", "[unk]"]'
-    )
-
-    recognizer.SetWords(True)
-    return recognizer
 
 
 def pop_trigger(trigger_path):

@@ -1,15 +1,40 @@
 from flask import Flask, request, jsonify, send_file, send_from_directory
+import hmac
 import subprocess
 import tempfile
 import threading
 import time
 import os
 import wave
+from pathlib import Path
 
 import requests
 from piper import PiperVoice, SynthesisConfig
 
 import hud_stats
+import memory_store
+import pc_stats
+
+ROBOT_ENV_PATH = Path("/home/atlas/atlas-robot/config/robot.env")
+
+
+def load_notify_token():
+    if not ROBOT_ENV_PATH.exists():
+        return None
+
+    for line in ROBOT_ENV_PATH.read_text().splitlines():
+        line = line.strip()
+
+        if line.startswith("NOTIFY_TOKEN="):
+            token = line.split("=", 1)[1].strip().strip('"').strip("'")
+
+            if token:
+                return token
+
+    return None
+
+
+NOTIFY_TOKEN = load_notify_token()
 
 app = Flask(__name__)
 
@@ -108,7 +133,7 @@ VALID_EXPRESSIONS = {
     "talking"
 }
 
-PIPER_MODEL = "en_US-ryan-medium"
+PIPER_MODEL = "en_US-joe-medium"
 PIPER_DATA_DIR = "/home/atlas/atlas-robot/voices"
 PIPER_VOLUME = 0.75
 PIPER_MODEL_PATH = f"{PIPER_DATA_DIR}/{PIPER_MODEL}.onnx"
@@ -119,6 +144,8 @@ PIPER_MODEL_PATH = f"{PIPER_DATA_DIR}/{PIPER_MODEL}.onnx"
 AUDIO_DEVICE = "plughw:2,0"
 
 piper_lock = threading.Lock()
+playback_lock = threading.Lock()
+_current_playback_process = None
 
 try:
     piper_voice = PiperVoice.load(PIPER_MODEL_PATH)
@@ -216,6 +243,97 @@ def add_qa_log():
         robot_state["qa_log"] = robot_state["qa_log"][-QA_LOG_MAX_ENTRIES:]
 
     return jsonify({"ok": True, "entry": entry})
+
+
+def _check_notify_token():
+    """Returns an error (jsonify(...), status) tuple if the request's token
+    is missing/invalid, otherwise None."""
+    if not NOTIFY_TOKEN:
+        return jsonify({
+            "ok": False,
+            "error": "Notifications are not configured on this device"
+        }), 503
+
+    provided_token = request.headers.get("X-Notify-Token", "")
+
+    if not hmac.compare_digest(provided_token, NOTIFY_TOKEN):
+        return jsonify({"ok": False, "error": "Invalid token"}), 401
+
+    return None
+
+
+def _append_qa_log(question, answer):
+    entry = {
+        "question": question,
+        "answer": answer,
+        "timestamp": time.time()
+    }
+
+    with state_lock:
+        robot_state["qa_log"].append(entry)
+        robot_state["qa_log"] = robot_state["qa_log"][-QA_LOG_MAX_ENTRIES:]
+
+    return entry
+
+
+@app.post("/notify")
+def notify():
+    auth_error = _check_notify_token()
+
+    if auth_error is not None:
+        return auth_error
+
+    data = request.get_json(silent=True) or {}
+    message = str(data.get("message", "")).strip()
+
+    if not message:
+        return jsonify({
+            "ok": False,
+            "error": "message is required"
+        }), 400
+
+    _append_qa_log("[notification]", message)
+
+    try:
+        _speak_text(message)
+    except Exception as error:
+        return jsonify({
+            "ok": False,
+            "error": f"Logged but could not speak it: {error}"
+        }), 500
+
+    return jsonify({"ok": True, "spoken": message})
+
+
+@app.post("/remember")
+def remember():
+    auth_error = _check_notify_token()
+
+    if auth_error is not None:
+        return auth_error
+
+    data = request.get_json(silent=True) or {}
+    note = str(data.get("message", "")).strip()
+
+    if not note:
+        return jsonify({
+            "ok": False,
+            "error": "message is required"
+        }), 400
+
+    memory_store.add_fact(note)
+    _append_qa_log("[note-to-self]", note)
+
+    try:
+        _speak_text(f"Got it, I'll remember: {note}")
+    except Exception as error:
+        return jsonify({
+            "ok": True,
+            "remembered": note,
+            "speak_error": str(error)
+        })
+
+    return jsonify({"ok": True, "remembered": note})
 
 
 def _download_image(url, path_without_extension):
@@ -406,22 +524,16 @@ def clear_image():
     return jsonify({"ok": True})
 
 
-@app.post("/speak")
-def speak():
-    data = request.get_json(silent=True) or {}
-    text = str(data.get("text", "")).strip()
-
-    if not text:
-        return jsonify({
-            "ok": False,
-            "error": "No text provided"
-        }), 400
+def _speak_text(text):
+    """Synthesizes and plays text aloud. Raises on failure. Shared by the
+    /speak route and the proactive watcher thread, so both go through the
+    same state/expression handling and the same piper_lock. Playback can be
+    cut short by POST /interrupt (e.g. a barge-in wake word) — that's a
+    normal early return, not a failure."""
+    global _current_playback_process
 
     if piper_voice is None:
-        return jsonify({
-            "ok": False,
-            "error": "Piper voice is not loaded"
-        }), 500
+        raise RuntimeError("Piper voice is not loaded")
 
     wav_path = None
     previous_expression = "happy"
@@ -439,22 +551,72 @@ def speak():
         ) as temp_file:
             wav_path = temp_file.name
 
+        # Softer overnight — matches the dimmer HUD look during the same
+        # window (see QUIET_HOURS_START/END below).
+        volume = PIPER_VOLUME * 0.7 if _in_quiet_hours() else PIPER_VOLUME
+
         with piper_lock:
             with wave.open(wav_path, "wb") as wav_file:
                 piper_voice.synthesize_wav(
                     text,
                     wav_file,
-                    syn_config=SynthesisConfig(volume=PIPER_VOLUME)
+                    syn_config=SynthesisConfig(volume=volume)
                 )
 
-            subprocess.run(
-                [
-                    "aplay",
-                    "-D", AUDIO_DEVICE,
-                    wav_path
-                ],
-                check=True
-            )
+            process = subprocess.Popen([
+                "aplay",
+                "-D", AUDIO_DEVICE,
+                wav_path
+            ])
+
+            with playback_lock:
+                _current_playback_process = process
+
+            process.wait()
+
+            with playback_lock:
+                _current_playback_process = None
+    finally:
+        with state_lock:
+            robot_state["speaking"] = False
+            robot_state["expression"] = previous_expression
+
+        if wav_path and os.path.exists(wav_path):
+            os.remove(wav_path)
+
+
+@app.post("/interrupt")
+def interrupt():
+    with playback_lock:
+        process = _current_playback_process
+
+    if process is None or process.poll() is not None:
+        return jsonify({"ok": True, "interrupted": False})
+
+    process.terminate()
+
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+    return jsonify({"ok": True, "interrupted": True})
+
+
+@app.post("/speak")
+def speak():
+    data = request.get_json(silent=True) or {}
+    text = str(data.get("text", "")).strip()
+
+    if not text:
+        return jsonify({
+            "ok": False,
+            "error": "No text provided"
+        }), 400
+
+    try:
+        _speak_text(text)
 
         return jsonify({
             "ok": True,
@@ -468,14 +630,111 @@ def speak():
             "error": str(error)
         }), 500
 
-    finally:
-        with state_lock:
-            robot_state["speaking"] = False
-            robot_state["expression"] = previous_expression
 
-        if wav_path and os.path.exists(wav_path):
-            os.remove(wav_path)
+# Proactive nudges: unprompted speech triggered by notable state, not by a
+# wake word. Runs on its own timer, separate from the request/response
+# routes above.
+PROACTIVE_POLL_SECONDS = 120
+PC_TEMP_ALERT_C = 85
+PC_TEMP_COOLDOWN_SECONDS = 30 * 60
+RAIN_ALERT_PERCENT = 50
+# Don't speak unprompted overnight — a temp alert at 3am would be worse than
+# the problem it's warning about.
+QUIET_HOURS_START = 23
+QUIET_HOURS_END = 6
+
+_proactive_state = {
+    "last_cpu_alert": 0.0,
+    "last_gpu_alert": 0.0,
+    "last_rain_alert_date": None,
+}
+
+
+def _in_quiet_hours():
+    hour = time.localtime().tm_hour
+    return hour >= QUIET_HOURS_START or hour < QUIET_HOURS_END
+
+
+def _log_proactive_qa(message):
+    entry = {
+        "question": "[proactive]",
+        "answer": message,
+        "timestamp": time.time()
+    }
+
+    with state_lock:
+        robot_state["qa_log"].append(entry)
+        robot_state["qa_log"] = robot_state["qa_log"][-QA_LOG_MAX_ENTRIES:]
+
+
+def _run_proactive_checks():
+    if _in_quiet_hours():
+        return
+
+    with state_lock:
+        if robot_state["speaking"]:
+            return
+
+    now = time.time()
+    pc = pc_stats.get_gaming_pc_stats()
+
+    if pc.get("online"):
+        cpu_temp = pc.get("cpu_temp_c")
+        gpu_temp = pc.get("gpu_temp_c")
+
+        if (
+            cpu_temp is not None and cpu_temp >= PC_TEMP_ALERT_C
+            and now - _proactive_state["last_cpu_alert"] >= PC_TEMP_COOLDOWN_SECONDS
+        ):
+            _proactive_state["last_cpu_alert"] = now
+            message = (
+                f"Heads up, your gaming PC's CPU is running at "
+                f"{cpu_temp:.0f} degrees Celsius."
+            )
+            _log_proactive_qa(message)
+            _speak_text(message)
+            return
+
+        if (
+            gpu_temp is not None and gpu_temp >= PC_TEMP_ALERT_C
+            and now - _proactive_state["last_gpu_alert"] >= PC_TEMP_COOLDOWN_SECONDS
+        ):
+            _proactive_state["last_gpu_alert"] = now
+            message = (
+                f"Heads up, your gaming PC's GPU is running at "
+                f"{gpu_temp:.0f} degrees Celsius."
+            )
+            _log_proactive_qa(message)
+            _speak_text(message)
+            return
+
+    weather = hud_stats.get_weather_stats()
+    precip = weather.get("precip_chance")
+    today = time.strftime("%Y-%m-%d")
+
+    if (
+        precip is not None and precip >= RAIN_ALERT_PERCENT
+        and _proactive_state["last_rain_alert_date"] != today
+    ):
+        _proactive_state["last_rain_alert_date"] = today
+        message = (
+            f"Just so you know, there's a {precip:.0f} percent "
+            "chance of rain today."
+        )
+        _log_proactive_qa(message)
+        _speak_text(message)
+
+
+def proactive_watcher_loop():
+    while True:
+        time.sleep(PROACTIVE_POLL_SECONDS)
+
+        try:
+            _run_proactive_checks()
+        except Exception as error:
+            print("Proactive watcher error:", type(error).__name__, error)
 
 
 if __name__ == "__main__":
+    threading.Thread(target=proactive_watcher_loop, daemon=True).start()
     app.run(host="0.0.0.0", port=5051, threaded=True)

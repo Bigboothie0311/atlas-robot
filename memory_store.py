@@ -1,0 +1,180 @@
+import json
+import time
+from pathlib import Path
+
+
+FACTS_PATH = Path("/home/atlas/atlas-robot/data/memory_facts.json")
+MAX_FACTS = 50
+
+LAST_INTERACTION_PATH = Path("/home/atlas/atlas-robot/data/last_interaction.json")
+
+# Session turns live in-memory only (wake_listener.py runs as one long-lived
+# process across wake-ups, so this survives between turns but resets on
+# service restart — that's the intended "session" scope).
+SESSION_TIMEOUT_SECONDS = 300
+MAX_SESSION_TURNS = 6
+
+_session_turns = []
+
+REMEMBER_PREFIXES = [
+    "remember that ",
+    "remember this ",
+    "please remember that ",
+    "please remember ",
+    "remember ",
+]
+
+FORGET_PHRASES = {
+    "forget everything",
+    "forget everything you know about me",
+    "clear your memory",
+    "forget what you know about me",
+}
+
+
+def record_turn(question, answer):
+    now = time.monotonic()
+    _session_turns.append({"question": question, "answer": answer, "time": now})
+
+    while len(_session_turns) > MAX_SESSION_TURNS:
+        _session_turns.pop(0)
+
+
+def get_recent_context():
+    """Returns recent in-session Q&A turns as a list of (question, answer)
+    tuples, pruning anything older than SESSION_TIMEOUT_SECONDS."""
+    now = time.monotonic()
+
+    while _session_turns and now - _session_turns[0]["time"] > SESSION_TIMEOUT_SECONDS:
+        _session_turns.pop(0)
+
+    return [(turn["question"], turn["answer"]) for turn in _session_turns]
+
+
+def load_facts():
+    if not FACTS_PATH.exists():
+        return []
+
+    try:
+        data = json.loads(FACTS_PATH.read_text())
+    except (json.JSONDecodeError, OSError):
+        return []
+
+    if not isinstance(data, list):
+        return []
+
+    return [fact for fact in data if isinstance(fact, dict) and fact.get("text")]
+
+
+def save_facts(facts):
+    FACTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    temporary_path = FACTS_PATH.with_suffix(".tmp")
+    temporary_path.write_text(json.dumps(facts, indent=2))
+    temporary_path.replace(FACTS_PATH)
+
+
+def add_fact(text):
+    text = text.strip()
+
+    if not text:
+        return
+
+    facts = load_facts()
+    facts.append({"text": text, "added": time.time()})
+    facts = facts[-MAX_FACTS:]
+    save_facts(facts)
+
+
+def clear_facts():
+    save_facts([])
+
+
+def get_facts_summary():
+    return [fact["text"] for fact in load_facts()]
+
+
+def parse_remember_command(text):
+    """Returns the fact to store if text is a 'remember that ...' style
+    request, otherwise None."""
+    normalized = text.lower().strip()
+
+    for punctuation in [",", ".", "?", "!", ";", ":"]:
+        normalized = normalized.replace(punctuation, " ")
+
+    normalized = " ".join(normalized.split())
+
+    if not normalized:
+        return None
+
+    for prefix in sorted(REMEMBER_PREFIXES, key=len, reverse=True):
+        if normalized.startswith(prefix):
+            fact = normalized[len(prefix):].strip()
+            return fact or None
+
+    return None
+
+
+def is_forget_command(text):
+    normalized = text.lower().strip()
+
+    for punctuation in [",", ".", "?", "!", ";", ":"]:
+        normalized = normalized.replace(punctuation, " ")
+
+    normalized = " ".join(normalized.split())
+
+    return normalized in FORGET_PHRASES
+
+
+def mark_interaction_now():
+    LAST_INTERACTION_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    temporary_path = LAST_INTERACTION_PATH.with_suffix(".tmp")
+    temporary_path.write_text(json.dumps({"last_at": time.time()}))
+    temporary_path.replace(LAST_INTERACTION_PATH)
+
+
+def get_last_interaction_gap_seconds():
+    """Returns seconds since the last recorded interaction, or None if
+    there's no prior record."""
+    if not LAST_INTERACTION_PATH.exists():
+        return None
+
+    try:
+        data = json.loads(LAST_INTERACTION_PATH.read_text())
+        last_at = float(data["last_at"])
+    except (json.JSONDecodeError, OSError, KeyError, TypeError, ValueError):
+        return None
+
+    return time.time() - last_at
+
+
+def build_memory_context_block():
+    """Returns a prompt-ready string summarizing recent conversation and
+    remembered facts, or an empty string if there's nothing to add."""
+    recent = get_recent_context()
+    facts = get_facts_summary()
+
+    if not recent and not facts:
+        return ""
+
+    parts = []
+
+    if recent:
+        lines = ["Recent conversation in this session (most recent last):"]
+
+        for question, answer in recent:
+            lines.append(f"> {question}")
+            lines.append(f"  {answer}")
+
+        parts.append("\n".join(lines))
+
+    if facts:
+        lines = ["Remembered facts about the user or situation:"]
+
+        for fact in facts:
+            lines.append(f"- {fact}")
+
+        parts.append("\n".join(lines))
+
+    return "\n\n".join(parts)

@@ -1,5 +1,5 @@
 :root {
-  --bg: #050b10;
+  --bg: #0a1420;
   --cyan: #34e2ff;
   --cyan-dim: #0c3540;
   --amber: #ffb238;
@@ -20,6 +20,14 @@ html, body {
   color: var(--text);
   font-family: "Consolas", "Menlo", "Courier New", monospace;
   overflow: hidden;
+  cursor: none;
+  transition: filter 2s ease;
+}
+
+/* Late-night ambient mode — dimmer and less saturated, easier on the eyes
+   in a dark room, matches the quieter/shorter voice during this window. */
+body.quiet-hours {
+  filter: brightness(0.55) saturate(0.75);
 }
 
 /* Fixed 1920x1080 design canvas — app.js scales the whole page to fit
@@ -257,12 +265,17 @@ body.state-speaking #status-label  { color: var(--green); }
   width: 640px;
   max-height: 260px;
   overflow-y: auto;
+  scrollbar-width: none;
   font-size: 14px;
   line-height: 1.5;
   padding: 12px 16px;
   border: 1px solid var(--cyan-dim);
   border-radius: 6px;
   background: rgba(52, 226, 255, 0.02);
+}
+
+#qa-log::-webkit-scrollbar {
+  display: none;
 }
 
 #qa-log .qa-entry {

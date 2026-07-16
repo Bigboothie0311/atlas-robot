@@ -3,6 +3,7 @@ import json
 import math
 import subprocess
 import sys
+import threading
 import time
 import wave
 from datetime import datetime, timezone
@@ -13,7 +14,10 @@ from openai import OpenAI
 from vosk import Model, KaldiRecognizer
 
 import ai_tools
+import hud_stats
+import memory_store
 import web_search
+import wake_detection
 
 
 HUB = "http://127.0.0.1:5051"
@@ -136,6 +140,75 @@ def speak(text):
     response.raise_for_status()
 
 
+def listen_for_barge_in(model, stop_event):
+    """Runs only during speak_with_barge_in's TTS window, when
+    wake_listener.py's own mic loop has already released the device. Returns
+    True if the wake phrase is verified before stop_event is set."""
+    recorder = subprocess.Popen(
+        [
+            "arecord",
+            "-D", MIC_DEVICE,
+            "-t", "raw",
+            "-f", "S16_LE",
+            "-r", "16000",
+            "-c", "1"
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL
+    )
+
+    recognizer = wake_detection.create_recognizer(model)
+    utterance_peak_rms = 0
+    partial_hits = 0
+
+    try:
+        while not stop_event.is_set():
+            audio_data = recorder.stdout.read(wake_detection.AUDIO_CHUNK_BYTES)
+
+            if not audio_data:
+                return False
+
+            accepted, utterance_peak_rms, partial_hits = wake_detection.check_wake_phrase(
+                recognizer, audio_data, utterance_peak_rms, partial_hits
+            )
+
+            if accepted:
+                print("Barge-in wake phrase detected.", flush=True)
+                return True
+
+        return False
+    finally:
+        wake_detection.stop_recorder(recorder)
+
+
+def speak_with_barge_in(text, model):
+    """Speaks text aloud while concurrently listening for the wake word.
+    If heard, interrupts playback immediately via the hub and returns True
+    so the caller can jump straight into a new turn."""
+    stop_event = threading.Event()
+    result = {"interrupted": False}
+
+    def watch():
+        if listen_for_barge_in(model, stop_event):
+            result["interrupted"] = True
+
+            try:
+                requests.post(f"{HUB}/interrupt", timeout=3)
+            except requests.RequestException as error:
+                print("Interrupt request failed:", error, flush=True)
+
+    watcher = threading.Thread(target=watch, daemon=True)
+    watcher.start()
+
+    try:
+        speak(text)
+    finally:
+        stop_event.set()
+        watcher.join(timeout=2)
+
+    return result["interrupted"]
+
+
 def log_qa(question, answer):
     try:
         requests.post(
@@ -145,6 +218,55 @@ def log_qa(question, answer):
         )
     except requests.RequestException as error:
         print("qa_log request failed:", error, flush=True)
+
+
+# Re-greet if it's been a while since the last interaction, rather than on
+# every single wake-up.
+GREETING_IDLE_THRESHOLD_SECONDS = 3 * 60 * 60
+MORNING_HOUR_START = 4
+MORNING_HOUR_END = 11
+
+# Matches robot_hub.py's QUIET_HOURS_START/END and hud/app.js's — same
+# overnight window gets a calmer voice here and a dimmer HUD there.
+QUIET_HOURS_START = 23
+QUIET_HOURS_END = 6
+
+
+def _in_quiet_hours():
+    hour = datetime.now().hour
+    return hour >= QUIET_HOURS_START or hour < QUIET_HOURS_END
+
+
+def maybe_speak_greeting():
+    """Speaks a morning/return greeting if enough idle time has passed since
+    the last interaction, before handing off to the normal 'Go ahead' flow."""
+    gap = memory_store.get_last_interaction_gap_seconds()
+
+    if gap is not None and gap < GREETING_IDLE_THRESHOLD_SECONDS:
+        return
+
+    weather = hud_stats.get_weather_stats()
+    hour = datetime.now().hour
+    owner_name = load_owner_name()
+
+    if weather.get("temp_f") is None:
+        if MORNING_HOUR_START <= hour < MORNING_HOUR_END:
+            greeting = f"Good morning, {owner_name}."
+        else:
+            greeting = f"Welcome back, {owner_name}."
+    elif MORNING_HOUR_START <= hour < MORNING_HOUR_END:
+        greeting = (
+            f"Good morning, {owner_name}. It's currently "
+            f"{weather['temp_f']} degrees and {weather['condition']}, "
+            f"with a high of {weather['high_f']} today."
+        )
+    else:
+        greeting = (
+            f"Welcome back, {owner_name}. It's currently "
+            f"{weather['temp_f']} degrees and {weather['condition']} outside."
+        )
+
+    speak(greeting)
 
 
 RECORD_MAX_SECONDS = 8
@@ -813,18 +935,42 @@ def ask_atlas(question):
 
     today = datetime.now().strftime("%Y-%m-%d")
     owner_name = load_owner_name()
+    quiet = _in_quiet_hours()
+    max_tokens = 120 if quiet else 300
 
     instructions = (
         f"You are A.T.L.A.S., {owner_name}'s helpful desk robot assistant. "
         f"Today's date is {today}. "
         "Answer naturally in plain spoken English. "
-        "Give a real, informative answer — three to five sentences for "
-        "ordinary questions, since it will be spoken aloud rather than "
-        "read. Do not use markdown, headings, bullets, citations, or "
+    )
+
+    if quiet:
+        instructions += (
+            "It's late at night — keep answers brief and calm, one to two "
+            "sentences, since it will be spoken aloud rather than read. "
+        )
+    else:
+        instructions += (
+            "Give a real, informative answer — three to five sentences for "
+            "ordinary questions, since it will be spoken aloud rather than "
+            "read. "
+        )
+
+    instructions += (
+        "Do not use markdown, headings, bullets, citations, or "
         "special formatting. Be friendly, useful, direct, and honest "
         "when uncertain. Use your tools when a question needs live or "
         "current information, such as weather or recent events."
     )
+
+    memory_block = memory_store.build_memory_context_block()
+
+    if memory_block:
+        instructions += (
+            "\n\nYou have access to memory of this conversation and prior "
+            "remembered facts. Use it naturally when relevant, but don't "
+            "mention that you have a memory system.\n\n" + memory_block
+        )
 
     response = client.responses.create(
         model=MODEL_NAME,
@@ -832,7 +978,7 @@ def ask_atlas(question):
         instructions=instructions,
         input=question,
         tools=ai_tools.TOOLS,
-        max_output_tokens=300
+        max_output_tokens=max_tokens
     )
 
     total_input_tokens = int(
@@ -865,7 +1011,7 @@ def ask_atlas(question):
                 }
             ],
             tools=ai_tools.TOOLS,
-            max_output_tokens=300
+            max_output_tokens=max_tokens
         )
 
         total_input_tokens += int(
@@ -901,11 +1047,16 @@ def ask_atlas(question):
     if not answer:
         return "I was unable to generate an answer."
 
+    memory_store.record_turn(question, answer)
+
     return answer
 
 
 def handle_turn(model):
     try:
+        maybe_speak_greeting()
+        memory_store.mark_interaction_now()
+
         speak("Go ahead.")
         set_face("listening")
         record_audio()
@@ -939,6 +1090,22 @@ def handle_turn(model):
             run_image_search_command(image_query)
             return
 
+        if memory_store.is_forget_command(text):
+            memory_store.clear_facts()
+            answer = "Okay, I've cleared everything I remembered."
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        remembered_fact = memory_store.parse_remember_command(text)
+
+        if remembered_fact is not None:
+            memory_store.add_fact(remembered_fact)
+            answer = "Got it, I'll remember that."
+            log_qa(text, answer)
+            speak(answer)
+            return
+
         local_answer = handle_local_command(text, model)
 
         if local_answer is not None:
@@ -951,7 +1118,12 @@ def handle_turn(model):
 
         print("A.T.L.A.S.:", answer)
         log_qa(text, answer)
-        speak(answer)
+        interrupted = speak_with_barge_in(answer, model)
+
+        if interrupted:
+            print("Barge-in: cutting turn short to listen again.", flush=True)
+            handle_turn(model)
+            return
 
     except BudgetExceeded as error:
         print("Budget protection:", error)
