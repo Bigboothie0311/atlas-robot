@@ -223,15 +223,22 @@ function applyQaLog(state) {
     const wrapper = document.createElement("div");
     wrapper.className = "qa-entry";
 
-    const question = document.createElement("div");
-    question.className = "qa-question";
-    question.textContent = entry.question;
+    // System-originated entries ([proactive], [notification], ...) have
+    // no user side — showing them as "YOU ▸ [proactive]" misattributes
+    // them, so only the ATLAS line renders.
+    const isSystemEntry = entry.question.startsWith("[");
+
+    if (!isSystemEntry) {
+      const question = document.createElement("div");
+      question.className = "qa-question";
+      question.textContent = entry.question;
+      wrapper.appendChild(question);
+    }
 
     const answer = document.createElement("div");
     answer.className = "qa-answer";
     answer.textContent = entry.answer;
 
-    wrapper.appendChild(question);
     wrapper.appendChild(answer);
     container.appendChild(wrapper);
   }
@@ -239,11 +246,44 @@ function applyQaLog(state) {
   container.scrollTop = container.scrollHeight;
 }
 
+function formatCountdown(totalSeconds) {
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${pad(minutes)}:${pad(seconds)}`;
+}
+
+function applyTimers(state) {
+  const readout = document.getElementById("timer-readout");
+  const timer = state.timer;
+  const focus = state.focus;
+
+  document.body.classList.toggle("focus-mode", Boolean(focus));
+
+  if (timer) {
+    readout.textContent = `TIMER ${formatCountdown(timer.remaining_seconds)}`;
+    readout.classList.add("visible");
+    readout.classList.remove("focus");
+  } else if (focus) {
+    readout.textContent = `FOCUS ${formatCountdown(focus.remaining_seconds)}`;
+    readout.classList.add("visible", "focus");
+  } else {
+    readout.textContent = "";
+    readout.classList.remove("visible", "focus");
+  }
+
+  // During an idle focus session the masthead says why it's so quiet.
+  if (focus && document.body.classList.contains("state-idle")) {
+    document.getElementById("masthead-state-text").textContent =
+      "FOCUS PROTOCOL ACTIVE";
+  }
+}
+
 async function pollState() {
   try {
     const response = await fetch("/state");
     const state = await response.json();
     applyState(state);
+    applyTimers(state);
     applyImage(state);
     applyGallery(state);
     applyQaLog(state);
@@ -292,6 +332,10 @@ async function pollStats() {
 
     document.getElementById("network-ip").textContent = stats.network.ip || "--";
 
+    const deviceCount = stats.network.device_count || 0;
+    document.getElementById("device-count").textContent =
+      deviceCount > 0 ? `DEVICES ONLINE: ${deviceCount}` : "";
+
     const hours = Math.floor(stats.uptime_seconds / 3600);
     const minutes = Math.floor((stats.uptime_seconds % 3600) / 60);
     document.getElementById("uptime").textContent = `${hours}h ${minutes}m`;
@@ -316,9 +360,58 @@ async function pollStats() {
       document.getElementById("gaming-pc-gpu").textContent = "GPU -- % / -- °C";
       document.getElementById("gaming-pc-ram").textContent = "RAM -- %";
     }
+    const printer = stats.printer || { online: false };
+    const printerPanel = document.getElementById("printer-panel");
+
+    if (printer.online) {
+      printerPanel.classList.add("visible");
+      document.getElementById("printer-state").textContent =
+        (printer.state || "online").toUpperCase();
+
+      const progress = printer.progress_percent;
+      document.getElementById("printer-gauge").style.width =
+        progress !== null && progress !== undefined ? `${progress}%` : "0%";
+
+      const detailParts = [];
+      if (progress !== null && progress !== undefined) {
+        detailParts.push(`${progress}%`);
+      }
+      if (printer.layer) {
+        detailParts.push(`LAYER ${printer.layer}`);
+      }
+      document.getElementById("printer-detail").textContent =
+        detailParts.join(" · ");
+    } else {
+      printerPanel.classList.remove("visible");
+    }
+
+    applyHeadlines(stats.headlines || []);
   } catch (error) {
     console.error("stats poll failed", error);
   }
+}
+
+let lastTickerText = "";
+
+function applyHeadlines(headlines) {
+  const ticker = document.getElementById("news-ticker");
+  const content = document.getElementById("ticker-content");
+
+  if (!headlines.length) {
+    ticker.classList.add("empty");
+    return;
+  }
+
+  const text = headlines.join("      ◆      ");
+
+  // Only touch the DOM when the headlines actually change — resetting
+  // textContent restarts the scroll animation from the right edge.
+  if (text !== lastTickerText) {
+    lastTickerText = text;
+    content.textContent = text;
+  }
+
+  ticker.classList.remove("empty");
 }
 
 updateClock();

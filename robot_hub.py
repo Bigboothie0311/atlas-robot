@@ -13,7 +13,10 @@ from piper import PiperVoice, SynthesisConfig
 
 import hud_stats
 import memory_store
+import network_sentinel
+import pc_power
 import pc_stats
+import timers
 
 ROBOT_ENV_PATH = Path("/home/atlas/atlas-robot/config/robot.env")
 
@@ -180,7 +183,16 @@ def hud_static(filename):
 
 @app.get("/hud/stats")
 def hud_stats_route():
-    return jsonify(hud_stats.get_hud_stats())
+    stats = hud_stats.get_hud_stats()
+    stats["network"]["device_count"] = network_sentinel.get_online_device_count()
+    stats["printer"] = hud_stats.get_printer_stats()
+    # Cache-only read — a cold headline cache must never stall the HUD's
+    # 5s stats poll on a network fetch (the refresher thread fills it).
+    stats["headlines"] = [
+        headline["title"]
+        for headline in hud_stats.get_headlines(allow_fetch=False)
+    ]
+    return jsonify(stats)
 
 
 @app.get("/hud/display_image")
@@ -205,7 +217,9 @@ def get_state():
         clear_expired_gallery_locked()
         state = robot_state.copy()
         state["gallery_until"] = gallery_until
-        return jsonify(state)
+
+    state.update(timers.to_state_dict())
+    return jsonify(state)
 
 
 @app.post("/face")
@@ -548,6 +562,68 @@ def clear_image():
     return jsonify({"ok": True})
 
 
+@app.post("/timer")
+def set_timer():
+    data = request.get_json(silent=True) or {}
+
+    try:
+        seconds = int(data.get("seconds", 0))
+    except (TypeError, ValueError):
+        seconds = 0
+
+    if seconds <= 0:
+        return jsonify({"ok": False, "error": "seconds must be positive"}), 400
+
+    label = str(data.get("label", "")).strip() or None
+    started = timers.start_timer(seconds, label)
+
+    return jsonify({"ok": True, "seconds": started, "label": label})
+
+
+@app.post("/timer/cancel")
+def cancel_timer():
+    return jsonify({"ok": True, "cancelled": timers.cancel_timer()})
+
+
+@app.get("/timer")
+def get_timer():
+    remaining = timers.get_timer_remaining()
+
+    if remaining is None:
+        return jsonify({"ok": True, "running": False})
+
+    seconds, label = remaining
+    return jsonify({
+        "ok": True,
+        "running": True,
+        "remaining_seconds": seconds,
+        "label": label,
+    })
+
+
+@app.post("/focus")
+def start_focus():
+    data = request.get_json(silent=True) or {}
+
+    try:
+        minutes = int(data.get("minutes", timers.DEFAULT_FOCUS_MINUTES))
+    except (TypeError, ValueError):
+        minutes = timers.DEFAULT_FOCUS_MINUTES
+
+    seconds = timers.start_focus(minutes)
+    return jsonify({"ok": True, "seconds": seconds})
+
+
+@app.post("/focus/end")
+def end_focus():
+    return jsonify({"ok": True, "ended": timers.end_focus()})
+
+
+@app.post("/wake_pc")
+def wake_pc():
+    return jsonify({"ok": True, "message": pc_power.send_wake_packet()})
+
+
 def _speak_text(text):
     """Synthesizes and plays text aloud. Raises on failure. Shared by the
     /speak route and the proactive watcher thread, so both go through the
@@ -709,7 +785,14 @@ _proactive_state = {
     "last_rain_alert_date": None,
     "cpu_high_since": None,
     "cpu_warning_sent_for_episode": False,
+    "last_printer_state": None,
 }
+
+PRINTER_DONE_STATES = {"ready", "completed", "finished", "idle", "done"}
+PRINTER_FAILED_STATES = {"error", "failed", "fault"}
+# "building" is what the AD5X actually reports mid-print — confirmed live
+# against a real running job (13%, layer 6/724) during development.
+PRINTER_ACTIVE_STATES = {"printing", "busy", "running", "building"}
 
 
 def _in_quiet_hours():
@@ -747,10 +830,39 @@ def _run_proactive_checks():
     if due_reminders:
         return
 
+    # Focus mode mutes every autonomous nudge below — the user asked for
+    # uninterrupted time; reminders above still fire since those are
+    # explicitly scheduled.
+    if timers.in_focus():
+        return
+
     if _in_quiet_hours():
         return
 
     now = time.time()
+
+    # Print-job transitions: announce a print finishing or failing. The
+    # state only moves while atlas-hub is reachable and a job was seen
+    # actively printing first, so a flaky printer link can't false-fire.
+    printer = hud_stats.get_printer_stats()
+    printer_state = printer.get("state") if printer.get("online") else None
+    last_printer_state = _proactive_state["last_printer_state"]
+
+    if printer_state is not None:
+        _proactive_state["last_printer_state"] = printer_state
+
+        if last_printer_state in PRINTER_ACTIVE_STATES:
+            if printer_state in PRINTER_DONE_STATES:
+                message = "Your 3D print just finished."
+                _log_proactive_qa(message)
+                _speak_text(message)
+                return
+
+            if printer_state in PRINTER_FAILED_STATES:
+                message = "Heads up — your 3D print looks like it failed."
+                _log_proactive_qa(message)
+                _speak_text(message)
+                return
 
     cpu_percent = hud_stats.get_cpu_stats()["percent"]
 
@@ -777,6 +889,11 @@ def _run_proactive_checks():
     pc = pc_stats.get_gaming_pc_stats()
 
     if pc.get("online"):
+        # Opportunistically learn the PC's MAC while it's reachable so
+        # "power on my PC" works later when it's off (one `ip neigh show`
+        # every poll — trivial).
+        pc_power.refresh_mac_cache()
+
         cpu_temp = pc.get("cpu_temp_c")
         gpu_temp = pc.get("gpu_temp_c")
 
@@ -833,6 +950,37 @@ def proactive_watcher_loop():
             print("Proactive watcher error:", type(error).__name__, error)
 
 
+HEADLINES_REFRESH_SECONDS = 15 * 60
+
+
+def headlines_refresher_loop():
+    """Keeps the news-ticker cache warm off the request path — the
+    /hud/stats route reads cache-only so a slow ddgs fetch can never
+    stall the HUD's poll."""
+    while True:
+        try:
+            hud_stats.get_headlines()
+        except Exception as error:
+            print("Headline refresh error:", type(error).__name__, error)
+
+        time.sleep(HEADLINES_REFRESH_SECONDS)
+
+
+def _sentinel_should_stay_quiet():
+    return _in_quiet_hours() or timers.in_focus()
+
+
 if __name__ == "__main__":
     threading.Thread(target=proactive_watcher_loop, daemon=True).start()
+    threading.Thread(
+        target=timers.watcher_loop,
+        args=(_speak_text, _log_proactive_qa),
+        daemon=True,
+    ).start()
+    threading.Thread(
+        target=network_sentinel.sentinel_loop,
+        args=(_speak_text, _log_proactive_qa, _sentinel_should_stay_quiet),
+        daemon=True,
+    ).start()
+    threading.Thread(target=headlines_refresher_loop, daemon=True).start()
     app.run(host="0.0.0.0", port=5051, threaded=True)

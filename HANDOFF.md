@@ -5,6 +5,71 @@ the HUD v1/v2 work from the previous session (see git log before
 `6218c2c` for that). All of it is committed to `main` and pushed to
 `origin/main`. Nothing is stashed or uncommitted.
 
+## LATE-SESSION ADDENDUM (same night, second wave)
+
+A second work wave happened after the handoff below was written. In
+order:
+
+1. **Cursor mystery actually solved** — see the rewritten Cursor bullet
+   under "Still open"; the nudge theory was wrong, the arrow was cage's
+   own cursor, fixed via transparent `XCURSOR_THEME=atlas-invisible`
+   (theme generated at `/usr/share/icons/atlas-invisible`, system-side
+   only). User-confirmed gone. `hud_cursor_fix.py` + uinput plumbing now
+   redundant, left in place, safe to remove later.
+2. **HUD v3 cinematic redesign** — A.T.L.A.S. masthead with animated
+   wordmark + state-reactive status line, tactical grid + vignette,
+   corner brackets + panel ID codes, reactor radar sweep/orbit
+   dot/core glow, mem/disk/CPU gauges, new CORE (Pi CPU) panel,
+   timestamped SYS.LOG with blinking cursor, YOU/ATLAS transcript
+   labels, staggered boot-in. Gotcha discovered: `animation-fill-mode:
+   both` on one-shot animations pins opacity and beats later class
+   rules (broke focus-mode dimming) — use `backwards`.
+3. **Eight new features, all user-approved (batch 1-8), all built and
+   endpoint-tested live tonight:**
+   - **Wake-on-LAN** ("boot my pc" etc.) — `pc_power.py`, MAC
+     auto-learned from ARP while PC online → `data/pc_mac.json`
+     (confirmed learned: 80:3f:5d:13:77:a3). Hub `POST /wake_pc`.
+     NOT yet tested with the PC actually off.
+   - **Timers** — `timers.py` + hub `POST /timer`, `/timer/cancel`,
+     `GET /timer`; 1s watcher thread speaks on expiry; amber countdown
+     in the reactor center (via /state).
+   - **Focus mode** — "focus mode (for N minutes)", default 25; mutes
+     all proactive nudges (reminders still fire), dims entire HUD
+     except reactor, cyan FOCUS countdown, masthead shows "FOCUS
+     PROTOCOL ACTIVE", spoken wrap-up.
+   - **Voice notes** — "take a note ...", "read my notes (back)",
+     "clear my notes" → `data/notes.json`, zero-token.
+   - **Morning briefing** — "morning briefing"/"brief me" on demand +
+     automatic once/day replacing the first morning greeting
+     (`briefing.py`, `data/last_briefing.json`): weather, reminder count,
+     note count, PC status, top-3 headlines.
+   - **Network sentinel** — `network_sentinel.py` in hub: /24 ping
+     sweep + `ip neigh` every 5 min, baseline in
+     `data/known_devices.json`, announces unknown joins (muted in quiet
+     hours/focus), device count on the NETWORK panel. FIRED FOR REAL
+     during testing (device .59 joined, spoken + logged).
+   - **News ticker** — `web_search.search_news` (ddgs, free, flaky
+     per-call but cached 30 min, hub refresher thread every 15 min so
+     /hud/stats never blocks); slim scrolling NEWS bar above SYS.LOG;
+     "what's in the news" speaks top 3.
+   - **Printer HUD panel + finish/fail alerts** — `hud_stats.
+     get_printer_stats()` polls atlas-hub (15s cache, offline-tolerant);
+     PRINT JOB panel under the transcript only while online; proactive
+     announce on active→done/failed transitions. **The AD5X reports
+     "building" as its active state** (confirmed against a real live
+     print at 13%, layer 6/724) — it's in PRINTER_ACTIVE_STATES.
+     Finish/fail announcement not yet observed end-to-end (print still
+     running at session end).
+4. **Feature ideas 11 (internet radio via mpv) and 12 (spoken
+   self-diagnostics) were pitched, awaiting user yes/no.** Ideas 9/10
+   (camera) were declined — camera hardware is disconnected.
+
+Voice command list for the user: "boot my PC", "set a timer for 10
+minutes", "cancel the timer", "how long on the timer", "focus mode
+(for 45 minutes)", "end focus mode", "take a note ...", "read my
+notes", "clear my notes", "morning briefing" / "brief me", "what's in
+the news".
+
 ## Current verified state (as of this handoff)
 
 All four services active and healthy: `atlas-robot.service`,
@@ -165,10 +230,13 @@ this session.
   in the repo); `hud_cursor_fix.py` and its uinput plumbing are now
   redundant but harmless, left in place for the moment — safe to remove
   in a future cleanup pass.
-- **Camera feature** — still not designed/built at all. Ideas pitched
-  early in a prior session (OCR, face recognition, gesture confirm,
-  snap-and-save, QR scan), OCR was the recommendation, never confirmed.
-  Camera will be a fixed mount above the screen, stationary.
+- **Camera feature** — the camera is NOT physically set up anymore
+  (user confirmed 2026-07-16 when declining camera-based feature
+  pitches — guard mode and face recognition were both rejected purely
+  for this reason). Do not pitch camera features until the user says
+  the camera is connected again. The old ideas (OCR etc.) are moot
+  until then; `vision_test.py` and `is_vision_command` still exist in
+  code but will fail without hardware.
 - **Face/gaze tracking** ("follow me") — mentioned early on, not
   designed or built.
 - **Voice macros** (item 9 from the original feature-batch pitch) — user

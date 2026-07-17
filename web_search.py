@@ -25,6 +25,25 @@ def search_images(query, max_results=MAX_RESULTS):
     ]
 
 
+def search_news(query="top news stories today", max_results=MAX_TEXT_RESULTS):
+    try:
+        results = DDGS().news(query, max_results=max_results, safesearch="moderate")
+    except DDGSException as error:
+        print("News search failed:", type(error).__name__, error)
+        return []
+
+    return [
+        {
+            "title": result.get("title", ""),
+            "snippet": result.get("body", ""),
+            "source": result.get("source", ""),
+            "source_url": result.get("url", ""),
+        }
+        for result in results
+        if result.get("title")
+    ]
+
+
 def search_text(query, max_results=MAX_TEXT_RESULTS):
     try:
         results = DDGS().text(query, max_results=max_results, safesearch="moderate")

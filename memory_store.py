@@ -128,6 +128,106 @@ def is_forget_command(text):
     return normalized in FORGET_PHRASES
 
 
+NOTES_PATH = Path("/home/atlas/atlas-robot/data/notes.json")
+MAX_NOTES = 100
+
+NOTE_PREFIXES = [
+    "take a note that ",
+    "take a note ",
+    "make a note that ",
+    "make a note ",
+    "note that ",
+    "write down that ",
+    "write down ",
+]
+
+READ_NOTES_PHRASES = {
+    "read my notes",
+    "read my notes back",
+    "read me my notes",
+    "read back my notes",
+    "what are my notes",
+    "what notes do i have",
+}
+
+CLEAR_NOTES_PHRASES = {
+    "clear my notes",
+    "delete my notes",
+    "erase my notes",
+    "delete all my notes",
+}
+
+
+def _normalize_phrase(text):
+    normalized = text.lower().strip()
+
+    for punctuation in [",", ".", "?", "!", ";", ":"]:
+        normalized = normalized.replace(punctuation, " ")
+
+    return " ".join(normalized.split())
+
+
+def load_notes():
+    if not NOTES_PATH.exists():
+        return []
+
+    try:
+        data = json.loads(NOTES_PATH.read_text())
+    except (json.JSONDecodeError, OSError):
+        return []
+
+    if not isinstance(data, list):
+        return []
+
+    return [note for note in data if isinstance(note, dict) and note.get("text")]
+
+
+def save_notes(notes):
+    NOTES_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    temporary_path = NOTES_PATH.with_suffix(".tmp")
+    temporary_path.write_text(json.dumps(notes, indent=2))
+    temporary_path.replace(NOTES_PATH)
+
+
+def add_note(text):
+    text = text.strip()
+
+    if not text:
+        return
+
+    notes = load_notes()
+    notes.append({"text": text, "added": time.time()})
+    save_notes(notes[-MAX_NOTES:])
+
+
+def clear_notes():
+    save_notes([])
+
+
+def parse_note_command(text):
+    """Returns the note text for a 'take a note ...' request, else None."""
+    normalized = _normalize_phrase(text)
+
+    if not normalized:
+        return None
+
+    for prefix in sorted(NOTE_PREFIXES, key=len, reverse=True):
+        if normalized.startswith(prefix):
+            note = normalized[len(prefix):].strip()
+            return note or None
+
+    return None
+
+
+def is_read_notes_command(text):
+    return _normalize_phrase(text) in READ_NOTES_PHRASES
+
+
+def is_clear_notes_command(text):
+    return _normalize_phrase(text) in CLEAR_NOTES_PHRASES
+
+
 def mark_interaction_now():
     LAST_INTERACTION_PATH.parent.mkdir(parents=True, exist_ok=True)
 

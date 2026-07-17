@@ -16,6 +16,7 @@ from openai import OpenAI
 from vosk import Model, KaldiRecognizer
 
 import ai_tools
+import briefing
 import hud_stats
 import memory_store
 import web_search
@@ -237,12 +238,23 @@ def maybe_speak_greeting():
     hour = datetime.now().hour
     owner_name = load_owner_name()
 
+    is_morning = MORNING_HOUR_START <= hour < MORNING_HOUR_END
+
+    # First morning interaction of the day gets the full rundown instead
+    # of just a weather line — the briefing already covers weather, so the
+    # greeting stays short to avoid saying it twice.
+    if is_morning and not briefing.was_briefed_today():
+        speak(f"Good morning, {owner_name}. Here's your rundown.")
+        speak(briefing.build_briefing_text())
+        briefing.mark_briefed_today()
+        return
+
     if weather.get("temp_f") is None:
-        if MORNING_HOUR_START <= hour < MORNING_HOUR_END:
+        if is_morning:
             greeting = f"Good morning, {owner_name}."
         else:
             greeting = f"Welcome back, {owner_name}."
-    elif MORNING_HOUR_START <= hour < MORNING_HOUR_END:
+    elif is_morning:
         greeting = (
             f"Good morning, {owner_name}. It's currently "
             f"{weather['temp_f']} degrees and {weather['condition']}, "
@@ -835,6 +847,252 @@ def parse_instant_answer(text):
         return "Yes, I'm here and listening."
 
     return None
+
+
+def _normalize_phrase(text):
+    normalized = text.lower().strip()
+
+    for punctuation in [",", ".", "?", "!", ";", ":"]:
+        normalized = normalized.replace(punctuation, " ")
+
+    return " ".join(normalized.split())
+
+
+# ---------------------------------------------------------------------
+# Local voice commands: PC power, timers, focus mode, notes, briefings.
+# All zero-token — parsed here, executed via the hub or local files.
+# ---------------------------------------------------------------------
+
+WAKE_PC_PHRASES = {
+    "turn on my pc",
+    "turn on my computer",
+    "turn on the pc",
+    "turn on my gaming pc",
+    "turn on the gaming pc",
+    "power on my pc",
+    "power on my computer",
+    "power on the pc",
+    "power on my gaming pc",
+    "boot my pc",
+    "boot up my pc",
+    "boot my computer",
+    "boot my gaming pc",
+    "wake my pc",
+    "wake up my pc",
+    "wake my computer",
+    "wake my gaming pc",
+    "start my pc",
+    "start my gaming pc",
+}
+
+
+def run_wake_pc_command():
+    try:
+        response = requests.post(f"{HUB}/wake_pc", timeout=10)
+        response.raise_for_status()
+        return response.json().get("message", "Wake signal sent.")
+    except requests.RequestException as error:
+        print("wake_pc request failed:", error, flush=True)
+        return "I couldn't send the wake signal."
+
+
+TIMER_SET_PATTERNS = [
+    re.compile(r"^(?:set|start) (?:a |an )?timer for (\d+) (second|seconds|minute|minutes|hour|hours)$"),
+    re.compile(r"^timer for (\d+) (second|seconds|minute|minutes|hour|hours)$"),
+    re.compile(r"^(?:set|start) (?:a |an )?(\d+) (second|minute|hour) timer$"),
+]
+
+TIMER_CANCEL_PHRASES = {
+    "cancel the timer",
+    "cancel my timer",
+    "cancel timer",
+    "stop the timer",
+    "stop my timer",
+}
+
+TIMER_CHECK_PHRASES = {
+    "how long on the timer",
+    "how long left on the timer",
+    "how long is left on the timer",
+    "how much time is left",
+    "how much time is left on the timer",
+    "how much time is on the timer",
+    "check the timer",
+    "what's left on the timer",
+    "whats left on the timer",
+}
+
+
+def parse_timer_set_command(text):
+    """Returns delay seconds for a 'set a timer for N ...' request, else
+    None."""
+    normalized = _normalize_phrase(text)
+
+    for pattern in TIMER_SET_PATTERNS:
+        match = pattern.match(normalized)
+
+        if match:
+            amount = int(match.group(1))
+            unit = match.group(2)
+
+            if amount <= 0:
+                return None
+
+            if "second" in unit:
+                return amount
+
+            if "minute" in unit:
+                return amount * 60
+
+            return amount * 3600
+
+    return None
+
+
+def describe_timer_duration(seconds):
+    if seconds < 60:
+        return f"{seconds} second" + ("s" if seconds != 1 else "")
+
+    return describe_delay(seconds)
+
+
+def run_timer_set_command(seconds):
+    try:
+        response = requests.post(
+            f"{HUB}/timer", json={"seconds": seconds}, timeout=5
+        )
+        response.raise_for_status()
+        return f"Timer set for {describe_timer_duration(seconds)}."
+    except requests.RequestException as error:
+        print("timer request failed:", error, flush=True)
+        return "I couldn't set the timer."
+
+
+def run_timer_cancel_command():
+    try:
+        response = requests.post(f"{HUB}/timer/cancel", timeout=5)
+        response.raise_for_status()
+
+        if response.json().get("cancelled"):
+            return "Timer cancelled."
+
+        return "There's no timer running."
+    except requests.RequestException as error:
+        print("timer cancel request failed:", error, flush=True)
+        return "I couldn't reach the timer."
+
+
+def run_timer_check_command():
+    try:
+        response = requests.get(f"{HUB}/timer", timeout=5)
+        response.raise_for_status()
+        data = response.json()
+    except requests.RequestException as error:
+        print("timer check request failed:", error, flush=True)
+        return "I couldn't reach the timer."
+
+    if not data.get("running"):
+        return "There's no timer running."
+
+    return f"{describe_timer_duration(data['remaining_seconds'])} left."
+
+
+FOCUS_START_PATTERN = re.compile(
+    r"^(?:start |enter |begin )?focus mode(?: for (\d+) minutes?)?$"
+)
+
+FOCUS_END_PHRASES = {
+    "end focus mode",
+    "exit focus mode",
+    "stop focus mode",
+    "cancel focus mode",
+    "end focus",
+}
+
+
+def parse_focus_start_command(text):
+    """Returns focus minutes (default when unspecified) for a 'focus mode'
+    request, else None."""
+    match = FOCUS_START_PATTERN.match(_normalize_phrase(text))
+
+    if not match:
+        return None
+
+    minutes = int(match.group(1)) if match.group(1) else 25
+
+    return minutes if minutes > 0 else None
+
+
+def run_focus_start_command(minutes):
+    try:
+        response = requests.post(
+            f"{HUB}/focus", json={"minutes": minutes}, timeout=5
+        )
+        response.raise_for_status()
+        return (
+            f"Focus mode on for {minutes} minutes. "
+            "I'll keep quiet until then."
+        )
+    except requests.RequestException as error:
+        print("focus request failed:", error, flush=True)
+        return "I couldn't start focus mode."
+
+
+def run_focus_end_command():
+    try:
+        response = requests.post(f"{HUB}/focus/end", timeout=5)
+        response.raise_for_status()
+
+        if response.json().get("ended"):
+            return "Focus mode off."
+
+        return "Focus mode wasn't on."
+    except requests.RequestException as error:
+        print("focus end request failed:", error, flush=True)
+        return "I couldn't reach focus mode."
+
+
+NEWS_PHRASES = {
+    "brief me on the news",
+    "what's in the news",
+    "whats in the news",
+    "what is in the news",
+    "news briefing",
+    "give me the news",
+    "today's news",
+    "todays news",
+    "tell me the news",
+    "what's the news",
+    "whats the news",
+    "what is the news",
+}
+
+BRIEFING_PHRASES = {
+    "morning briefing",
+    "daily briefing",
+    "morning brief",
+    "daily brief",
+    "brief me",
+    "give me my briefing",
+    "give me the briefing",
+    "run my briefing",
+}
+
+
+def run_read_notes_command():
+    notes = memory_store.load_notes()
+
+    if not notes:
+        return "You don't have any notes saved."
+
+    count = len(notes)
+    word = "note" if count == 1 else "notes"
+    spoken_notes = ". ".join(
+        f"Note {index + 1}: {note['text']}"
+        for index, note in enumerate(notes)
+    )
+
+    return f"You have {count} {word}. {spoken_notes}."
 
 
 REMINDER_PATTERN = re.compile(
@@ -1436,6 +1694,85 @@ def handle_turn(model):
         if remembered_fact is not None:
             memory_store.add_fact(remembered_fact)
             answer = "Got it, I'll remember that."
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        normalized_phrase = _normalize_phrase(text)
+
+        if normalized_phrase in WAKE_PC_PHRASES:
+            answer = run_wake_pc_command()
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        timer_seconds = parse_timer_set_command(text)
+
+        if timer_seconds is not None:
+            answer = run_timer_set_command(timer_seconds)
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        if normalized_phrase in TIMER_CANCEL_PHRASES:
+            answer = run_timer_cancel_command()
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        if normalized_phrase in TIMER_CHECK_PHRASES:
+            answer = run_timer_check_command()
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        focus_minutes = parse_focus_start_command(text)
+
+        if focus_minutes is not None:
+            answer = run_focus_start_command(focus_minutes)
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        if normalized_phrase in FOCUS_END_PHRASES:
+            answer = run_focus_end_command()
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        note_text = memory_store.parse_note_command(text)
+
+        if note_text is not None:
+            memory_store.add_note(note_text)
+            answer = "Noted."
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        if memory_store.is_read_notes_command(text):
+            answer = run_read_notes_command()
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        if memory_store.is_clear_notes_command(text):
+            memory_store.clear_notes()
+            answer = "Okay, your notes are cleared."
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        if normalized_phrase in NEWS_PHRASES:
+            set_face("thinking")
+            answer = briefing.build_news_brief()
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        if normalized_phrase in BRIEFING_PHRASES:
+            set_face("thinking")
+            answer = briefing.build_briefing_text()
+            briefing.mark_briefed_today()
             log_qa(text, answer)
             speak(answer)
             return

@@ -89,6 +89,114 @@ def get_weather_stats():
     return data
 
 
+ATLAS_HUB_URL = "http://127.0.0.1:5050"
+PRINTER_CACHE_SECONDS = 15
+
+_printer_cache = {"data": None, "fetched_at": 0.0}
+
+
+def _parse_printer_status(raw_status):
+    """Parses atlas-hub's printer_status text into a structured dict. The
+    raw format is the same one listen_and_answer.summarize_printer_status
+    reads for speech (AD5X ONLINE/OFFLINE, STATE:, PROGRESS cur/total,
+    Layer:)."""
+    lines = [line.strip() for line in raw_status.splitlines() if line.strip()]
+
+    if not any(line.startswith("AD5X ONLINE") for line in lines):
+        return {"online": False}
+
+    stats = {"online": True, "state": None, "progress_percent": None, "layer": None}
+
+    state_line = next((line for line in lines if line.startswith("STATE:")), "")
+
+    if state_line:
+        state = state_line.split(":", 1)[1].strip().lower()
+        stats["state"] = state or None
+
+    progress_line = next((line for line in lines if line.startswith("PROGRESS")), "")
+
+    if "/" in progress_line:
+        try:
+            current_value, total_value = (
+                progress_line.replace("PROGRESS", "").strip().split("/", 1)
+            )
+            total = float(total_value.strip())
+
+            if total > 0:
+                stats["progress_percent"] = round(
+                    float(current_value.strip()) * 100 / total
+                )
+        except (ValueError, ZeroDivisionError):
+            pass
+
+    layer_line = next((line for line in lines if line.startswith("Layer:")), "")
+
+    if layer_line and "unknown" not in layer_line.lower():
+        stats["layer"] = layer_line.split(":", 1)[1].strip()
+
+    return stats
+
+
+def get_printer_stats():
+    """Structured 3D-printer status via the local atlas-hub service.
+    Offline-tolerant and cached — atlas-hub being down or absent just
+    reads as an offline printer, never an error."""
+    now = time.time()
+
+    if (
+        _printer_cache["data"] is not None
+        and now - _printer_cache["fetched_at"] < PRINTER_CACHE_SECONDS
+    ):
+        return _printer_cache["data"]
+
+    try:
+        response = requests.get(
+            f"{ATLAS_HUB_URL}/atlas",
+            params={"cmd": "printer_status"},
+            timeout=3,
+        )
+        response.raise_for_status()
+        data = _parse_printer_status(response.text)
+    except requests.RequestException:
+        data = {"online": False}
+
+    _printer_cache["data"] = data
+    _printer_cache["fetched_at"] = now
+    return data
+
+
+HEADLINES_CACHE_SECONDS = 30 * 60
+
+_headlines_cache = {"data": [], "fetched_at": 0.0}
+
+
+def get_headlines(max_results=6, allow_fetch=True):
+    """Cached top news headlines (free, via ddgs). Returns [] on failure —
+    the ticker just stays hidden. Pass allow_fetch=False from latency-
+    sensitive callers (the /hud/stats route) so a cold cache never blocks
+    them on a network fetch; robot_hub refreshes the cache on a timer."""
+    import web_search
+
+    now = time.time()
+
+    if (
+        _headlines_cache["data"]
+        and now - _headlines_cache["fetched_at"] < HEADLINES_CACHE_SECONDS
+    ):
+        return _headlines_cache["data"]
+
+    if not allow_fetch:
+        return _headlines_cache["data"]
+
+    headlines = web_search.search_news(max_results=max_results)
+
+    if headlines:
+        _headlines_cache["data"] = headlines
+        _headlines_cache["fetched_at"] = now
+
+    return _headlines_cache["data"]
+
+
 def get_cpu_stats():
     percent = psutil.cpu_percent(interval=0.1)
 

@@ -70,9 +70,16 @@
           <div id="clock">--:--:--</div>
           <div id="date">-- -- ----</div>
           <div id="status-label">IDLE</div>
+          <div id="timer-readout"></div>
         </div>
       </div>
       <div id="qa-log"></div>
+      <div class="panel" id="printer-panel">
+        <div class="panel-label">PRINT JOB<span class="panel-code">PRN&middot;07</span></div>
+        <div class="panel-sub" id="printer-state">--</div>
+        <div class="gauge"><div class="gauge-fill" id="printer-gauge"></div></div>
+        <div class="panel-sub" id="printer-detail"></div>
+      </div>
     </div>
 
     <div class="panel panel-weather">
@@ -86,6 +93,7 @@
     <div class="panel panel-system">
       <div class="panel-label">NETWORK<span class="panel-code">NET&middot;04</span></div>
       <div class="panel-value" id="network-ip">--</div>
+      <div class="panel-sub" id="device-count"></div>
       <div class="panel-label panel-label-spaced">UPTIME</div>
       <div class="panel-sub" id="uptime">--</div>
     </div>
@@ -96,6 +104,11 @@
       <div class="panel-sub" id="gaming-pc-cpu">CPU -- % / -- &deg;C</div>
       <div class="panel-sub" id="gaming-pc-gpu">GPU -- % / -- &deg;C</div>
       <div class="panel-sub" id="gaming-pc-ram">RAM -- %</div>
+    </div>
+
+    <div id="news-ticker" class="empty">
+      <span id="news-ticker-label">NEWS</span>
+      <div id="ticker-viewport"><div id="ticker-content"></div></div>
     </div>
 
     <div id="cosmetic-terminal">
