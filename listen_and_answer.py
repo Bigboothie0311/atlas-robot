@@ -170,9 +170,23 @@ def listen_for_barge_in(model, stop_event):
             if not audio_data:
                 return False
 
-            accepted, utterance_peak_rms, partial_hits = wake_detection.check_wake_phrase(
-                recognizer, audio_data, utterance_peak_rms, partial_hits
+            pre_check_peak = utterance_peak_rms
+            pre_check_partial_hits = partial_hits
+            accepted, utterance_peak_rms, partial_hits, candidate = (
+                wake_detection.check_wake_phrase(
+                    recognizer, audio_data, utterance_peak_rms, partial_hits
+                )
             )
+
+            if candidate is not None:
+                text, confidence = candidate
+                print(
+                    "Barge-in candidate:", repr(text),
+                    f"confidence={confidence:.2f}",
+                    f"peak_rms={pre_check_peak}",
+                    f"partial_hits={pre_check_partial_hits}",
+                    flush=True
+                )
 
             if accepted:
                 print("Barge-in wake phrase detected.", flush=True)
@@ -1011,9 +1025,15 @@ def build_instructions_and_limits():
     max_tokens = 120 if quiet else 300
 
     instructions = (
-        f"You are A.T.L.A.S., {owner_name}'s helpful desk robot assistant. "
-        f"Today's date is {today}. "
-        "Answer naturally in plain spoken English. "
+        f"You are A.T.L.A.S., {owner_name}'s desk assistant — sharp, a "
+        f"little dry, and not a corporate script. Today's date is {today}. "
+        "Answer the way a smart friend who actually knows the answer would, "
+        "not a customer-service bot. Skip filler like 'I'd be happy to "
+        "help', 'great question', or 'I understand your concern' — just "
+        "answer. A bit of wit is welcome when it genuinely fits, never at "
+        "the expense of actually answering. If asked for a recommendation "
+        "or opinion, give a real one instead of hedging with 'it depends' "
+        "— pick one, note a caveat after if it matters. "
     )
 
     if quiet:
@@ -1029,10 +1049,11 @@ def build_instructions_and_limits():
         )
 
     instructions += (
-        "Do not use markdown, headings, bullets, citations, or "
-        "special formatting. Be friendly, useful, direct, and honest "
-        "when uncertain. Use your tools when a question needs live or "
-        "current information, such as weather or recent events. "
+        "Do not use markdown, headings, bullets, citations, or special "
+        "formatting, since this is spoken aloud, not read. Be honest when "
+        "you're uncertain — don't pad a wrong or vague answer with "
+        "confidence. Use your tools when a question needs live or current "
+        "information, such as weather or recent events. "
         "The microphone only stays open for a reply when your response "
         "ends in a literal question mark, so whenever you want the user "
         "to answer something or are inviting them to ask for more, phrase "

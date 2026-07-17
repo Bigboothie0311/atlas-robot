@@ -66,10 +66,13 @@ def create_recognizer(model):
 
 def check_wake_phrase(recognizer, audio_data, utterance_peak_rms, partial_hits):
     """Feeds one chunk of audio through recognizer and checks for a fully
-    verified wake phrase. Returns (accepted, utterance_peak_rms, partial_hits)
-    — the caller carries the peak/hit counters forward between calls and
-    resets them to 0 whenever a finalized result comes back (accepted or
-    not), matching how Vosk's finalized/partial cycle works."""
+    verified wake phrase. Returns (accepted, utterance_peak_rms, partial_hits,
+    candidate) — the caller carries the peak/hit counters forward between
+    calls and resets them to 0 whenever a finalized result comes back
+    (accepted or not), matching how Vosk's finalized/partial cycle works.
+    candidate is None unless this call produced a finalized result, in
+    which case it's (text, confidence) for diagnostic logging — otherwise
+    a rejected/garbled attempt leaves no trace at all."""
     current_rms = pcm_rms(audio_data)
     utterance_peak_rms = max(utterance_peak_rms, current_rms)
 
@@ -82,7 +85,7 @@ def check_wake_phrase(recognizer, audio_data, utterance_peak_rms, partial_hits):
         if partial_text == WAKE_PHRASE:
             partial_hits += 1
 
-        return False, utterance_peak_rms, partial_hits
+        return False, utterance_peak_rms, partial_hits, None
 
     result_data = json.loads(recognizer.Result())
     text = result_data.get("text", "").strip().lower()
@@ -95,6 +98,7 @@ def check_wake_phrase(recognizer, audio_data, utterance_peak_rms, partial_hits):
     ]
 
     minimum_confidence = min(confidences) if confidences else 0.0
+    candidate = (text, minimum_confidence) if text else None
 
     accepted = (
         text == WAKE_PHRASE
@@ -103,4 +107,4 @@ def check_wake_phrase(recognizer, audio_data, utterance_peak_rms, partial_hits):
         and partial_hits >= MIN_PARTIAL_HITS
     )
 
-    return accepted, 0, 0
+    return accepted, 0, 0, candidate
