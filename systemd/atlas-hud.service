@@ -45,6 +45,14 @@ Environment=XDG_RUNTIME_DIR=/run/user/1000
 # captured by the repo/install script — if this kiosk is ever set up on a
 # fresh machine, that same file needs to be replaced again.
 Environment=XCURSOR_THEME=atlas-invisible
+# The cursor sits on a DRM hardware overlay plane by default, which
+# wlr-screencopy does NOT composite into captures — grim screenshots
+# showed a clean screen while the physical display still had the arrow.
+# Forcing software cursors makes wlroots draw the (now-transparent)
+# cursor bitmap into the actual frame: invisible for real, and
+# screencopy verification becomes truthful. Still valid on wlroots 0.18
+# (renamed WLR_NO_HARDWARE_CURSORS only in 0.19+).
+Environment=WLR_NO_HARDWARE_CURSORS=1
 # A cold-boot HDMI display can take several seconds to complete its
 # handshake after power-on. A blind fixed sleep here isn't long enough on
 # some screens — cage fails immediately ("Unable to open Wayland socket")

@@ -15,9 +15,52 @@ from pathlib import Path
 
 import pc_stats
 
+ROBOT_ENV_PATH = Path("/home/atlas/atlas-robot/config/robot.env")
 MAC_CACHE_PATH = Path("/home/atlas/atlas-robot/data/pc_mac.json")
-WOL_PORT = 9
+# Magic packets are conventionally sent to UDP 9 (discard) or 7 (echo);
+# some NIC firmwares only listen on one, so send to both.
+WOL_PORTS = (9, 7)
+WOL_SEND_REPEATS = 3
 MAC_PATTERN = re.compile(r"^([0-9a-f]{2}:){5}[0-9a-f]{2}$")
+
+
+def _load_configured_mac():
+    """Optional WOL_MAC in config/robot.env overrides the learned MAC —
+    for when the PC's wake-capable NIC differs from the one LibreHardware
+    Monitor answers on, or the ARP-learned one is a USB dongle."""
+    if not ROBOT_ENV_PATH.exists():
+        return None
+
+    for line in ROBOT_ENV_PATH.read_text().splitlines():
+        line = line.strip()
+
+        if line.startswith("WOL_MAC="):
+            mac = line.split("=", 1)[1].strip().strip('"').strip("'").lower()
+            mac = mac.replace("-", ":")
+
+            if MAC_PATTERN.match(mac):
+                return mac
+
+    return None
+
+
+def _broadcast_addresses():
+    """The subnet-directed broadcast (e.g. 192.168.0.255) plus the global
+    one. Directed broadcast is more reliable on networks where the OS or
+    switch filters 255.255.255.255."""
+    addresses = ["255.255.255.255"]
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            own_ip = sock.getsockname()[0]
+
+        octets = own_ip.split(".")
+        addresses.insert(0, ".".join(octets[:3] + ["255"]))
+    except OSError:
+        pass
+
+    return addresses
 
 
 def _lookup_mac_from_neighbors(ip):
@@ -82,34 +125,77 @@ def refresh_mac_cache():
 
 
 def get_pc_mac():
-    """Returns the PC's MAC — live from the neighbor table when possible
-    (also refreshing the cache), else from the on-disk cache."""
-    return refresh_mac_cache() or _load_cached_mac()
+    """Returns the PC's MAC — an explicit WOL_MAC config wins, then a live
+    neighbor-table lookup (also refreshing the cache), then the on-disk
+    cache."""
+    return _load_configured_mac() or refresh_mac_cache() or _load_cached_mac()
 
 
 def send_wake_packet():
-    """Sends a WoL magic packet to the gaming PC. Returns a spoken-ready
-    status message."""
+    """Sends WoL magic packets to the gaming PC — both standard ports,
+    directed + global broadcast, several repeats, since a single UDP
+    datagram to one address is easy to lose. Returns a spoken-ready
+    status message reporting exactly what happened."""
     mac = get_pc_mac()
 
     if mac is None:
         return (
             "I don't know your PC's hardware address yet. "
             "I learn it automatically while the PC is on, so once it's "
-            "been online with me running, I'll be able to wake it."
+            "been online with me running, I'll be able to wake it. "
+            "You can also set WOL_MAC in my config to skip the wait."
         )
 
     if pc_stats.get_gaming_pc_stats().get("online"):
         return "Your PC already looks like it's on."
 
     payload = bytes.fromhex("ff" * 6 + mac.replace(":", "") * 16)
+    sent = 0
 
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-            sock.sendto(payload, ("255.255.255.255", WOL_PORT))
+
+            for _ in range(WOL_SEND_REPEATS):
+                for address in _broadcast_addresses():
+                    for port in WOL_PORTS:
+                        sock.sendto(payload, (address, port))
+                        sent += 1
+
+                time.sleep(0.1)
     except OSError as error:
         print("WoL send failed:", error, flush=True)
-        return "I couldn't send the wake signal."
 
-    return "Wake signal sent. Your PC should be booting now."
+        if sent == 0:
+            return "I couldn't send the wake signal."
+
+    print(f"WoL: {sent} magic packets sent for {mac}", flush=True)
+    return "Wake signal sent. I'll tell you when your PC actually comes up."
+
+
+WAKE_VERIFY_TIMEOUT_SECONDS = 90
+WAKE_VERIFY_POLL_SECONDS = 5
+
+
+def verify_wake(speak, log):
+    """Polls until the PC reports online or the timeout passes, then
+    speaks the honest outcome — 'signal sent' alone never confirmed the
+    packet actually landed. Run in a background thread by the hub."""
+    deadline = time.monotonic() + WAKE_VERIFY_TIMEOUT_SECONDS
+
+    while time.monotonic() < deadline:
+        time.sleep(WAKE_VERIFY_POLL_SECONDS)
+
+        if pc_stats.get_gaming_pc_stats().get("online"):
+            message = "Your PC is up."
+            log(message)
+            speak(message)
+            return
+
+    message = (
+        "Your PC still isn't responding after the wake signal. Check that "
+        "Wake-on-LAN is enabled in its BIOS and that Windows fast startup "
+        "is turned off — that's the usual culprit."
+    )
+    log(message)
+    speak(message)

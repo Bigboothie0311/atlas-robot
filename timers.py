@@ -9,17 +9,62 @@ ends and otherwise changes nothing; focus mode also mutes proactive
 nudges while active (checked by robot_hub) and dims the HUD (rendered by
 hud/app.js from /state).
 """
+import json
 import threading
 import time
+from pathlib import Path
 
 MAX_TIMER_SECONDS = 12 * 3600
 DEFAULT_FOCUS_MINUTES = 25
 WATCHER_POLL_SECONDS = 1
 
+# How long the HUD keeps flashing after a timer fires.
+ALERT_VISIBLE_SECONDS = 8
+
+STATE_PATH = Path("/home/atlas/atlas-robot/data/timer_state.json")
+
 _lock = threading.Lock()
 
 _timer = None  # {"ends_at", "total_seconds", "label"}
 _focus = None  # {"ends_at", "total_seconds"}
+_last_alert_at = 0.0
+
+
+def _persist_locked():
+    """Caller must hold _lock. Writes current timer/focus state to disk so
+    a hub restart mid-timer doesn't silently eat it — on reload, an
+    already-expired timer just fires immediately on the watcher's first
+    tick."""
+    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    temporary_path = STATE_PATH.with_suffix(".tmp")
+    temporary_path.write_text(json.dumps({"timer": _timer, "focus": _focus}))
+    temporary_path.replace(STATE_PATH)
+
+
+def _load_persisted_state():
+    global _timer, _focus
+
+    if not STATE_PATH.exists():
+        return
+
+    try:
+        data = json.loads(STATE_PATH.read_text())
+    except (json.JSONDecodeError, OSError):
+        return
+
+    with _lock:
+        timer = data.get("timer")
+        focus = data.get("focus")
+
+        if isinstance(timer, dict) and "ends_at" in timer:
+            _timer = timer
+
+        if isinstance(focus, dict) and "ends_at" in focus:
+            _focus = focus
+
+
+_load_persisted_state()
 
 
 def start_timer(seconds, label=None):
@@ -33,6 +78,7 @@ def start_timer(seconds, label=None):
             "total_seconds": seconds,
             "label": (label or "").strip() or None,
         }
+        _persist_locked()
 
     return seconds
 
@@ -44,6 +90,7 @@ def cancel_timer():
     with _lock:
         had_timer = _timer is not None
         _timer = None
+        _persist_locked()
 
     return had_timer
 
@@ -72,6 +119,7 @@ def start_focus(minutes=DEFAULT_FOCUS_MINUTES):
             "ends_at": time.time() + seconds,
             "total_seconds": seconds,
         }
+        _persist_locked()
 
     return seconds
 
@@ -83,6 +131,7 @@ def end_focus():
     with _lock:
         was_active = _focus is not None
         _focus = None
+        _persist_locked()
 
     return was_active
 
@@ -113,18 +162,27 @@ def to_state_dict():
                 "total_seconds": _focus["total_seconds"],
             }
 
-    return {"timer": timer_state, "focus": focus_state}
+    return {
+        "timer": timer_state,
+        "focus": focus_state,
+        # Drives the HUD's expiry flash — true briefly after a timer fires.
+        "timer_alert": now - _last_alert_at < ALERT_VISIBLE_SECONDS,
+    }
 
 
-def watcher_loop(speak, log):
-    """Announces timer/focus expiry. speak(text) and log(text) are injected
-    by robot_hub so this module stays free of Flask/audio plumbing."""
-    global _timer, _focus
+def watcher_loop(speak, log, chime=None):
+    """Announces timer/focus expiry. speak(text), log(text), and the
+    optional chime() are injected by robot_hub so this module stays free
+    of Flask/audio plumbing. A timer expiry chimes audibly before the
+    spoken line; focus wrap-ups stay speech-only (they're a wind-down,
+    not an alarm)."""
+    global _timer, _focus, _last_alert_at
 
     while True:
         time.sleep(WATCHER_POLL_SECONDS)
 
         announcement = None
+        is_timer_expiry = False
 
         with _lock:
             now = time.time()
@@ -132,12 +190,16 @@ def watcher_loop(speak, log):
             if _timer is not None and now >= _timer["ends_at"]:
                 label = _timer["label"]
                 _timer = None
+                _last_alert_at = now
+                is_timer_expiry = True
+                _persist_locked()
                 announcement = (
                     f"Time's up: {label}." if label else "Your timer is done."
                 )
             elif _focus is not None and now >= _focus["ends_at"]:
                 minutes = round(_focus["total_seconds"] / 60)
                 _focus = None
+                _persist_locked()
                 minute_word = "minute" if minutes == 1 else "minutes"
                 announcement = (
                     f"Focus session complete — that was {minutes} "
@@ -148,6 +210,9 @@ def watcher_loop(speak, log):
             continue
 
         try:
+            if is_timer_expiry and chime is not None:
+                chime()
+
             log(announcement)
             speak(announcement)
         except Exception as error:

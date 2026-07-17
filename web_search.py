@@ -1,5 +1,4 @@
 from ddgs import DDGS
-from ddgs.exceptions import DDGSException
 
 
 MAX_RESULTS = 12
@@ -9,7 +8,10 @@ MAX_TEXT_RESULTS = 6
 def search_images(query, max_results=MAX_RESULTS):
     try:
         results = DDGS().images(query, max_results=max_results, safesearch="moderate")
-    except DDGSException as error:
+    except Exception as error:
+        # Not just DDGSException — the underlying HTTP client raises its own
+        # timeout/transport errors, and a failed search must degrade to
+        # empty results, never crash a briefing or voice command.
         print("Image search failed:", type(error).__name__, error)
         return []
 
@@ -28,7 +30,7 @@ def search_images(query, max_results=MAX_RESULTS):
 def search_news(query="top news stories today", max_results=MAX_TEXT_RESULTS):
     try:
         results = DDGS().news(query, max_results=max_results, safesearch="moderate")
-    except DDGSException as error:
+    except Exception as error:
         print("News search failed:", type(error).__name__, error)
         return []
 
@@ -47,7 +49,7 @@ def search_news(query="top news stories today", max_results=MAX_TEXT_RESULTS):
 def search_text(query, max_results=MAX_TEXT_RESULTS):
     try:
         results = DDGS().text(query, max_results=max_results, safesearch="moderate")
-    except DDGSException as error:
+    except Exception as error:
         print("Web search failed:", type(error).__name__, error)
         return []
 

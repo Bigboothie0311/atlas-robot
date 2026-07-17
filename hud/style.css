@@ -1,5 +1,5 @@
 :root {
-  --bg: #060b13;
+  --bg: #081120;
   --cyan: #34e2ff;
   --cyan-dim: #0c3540;
   --cyan-faint: rgba(52, 226, 255, 0.06);
@@ -7,6 +7,11 @@
   --green: #58ff9c;
   --red: #ff5f5f;
   --text: #cdeff7;
+  /* THE brightness knob. Scales the whole HUD proportionally (background,
+     glows, text all together) so contrast hierarchy is preserved instead
+     of flattening toward white. 1.0 = original look; raise/lower to
+     taste. Quiet-hours dimming multiplies against this same value. */
+  --hud-brightness: 1.35;
 }
 
 * {
@@ -24,6 +29,10 @@ html, body {
   overflow: hidden;
   cursor: none;
   transition: filter 2s ease;
+}
+
+body {
+  filter: brightness(var(--hud-brightness));
 }
 
 /* Atmosphere: a faint tactical grid plus a vignette that pools light at
@@ -52,9 +61,11 @@ body::after {
 }
 
 /* Late-night ambient mode — dimmer and less saturated, easier on the eyes
-   in a dark room, matches the quieter/shorter voice during this window. */
+   in a dark room, matches the quieter/shorter voice during this window.
+   Multiplies against the base --hud-brightness knob rather than
+   replacing it, so adjusting one never fights the other. */
 body.quiet-hours {
-  filter: brightness(0.55) saturate(0.75);
+  filter: brightness(calc(var(--hud-brightness) * 0.45)) saturate(0.75);
 }
 
 /* Fixed 1920x1080 design canvas — app.js scales the whole page to fit
@@ -731,6 +742,24 @@ body.state-speaking #status-label  { color: var(--green); }
   text-shadow: 0 0 12px rgba(52, 226, 255, 0.5);
 }
 
+/* Timer just fired — the reactor rings flash amber for a few seconds so
+   the alert is visible from across the room even with audio missed. */
+body.timer-alert .ring-inner,
+body.timer-alert .ring-middle,
+body.timer-alert .ring-segments {
+  stroke: var(--amber);
+  animation: timer-flash 0.5s ease-in-out infinite;
+}
+
+body.timer-alert #ring-core-glow {
+  background: radial-gradient(circle, rgba(255, 178, 56, 0.3), transparent 70%);
+}
+
+@keyframes timer-flash {
+  0%, 100% { opacity: 1; filter: drop-shadow(0 0 18px var(--amber)); }
+  50%      { opacity: 0.35; filter: drop-shadow(0 0 4px var(--amber)); }
+}
+
 /* Focus mode: everything but the reactor recedes so the room stops
    shouting for attention — same spirit as quiet-hours, but user-invoked. */
 body.focus-mode .panel,
@@ -783,6 +812,47 @@ body.focus-mode #printer-panel.visible {
 
 #printer-panel.visible {
   display: block;
+}
+
+/* Live LAN device roster — appears once the sentinel's first sweep
+   lands. Two-column rows: identity (hostname > vendor > mac) and IP. */
+#devices-panel {
+  display: none;
+  width: 640px;
+}
+
+#devices-panel.visible {
+  display: block;
+}
+
+#devices-list {
+  margin-top: 8px;
+  columns: 2;
+  column-gap: 28px;
+  font-size: 13px;
+  line-height: 1.8;
+}
+
+#devices-list .device-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  break-inside: avoid;
+}
+
+#devices-list .device-name {
+  color: var(--text);
+  opacity: 0.9;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 180px;
+}
+
+#devices-list .device-ip {
+  color: var(--cyan);
+  opacity: 0.7;
+  flex-shrink: 0;
 }
 
 #qa-log .qa-entry {

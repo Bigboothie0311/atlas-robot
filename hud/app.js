@@ -258,6 +258,7 @@ function applyTimers(state) {
   const focus = state.focus;
 
   document.body.classList.toggle("focus-mode", Boolean(focus));
+  document.body.classList.toggle("timer-alert", Boolean(state.timer_alert));
 
   if (timer) {
     readout.textContent = `TIMER ${formatCountdown(timer.remaining_seconds)}`;
@@ -336,6 +337,8 @@ async function pollStats() {
     document.getElementById("device-count").textContent =
       deviceCount > 0 ? `DEVICES ONLINE: ${deviceCount}` : "";
 
+    applyDeviceList(stats.network.devices || []);
+
     const hours = Math.floor(stats.uptime_seconds / 3600);
     const minutes = Math.floor((stats.uptime_seconds % 3600) / 60);
     document.getElementById("uptime").textContent = `${hours}h ${minutes}m`;
@@ -388,6 +391,49 @@ async function pollStats() {
     applyHeadlines(stats.headlines || []);
   } catch (error) {
     console.error("stats poll failed", error);
+  }
+}
+
+const DEVICE_LIST_MAX_ROWS = 12;
+let lastDeviceListKey = "";
+
+function applyDeviceList(devices) {
+  const panel = document.getElementById("devices-panel");
+  const list = document.getElementById("devices-list");
+
+  if (!devices.length) {
+    panel.classList.remove("visible");
+    return;
+  }
+
+  panel.classList.add("visible");
+
+  const rows = devices.slice(0, DEVICE_LIST_MAX_ROWS);
+  const key = rows.map((d) => `${d.mac}|${d.ip}|${d.hostname}|${d.vendor}`).join(",");
+
+  if (key === lastDeviceListKey) {
+    return;
+  }
+  lastDeviceListKey = key;
+
+  list.innerHTML = "";
+  for (const device of rows) {
+    const row = document.createElement("div");
+    row.className = "device-row";
+
+    const name = document.createElement("span");
+    name.className = "device-name";
+    name.textContent = (
+      device.hostname || device.vendor || device.mac.toUpperCase()
+    );
+
+    const ip = document.createElement("span");
+    ip.className = "device-ip";
+    ip.textContent = device.ip;
+
+    row.appendChild(name);
+    row.appendChild(ip);
+    list.appendChild(row);
   }
 }
 
