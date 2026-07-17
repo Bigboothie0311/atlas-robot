@@ -256,9 +256,8 @@ async function pollStats() {
     const systemStatusPanel = document.querySelector(".panel-system-status");
     const isHot = stats.cpu.percent >= CPU_WARNING_THRESHOLD;
     systemStatusPanel.classList.toggle("warning", isHot);
-    document.getElementById("system-status").textContent = isHot ? "WARNING" : "NOMINAL";
     document.getElementById("system-status-detail").textContent =
-      `MEM ${stats.memory.percent}%`;
+      `MEM ${stats.memory.percent}% · ${isHot ? "WARNING" : "NOMINAL"}`;
 
     document.getElementById("disk-percent").textContent = `${stats.disk.percent}%`;
     document.getElementById("disk-detail").textContent =
