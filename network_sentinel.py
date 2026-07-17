@@ -24,9 +24,85 @@ import hud_stats
 
 KNOWN_DEVICES_PATH = Path("/home/atlas/atlas-robot/data/known_devices.json")
 OUI_DATABASE_PATH = Path("/usr/share/ieee-data/oui.txt")
+ROBOT_ENV_PATH = Path("/home/atlas/atlas-robot/config/robot.env")
 SCAN_INTERVAL_SECONDS = 5 * 60
 PING_WORKERS = 40
 MAC_PATTERN = re.compile(r"^([0-9a-f]{2}:){5}[0-9a-f]{2}$")
+
+# Phone presence: how long the phone must have been gone for its return
+# to count as "coming home" (vs. briefly dropping off wifi).
+PHONE_AWAY_THRESHOLD_SECONDS = 30 * 60
+
+_phone_state = {
+    "present": False,
+    "last_seen": 0.0,
+    "last_missing_since": None,
+}
+
+
+def load_phone_mac():
+    """Optional PHONE_MAC in config/robot.env identifies the owner's
+    phone for presence detection."""
+    if not ROBOT_ENV_PATH.exists():
+        return None
+
+    for line in ROBOT_ENV_PATH.read_text().splitlines():
+        line = line.strip()
+
+        if line.startswith("PHONE_MAC="):
+            mac = line.split("=", 1)[1].strip().strip('"').strip("'").lower()
+            mac = mac.replace("-", ":")
+
+            if MAC_PATTERN.match(mac):
+                return mac
+
+    return None
+
+
+def phone_presence():
+    """{configured, present, last_seen} for the 'is my phone home' query."""
+    with _lock:
+        return {
+            "configured": load_phone_mac() is not None,
+            "present": _phone_state["present"],
+            "last_seen": _phone_state["last_seen"],
+        }
+
+
+def _update_phone_presence(online_macs, now):
+    """Tracks the phone across scans. Returns 'welcome home' text when it
+    reappears after a real absence, else None."""
+    phone_mac = load_phone_mac()
+
+    if phone_mac is None:
+        return None
+
+    is_online = phone_mac in online_macs
+    announcement = None
+
+    with _lock:
+        was_present = _phone_state["present"]
+
+        if is_online:
+            if not was_present:
+                missing_since = _phone_state["last_missing_since"]
+
+                if (
+                    missing_since is not None
+                    and now - missing_since >= PHONE_AWAY_THRESHOLD_SECONDS
+                ):
+                    announcement = "Welcome home."
+
+            _phone_state["present"] = True
+            _phone_state["last_seen"] = now
+            _phone_state["last_missing_since"] = None
+        else:
+            if was_present:
+                _phone_state["last_missing_since"] = now
+
+            _phone_state["present"] = False
+
+    return announcement
 
 _lock = threading.Lock()
 _online_device_count = 0
@@ -234,6 +310,12 @@ def sentinel_loop(speak, log, should_stay_quiet):
                 _online_devices = device_list
 
             _save_known_devices(known_devices)
+
+            welcome = _update_phone_presence(set(online), now)
+
+            if welcome is not None and not should_stay_quiet():
+                log(welcome)
+                speak(welcome)
 
             if new_macs and not is_baseline_scan and not should_stay_quiet():
                 count = len(new_macs)

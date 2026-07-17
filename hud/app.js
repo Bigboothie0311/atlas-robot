@@ -286,6 +286,16 @@ const AUTH_LABELS = {
   UNTRAINED: "",
 };
 
+function applyAlertAndScreen(state) {
+  const redAlert = state.red_alert || {};
+  document.body.classList.toggle("red-alert", Boolean(redAlert.active));
+  document.body.classList.toggle("screen-dark", Boolean(state.screen_dark));
+
+  if (redAlert.active && document.body.classList.contains("state-idle")) {
+    document.getElementById("masthead-state-text").textContent = "RED ALERT";
+  }
+}
+
 function applyAuth(state) {
   const indicator = document.getElementById("auth-indicator");
   const auth = state.auth || {};
@@ -307,6 +317,7 @@ async function pollState() {
     applyState(state);
     applyTimers(state);
     applyAuth(state);
+    applyAlertAndScreen(state);
     applyImage(state);
     applyGallery(state);
     applyQaLog(state);
@@ -403,6 +414,11 @@ async function pollStats() {
       }
       if (printer.layer) {
         detailParts.push(`LAYER ${printer.layer}`);
+      }
+      if (printer.eta_minutes) {
+        const h = Math.floor(printer.eta_minutes / 60);
+        const m = printer.eta_minutes % 60;
+        detailParts.push(`ETA ${h > 0 ? `${h}H ` : ""}${m}M`);
       }
       document.getElementById("printer-detail").textContent =
         detailParts.join(" · ");

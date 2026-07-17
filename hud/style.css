@@ -945,6 +945,58 @@ body.focus-mode #printer-panel.visible {
   border-radius: 4px;
 }
 
+/* ------------------------------------------------------------------ */
+/* Red alert + go-dark                                                 */
+/* ------------------------------------------------------------------ */
+
+/* Red alert: the whole console shifts to battle-stations red — rings,
+   masthead, labels — with a slow threat pulse. Cleared by "stand down"
+   or when the condition resolves. */
+body.red-alert {
+  animation: red-alert-pulse 1.6s ease-in-out infinite;
+}
+
+body.red-alert .ring-inner,
+body.red-alert .ring-middle,
+body.red-alert .ring-segments,
+body.red-alert .ring-ticks {
+  stroke: var(--red);
+}
+
+body.red-alert #ring-core-glow {
+  background: radial-gradient(circle, rgba(255, 95, 95, 0.28), transparent 70%);
+}
+
+body.red-alert .panel-label,
+body.red-alert #status-label,
+body.red-alert #masthead-state {
+  color: var(--red);
+}
+
+body.red-alert .live-dot {
+  background: var(--red);
+  box-shadow: 0 0 10px var(--red);
+  animation-duration: 0.5s;
+}
+
+body.red-alert #masthead::after {
+  background: linear-gradient(90deg, var(--red), transparent);
+  box-shadow: 0 0 8px var(--red);
+}
+
+@keyframes red-alert-pulse {
+  0%, 100% { filter: brightness(var(--hud-brightness)); }
+  50%      { filter: brightness(calc(var(--hud-brightness) * 0.8)) saturate(1.3); }
+}
+
+/* Go dark: everything fades to near-black except a ghost of the
+   reactor, so the room gets dark but Atlas still reads as "alive".
+   Any wake-up or "lights up" restores instantly. */
+body.screen-dark #dashboard {
+  opacity: 0.03;
+  transition: opacity 2s ease;
+}
+
 /* Quality floor: honor reduced-motion preferences by parking every
    continuous animation (boot-in still runs once; it's brief and subtle). */
 @media (prefers-reduced-motion: reduce) {

@@ -1303,6 +1303,190 @@ def run_network_devices_command():
     return spoken
 
 
+PRINT_ETA_PHRASES = {
+    "how long left on the print",
+    "how long is left on the print",
+    "how much longer on the print",
+    "how long until the print is done",
+    "when will the print be done",
+    "when will the print finish",
+    "print eta",
+    "what's the print eta",
+    "whats the print eta",
+}
+
+
+def run_print_eta_command():
+    try:
+        response = requests.get(f"{HUB}/hud/stats", timeout=8)
+        response.raise_for_status()
+        printer = response.json().get("printer", {})
+    except requests.RequestException as error:
+        print("print eta request failed:", error, flush=True)
+        return "I couldn't reach the printer stats."
+
+    if not printer.get("online"):
+        return "The printer is offline."
+
+    state = printer.get("state")
+    progress = printer.get("progress_percent")
+    eta_minutes = printer.get("eta_minutes")
+
+    if state not in ("building", "printing"):
+        return f"There's no active print — the printer is {state or 'idle'}."
+
+    spoken = f"The print is at {progress} percent."
+
+    if eta_minutes is None:
+        return spoken + " Give me a few more minutes of data for an E T A."
+
+    if eta_minutes >= 60:
+        hours = eta_minutes // 60
+        minutes = eta_minutes % 60
+        hour_word = "hour" if hours == 1 else "hours"
+        return spoken + f" About {hours} {hour_word} and {minutes} minutes to go."
+
+    return spoken + f" About {eta_minutes} minutes to go."
+
+
+STAND_DOWN_PHRASES = {
+    "stand down",
+    "acknowledge the alert",
+    "acknowledge alert",
+    "cancel the alert",
+    "cancel red alert",
+    "all clear",
+}
+
+SCREEN_DARK_PHRASES = {
+    "go dark",
+    "lights out",
+    "screen off",
+    "turn off the screen",
+    "turn the screen off",
+}
+
+SCREEN_WAKE_PHRASES = {
+    "lights up",
+    "screen on",
+    "turn on the screen",
+    "turn the screen on",
+    "wake the screen",
+}
+
+
+def _set_screen_dark(dark):
+    try:
+        requests.post(f"{HUB}/screen", json={"dark": dark}, timeout=5)
+        return True
+    except requests.RequestException as error:
+        print("screen request failed:", error, flush=True)
+        return False
+
+
+PHONE_PHRASES = {
+    "is my phone home",
+    "is my phone here",
+    "is my phone on the network",
+    "is my phone connected",
+    "where's my phone",
+    "wheres my phone",
+}
+
+
+def run_phone_command():
+    try:
+        response = requests.get(f"{HUB}/phone", timeout=5)
+        response.raise_for_status()
+        phone = response.json()
+    except requests.RequestException as error:
+        print("phone request failed:", error, flush=True)
+        return "I couldn't reach my presence tracker."
+
+    if not phone.get("configured"):
+        return (
+            "I don't know which device is your phone yet — "
+            "set PHONE_MAC in my config and I'll track it."
+        )
+
+    if phone.get("present"):
+        return "Yes, your phone is on the network."
+
+    last_seen = phone.get("last_seen") or 0
+
+    if last_seen:
+        minutes_ago = round((time.time() - last_seen) / 60)
+        return f"No — I last saw it about {minutes_ago} minutes ago."
+
+    return "No, I haven't seen your phone since I started watching."
+
+
+INTERNET_CHECK_PHRASES = {
+    "how's the internet",
+    "hows the internet",
+    "how is the internet",
+    "check the internet",
+    "internet status",
+    "run a ping test",
+    "ping test",
+    "is the internet up",
+    "is the internet down",
+}
+
+
+def run_internet_check_command():
+    """Real measurements, spoken honestly: ping latency/loss to 8.8.8.8
+    plus a DNS resolution timing. No token cost, ~3 seconds."""
+    try:
+        result = subprocess.run(
+            ["ping", "-c", "5", "-i", "0.25", "-W", "2", "8.8.8.8"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return "I couldn't run the ping test."
+
+    loss_match = re.search(r"(\d+(?:\.\d+)?)% packet loss", result.stdout)
+    rtt_match = re.search(
+        r"= [\d.]+/([\d.]+)/[\d.]+/[\d.]+ ms", result.stdout
+    )
+
+    if loss_match and float(loss_match.group(1)) >= 100:
+        return "The internet looks down — every ping was lost."
+
+    parts = []
+
+    if rtt_match:
+        parts.append(f"average latency {float(rtt_match.group(1)):.0f} milliseconds")
+
+    if loss_match and float(loss_match.group(1)) > 0:
+        parts.append(f"{loss_match.group(1)} percent packet loss")
+
+    import socket as socket_module
+    dns_start = time.monotonic()
+
+    try:
+        socket_module.getaddrinfo("google.com", 443)
+        dns_ms = (time.monotonic() - dns_start) * 1000
+        parts.append(f"DNS resolving in {dns_ms:.0f} milliseconds")
+    except OSError:
+        parts.append("but DNS lookups are failing")
+
+    if not parts:
+        return "The ping ran but I couldn't parse the results."
+
+    quality = "healthy"
+
+    if rtt_match and float(rtt_match.group(1)) > 100:
+        quality = "sluggish"
+
+    if loss_match and float(loss_match.group(1)) > 0:
+        quality = "flaky"
+
+    return f"Internet looks {quality}: " + ", ".join(parts) + "."
+
+
 DIAGNOSTICS_PHRASES = {
     "run diagnostics",
     "run a diagnostic",
@@ -1915,6 +2099,10 @@ def _answer_and_speak(text, model):
 
 def handle_turn(model):
     try:
+        # A wake-up always brings the screen back from "go dark" —
+        # idempotent and cheap when it wasn't dark.
+        _set_screen_dark(False)
+
         # Camera gate: one verify per lapsed validity window, only on
         # activation — the camera never runs continuously. Unverified
         # turns still proceed, but restricted to local basics.
@@ -2086,6 +2274,47 @@ def handle_turn(model):
         if normalized_phrase in NEWS_PHRASES:
             set_face("thinking")
             answer = briefing.build_news_brief()
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        if normalized_phrase in PRINT_ETA_PHRASES:
+            answer = run_print_eta_command()
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        if normalized_phrase in STAND_DOWN_PHRASES:
+            try:
+                requests.post(f"{HUB}/stand_down", timeout=5)
+                answer = "Standing down."
+            except requests.RequestException:
+                answer = "I couldn't reach the alert system."
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        if normalized_phrase in SCREEN_DARK_PHRASES:
+            answer = "Going dark." if _set_screen_dark(True) else "I couldn't reach the screen."
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        if normalized_phrase in SCREEN_WAKE_PHRASES:
+            answer = "Screen's back." if _set_screen_dark(False) else "I couldn't reach the screen."
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        if normalized_phrase in PHONE_PHRASES:
+            answer = run_phone_command()
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        if normalized_phrase in INTERNET_CHECK_PHRASES:
+            set_face("thinking")
+            answer = run_internet_check_command()
             log_qa(text, answer)
             speak(answer)
             return

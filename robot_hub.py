@@ -11,6 +11,7 @@ from pathlib import Path
 import requests
 from piper import PiperVoice, SynthesisConfig
 
+import alerts
 import camera_gate
 import hud_stats
 import memory_store
@@ -196,6 +197,7 @@ def hud_stats_route():
     stats["network"]["device_count"] = network_sentinel.get_online_device_count()
     stats["network"]["devices"] = network_sentinel.get_online_devices()
     stats["printer"] = hud_stats.get_printer_stats()
+    stats["printer"]["eta_minutes"] = alerts.print_eta_minutes()
     # Cache-only read — a cold headline cache must never stall the HUD's
     # 5s stats poll on a network fetch (the refresher thread fills it).
     stats["headlines"] = [
@@ -230,6 +232,11 @@ def get_state():
 
     state.update(timers.to_state_dict())
     state["auth"] = camera_gate.hud_status()
+    state["red_alert"] = alerts.red_alert_state()
+
+    with _screen_lock:
+        state["screen_dark"] = _screen_dark
+
     return jsonify(state)
 
 
@@ -676,6 +683,36 @@ def end_focus():
     return jsonify({"ok": True, "ended": timers.end_focus()})
 
 
+_screen_lock = threading.Lock()
+_screen_dark = False
+
+
+@app.post("/screen")
+def set_screen():
+    """'Go dark' / 'lights up' — the HUD fades to near-black (rendered
+    client-side from this flag) rather than cutting HDMI power, so it
+    recovers instantly and survives compositor quirks."""
+    global _screen_dark
+
+    data = request.get_json(silent=True) or {}
+
+    with _screen_lock:
+        _screen_dark = bool(data.get("dark", False))
+        dark = _screen_dark
+
+    return jsonify({"ok": True, "dark": dark})
+
+
+@app.post("/stand_down")
+def stand_down():
+    return jsonify({"ok": True, "was_active": alerts.stand_down()})
+
+
+@app.get("/phone")
+def phone():
+    return jsonify({"ok": True, **network_sentinel.phone_presence()})
+
+
 @app.post("/wake_pc")
 def wake_pc():
     message = pc_power.send_wake_packet()
@@ -948,6 +985,27 @@ def _run_proactive_checks():
     if due_reminders:
         return
 
+    # Red alert outranks quiet hours AND focus mode — a core overheating
+    # or a failed print is exactly the thing worth interrupting for. It
+    # announces once per episode (evaluate_red_alert handles that) and
+    # the HUD stays in alert theme until "stand down" or self-clear.
+    alert_printer = hud_stats.get_printer_stats()
+    alert_announcement = alerts.evaluate_red_alert(
+        hud_stats.get_cpu_stats().get("temp_c"),
+        hud_stats.get_disk_stats()["percent"],
+        bool(
+            alert_printer.get("online")
+            and alert_printer.get("state") in PRINTER_FAILED_STATES
+        ),
+    )
+
+    if alert_announcement is not None:
+        _play_chime()
+        _play_chime()
+        _log_proactive_qa(alert_announcement)
+        _speak_text(alert_announcement)
+        return
+
     # Focus mode mutes every autonomous nudge below — the user asked for
     # uninterrupted time; reminders above still fire since those are
     # explicitly scheduled.
@@ -965,6 +1023,9 @@ def _run_proactive_checks():
     printer = hud_stats.get_printer_stats()
     printer_state = printer.get("state") if printer.get("online") else None
     last_printer_state = _proactive_state["last_printer_state"]
+
+    # Feed the ETA extrapolator every poll while a job runs.
+    alerts.record_print_sample(printer_state, printer.get("progress_percent"))
 
     if printer_state is not None:
         _proactive_state["last_printer_state"] = printer_state
