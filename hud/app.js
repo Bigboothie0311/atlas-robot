@@ -56,7 +56,7 @@ function buildRealStatusLine() {
   }
 
   const options = [
-    `CPU LOAD ${latestStats.cpu.percent}% NOMINAL`,
+    `MEMORY LOAD ${latestStats.memory.percent}% NOMINAL`,
     `DISK USAGE ${latestStats.disk.percent}%`,
   ];
 
@@ -148,7 +148,7 @@ function applyState(state) {
     label = "LISTENING";
   } else if (expression === "thinking") {
     stateClass = "state-thinking";
-    label = "THINKING";
+    label = state.activity_label || "THINKING";
   }
 
   // Only touch the state-* classes here — updateClock owns quiet-hours, so
@@ -248,9 +248,17 @@ async function pollStats() {
     const stats = await response.json();
     latestStats = stats;
 
-    document.getElementById("cpu-percent").textContent = `${stats.cpu.percent}%`;
-    document.getElementById("cpu-temp").textContent =
-      stats.cpu.temp_c !== null ? `${stats.cpu.temp_c} °C` : "-- °C";
+    // Matches robot_hub.py's CPU_WARNING_THRESHOLD — the raw CPU number
+    // isn't shown here by design, just a status word, so the voice warning
+    // (sustained 3+ minutes above this) is the source of truth for
+    // whether it's actually worth mentioning.
+    const CPU_WARNING_THRESHOLD = 75;
+    const systemStatusPanel = document.querySelector(".panel-system-status");
+    const isHot = stats.cpu.percent >= CPU_WARNING_THRESHOLD;
+    systemStatusPanel.classList.toggle("warning", isHot);
+    document.getElementById("system-status").textContent = isHot ? "WARNING" : "NOMINAL";
+    document.getElementById("system-status-detail").textContent =
+      `MEM ${stats.memory.percent}%`;
 
     document.getElementById("disk-percent").textContent = `${stats.disk.percent}%`;
     document.getElementById("disk-detail").textContent =

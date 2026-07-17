@@ -1,0 +1,13 @@
+# Grants the `input` group write access to /dev/uinput, which defaults to
+# root-only. Needed by hud_cursor_fix.py (see atlas-hud.service) to create
+# a virtual mouse and nudge it once, without running the whole HUD kiosk
+# as root just for that.
+#
+# Install:
+#   sudo cp systemd/99-uinput.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules
+#   sudo udevadm trigger
+#
+# The user account running atlas-hud.service must be a member of the
+# `input` group (check with `groups`).
+KERNEL=="uinput", GROUP="input", MODE="0660"

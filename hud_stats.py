@@ -101,6 +101,11 @@ def get_cpu_stats():
     return {"percent": round(percent, 1), "temp_c": temp_c}
 
 
+def get_memory_stats():
+    memory = psutil.virtual_memory()
+    return {"percent": round(memory.percent, 1)}
+
+
 def get_disk_stats():
     usage = shutil.disk_usage("/")
     used_gb = (usage.total - usage.free) / (1024 ** 3)
@@ -138,6 +143,7 @@ def get_hud_stats():
     return {
         "weather": get_weather_stats(),
         "cpu": get_cpu_stats(),
+        "memory": get_memory_stats(),
         "disk": get_disk_stats(),
         "network": get_network_stats(),
         "uptime_seconds": get_uptime_seconds(),

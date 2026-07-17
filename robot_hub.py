@@ -43,6 +43,7 @@ state_lock = threading.Lock()
 robot_state = {
     "expression": "happy",
     "speaking": False,
+    "activity_label": None,
     "image_path": None,
     "image_caption": None,
     "gallery_image_paths": [],
@@ -226,6 +227,21 @@ def set_face():
         "ok": True,
         "expression": expression
     })
+
+
+@app.post("/activity")
+def set_activity():
+    """Lets the HUD show what Atlas is actually doing during a tool call
+    (e.g. "CHECKING WEATHER") instead of a generic "THINKING" label. Pass
+    {"label": null} to clear it back to the default."""
+    data = request.get_json(silent=True) or {}
+    label = data.get("label")
+    label = str(label).strip() if label else None
+
+    with state_lock:
+        robot_state["activity_label"] = label or None
+
+    return jsonify({"ok": True, "activity_label": label})
 
 
 @app.post("/qa_log")
@@ -676,6 +692,12 @@ PROACTIVE_POLL_SECONDS = 120
 PC_TEMP_ALERT_C = 85
 PC_TEMP_COOLDOWN_SECONDS = 30 * 60
 RAIN_ALERT_PERCENT = 50
+# This Pi's own CPU, not the gaming PC's — matches hud/app.js's HUD status
+# word threshold, though the HUD flips to "WARNING" immediately while the
+# voice only speaks up after this has held sustained, to avoid narrating
+# every brief spike.
+CPU_WARNING_THRESHOLD = 75
+CPU_WARNING_SUSTAINED_SECONDS = 3 * 60
 # Don't speak unprompted overnight — a temp alert at 3am would be worse than
 # the problem it's warning about.
 QUIET_HOURS_START = 23
@@ -685,6 +707,8 @@ _proactive_state = {
     "last_cpu_alert": 0.0,
     "last_gpu_alert": 0.0,
     "last_rain_alert_date": None,
+    "cpu_high_since": None,
+    "cpu_warning_sent_for_episode": False,
 }
 
 
@@ -706,14 +730,50 @@ def _log_proactive_qa(message):
 
 
 def _run_proactive_checks():
-    if _in_quiet_hours():
-        return
-
     with state_lock:
         if robot_state["speaking"]:
             return
 
+    # User-scheduled reminders fire even during quiet hours — unlike the
+    # autonomous nudges below, this is something the user explicitly asked
+    # for at a specific time, not Atlas volunteering something.
+    due_reminders = memory_store.pop_due_reminders()
+
+    for reminder in due_reminders:
+        message = f"Reminder: {reminder['message']}"
+        _log_proactive_qa(message)
+        _speak_text(message)
+
+    if due_reminders:
+        return
+
+    if _in_quiet_hours():
+        return
+
     now = time.time()
+
+    cpu_percent = hud_stats.get_cpu_stats()["percent"]
+
+    if cpu_percent >= CPU_WARNING_THRESHOLD:
+        if _proactive_state["cpu_high_since"] is None:
+            _proactive_state["cpu_high_since"] = now
+            _proactive_state["cpu_warning_sent_for_episode"] = False
+        elif (
+            not _proactive_state["cpu_warning_sent_for_episode"]
+            and now - _proactive_state["cpu_high_since"] >= CPU_WARNING_SUSTAINED_SECONDS
+        ):
+            _proactive_state["cpu_warning_sent_for_episode"] = True
+            message = (
+                f"Heads up, my own CPU usage has been above "
+                f"{CPU_WARNING_THRESHOLD} percent for a few minutes."
+            )
+            _log_proactive_qa(message)
+            _speak_text(message)
+            return
+    else:
+        _proactive_state["cpu_high_since"] = None
+        _proactive_state["cpu_warning_sent_for_episode"] = False
+
     pc = pc_stats.get_gaming_pc_stats()
 
     if pc.get("online"):

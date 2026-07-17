@@ -823,6 +823,48 @@ def parse_instant_answer(text):
     return None
 
 
+REMINDER_PATTERN = re.compile(
+    r"^remind me in (\d+) (minute|minutes|hour|hours) (?:to|that) (.+)$"
+)
+
+
+def parse_reminder_command(text):
+    """Returns (delay_seconds, message) for a 'remind me in N minutes/hours
+    to...' request, otherwise None. Handled entirely locally — no model
+    call needed to schedule one."""
+    normalized = text.lower().strip()
+
+    for punctuation in [",", ".", "?", "!", ";", ":"]:
+        normalized = normalized.replace(punctuation, " ")
+
+    normalized = " ".join(normalized.split())
+
+    match = REMINDER_PATTERN.match(normalized)
+
+    if not match:
+        return None
+
+    amount = int(match.group(1))
+    unit = match.group(2)
+    message = match.group(3).strip()
+
+    if amount <= 0 or not message:
+        return None
+
+    delay_seconds = amount * 60 if "minute" in unit else amount * 3600
+
+    return delay_seconds, message
+
+
+def describe_delay(delay_seconds):
+    if delay_seconds >= 3600 and delay_seconds % 3600 == 0:
+        hours = delay_seconds // 3600
+        return f"{hours} hour" + ("s" if hours != 1 else "")
+
+    minutes = round(delay_seconds / 60)
+    return f"{minutes} minute" + ("s" if minutes != 1 else "")
+
+
 def handle_local_command(text, model):
     normalized = text.lower().strip()
 
@@ -1053,6 +1095,21 @@ def _pop_complete_sentences(buffer):
     return sentences, buffer
 
 
+TOOL_ACTIVITY_LABELS = {
+    "get_weather": "CHECKING WEATHER",
+}
+
+
+def _set_activity_label(label):
+    """Lets the HUD show what's actually happening during a tool call
+    instead of a generic THINKING label. Best-effort — a failed request
+    here shouldn't interrupt answering the question."""
+    try:
+        requests.post(f"{HUB}/activity", json={"label": label}, timeout=3)
+    except requests.RequestException as error:
+        print("Activity label update failed:", error, flush=True)
+
+
 def _stream_answer_sentences(
     question, instructions, max_tokens, client, sentence_queue, stop_event
 ):
@@ -1099,7 +1156,10 @@ def _stream_answer_sentences(
     if function_calls and not stop_event.is_set():
         call = function_calls[0]
         arguments = json.loads(call.arguments)
+
+        _set_activity_label(TOOL_ACTIVITY_LABELS.get(call.name, "USING TOOLS"))
         result = ai_tools.run_tool_call(call.name, arguments)
+        _set_activity_label(None)
 
         with client.responses.stream(
             model=MODEL_NAME,
@@ -1205,10 +1265,26 @@ def ask_and_speak_streaming(question, model):
             barge_result["interrupted"] = True
             interrupt_event.set()
 
-            try:
-                requests.post(f"{HUB}/interrupt", timeout=3)
-            except requests.RequestException as error:
-                print("Interrupt request failed:", error, flush=True)
+            # A single /interrupt call can race Piper's synthesis time
+            # (measured 0.3-1.3s+ per sentence) — if the wake phrase lands
+            # while the current sentence is still being synthesized, aplay
+            # hasn't started yet, /interrupt finds nothing to kill, and
+            # that whole sentence would otherwise play out in full. Retry
+            # for a couple seconds so the moment playback actually starts,
+            # it still gets caught.
+            deadline = time.monotonic() + 2.5
+
+            while time.monotonic() < deadline:
+                try:
+                    response = requests.post(f"{HUB}/interrupt", timeout=3)
+
+                    if response.json().get("interrupted"):
+                        break
+                except requests.RequestException as error:
+                    print("Interrupt request failed:", error, flush=True)
+                    break
+
+                time.sleep(0.15)
 
     watcher_thread = threading.Thread(target=watch_for_barge_in, daemon=True)
     watcher_thread.start()
@@ -1228,6 +1304,7 @@ def ask_and_speak_streaming(question, model):
                 break
 
             if barge_result["interrupted"]:
+                print("Skipping remaining sentence (barge-in):", sentence, flush=True)
                 continue
 
             speak(sentence)
@@ -1319,6 +1396,16 @@ def handle_turn(model):
         if memory_store.is_forget_command(text):
             memory_store.clear_facts()
             answer = "Okay, I've cleared everything I remembered."
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        reminder = parse_reminder_command(text)
+
+        if reminder is not None:
+            delay_seconds, reminder_message = reminder
+            memory_store.add_reminder(delay_seconds, reminder_message)
+            answer = f"Got it, I'll remind you in {describe_delay(delay_seconds)}."
             log_qa(text, answer)
             speak(answer)
             return

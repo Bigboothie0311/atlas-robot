@@ -8,6 +8,8 @@ MAX_FACTS = 50
 
 LAST_INTERACTION_PATH = Path("/home/atlas/atlas-robot/data/last_interaction.json")
 
+REMINDERS_PATH = Path("/home/atlas/atlas-robot/data/reminders.json")
+
 # Session turns live in-memory only (wake_listener.py runs as one long-lived
 # process across wake-ups, so this survives between turns but resets on
 # service restart — that's the intended "session" scope).
@@ -147,6 +149,52 @@ def get_last_interaction_gap_seconds():
         return None
 
     return time.time() - last_at
+
+
+def load_reminders():
+    if not REMINDERS_PATH.exists():
+        return []
+
+    try:
+        data = json.loads(REMINDERS_PATH.read_text())
+    except (json.JSONDecodeError, OSError):
+        return []
+
+    if not isinstance(data, list):
+        return []
+
+    return [
+        r for r in data
+        if isinstance(r, dict) and "due_at" in r and "message" in r
+    ]
+
+
+def save_reminders(reminders):
+    REMINDERS_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    temporary_path = REMINDERS_PATH.with_suffix(".tmp")
+    temporary_path.write_text(json.dumps(reminders, indent=2))
+    temporary_path.replace(REMINDERS_PATH)
+
+
+def add_reminder(delay_seconds, message):
+    reminders = load_reminders()
+    reminders.append({"due_at": time.time() + delay_seconds, "message": message})
+    save_reminders(reminders)
+
+
+def pop_due_reminders():
+    """Returns reminders that are due now, removing them from storage."""
+    reminders = load_reminders()
+    now = time.time()
+
+    due = [r for r in reminders if r["due_at"] <= now]
+    remaining = [r for r in reminders if r["due_at"] > now]
+
+    if due:
+        save_reminders(remaining)
+
+    return due
 
 
 def build_memory_context_block():

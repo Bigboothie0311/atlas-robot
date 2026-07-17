@@ -273,6 +273,24 @@ sudo apt install -y cage seatd
 sudo systemctl enable --now seatd
 ```
 
+If there's no physical mouse attached, Chromium can never get the one
+mouse-enter event it needs to honor the HUD page's "hide the cursor" CSS
+request, and shows a stuck default cursor forever. `atlas-hud.service`
+works around this by nudging a temporary virtual mouse once at startup
+(`hud_cursor_fix.py`), which needs `python3-evdev` and a udev rule granting
+`/dev/uinput` access to the `input` group:
+
+```bash
+sudo apt install -y python3-evdev
+sudo cp systemd/99-uinput.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+```
+
+The user account running `atlas-hud.service` must be a member of the
+`input` group (check with `groups`). Skip all of this if a real mouse is
+attached — the cursor will already be hideable.
+
 Logs: `journalctl -u atlas-robot -f` / `journalctl -u atlas-wake -f` / `journalctl -u atlas-hud -f`.
 
 ## Tuning the wake word
