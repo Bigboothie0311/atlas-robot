@@ -17,6 +17,7 @@ from vosk import Model, KaldiRecognizer
 
 import ai_tools
 import briefing
+import camera_gate
 import diagnostics
 import hud_stats
 import memory_store
@@ -897,6 +898,53 @@ def run_wake_pc_command():
         return "I couldn't send the wake signal."
 
 
+_NUMBER_UNITS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+    "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
+    "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
+    "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19,
+}
+
+_NUMBER_TENS = {
+    "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50,
+    "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90,
+}
+
+
+def _words_to_digits(text):
+    """Rewrites spoken number words (1-99, including compounds like
+    'twenty five') into digits, and 'a'/'an' directly before a time unit
+    into '1'. Vosk transcribes 'set a timer for five minutes' with words,
+    not digits — every duration parser needs this to hear real speech."""
+    words = text.split()
+    output = []
+    index = 0
+
+    while index < len(words):
+        word = words[index]
+
+        if word in _NUMBER_TENS:
+            value = _NUMBER_TENS[word]
+
+            if index + 1 < len(words) and words[index + 1] in _NUMBER_UNITS:
+                value += _NUMBER_UNITS[words[index + 1]]
+                index += 1
+
+            output.append(str(value))
+        elif word in _NUMBER_UNITS:
+            output.append(str(_NUMBER_UNITS[word]))
+        elif word in ("a", "an") and index + 1 < len(words) and words[index + 1] in (
+            "minute", "second", "hour", "minutes", "seconds", "hours"
+        ):
+            output.append("1")
+        else:
+            output.append(word)
+
+        index += 1
+
+    return " ".join(output)
+
+
 TIMER_SET_PATTERNS = [
     re.compile(r"^(?:set|start) (?:a |an )?timer for (\d+) (second|seconds|minute|minutes|hour|hours)$"),
     re.compile(r"^timer for (\d+) (second|seconds|minute|minutes|hour|hours)$"),
@@ -926,8 +974,8 @@ TIMER_CHECK_PHRASES = {
 
 def parse_timer_set_command(text):
     """Returns delay seconds for a 'set a timer for N ...' request, else
-    None."""
-    normalized = _normalize_phrase(text)
+    None. Accepts spoken number words ('five minutes') as well as digits."""
+    normalized = _words_to_digits(_normalize_phrase(text))
 
     for pattern in TIMER_SET_PATTERNS:
         match = pattern.match(normalized)
@@ -1013,8 +1061,8 @@ FOCUS_END_PHRASES = {
 
 def parse_focus_start_command(text):
     """Returns focus minutes (default when unspecified) for a 'focus mode'
-    request, else None."""
-    match = FOCUS_START_PATTERN.match(_normalize_phrase(text))
+    request, else None. Accepts spoken number words as well as digits."""
+    match = FOCUS_START_PATTERN.match(_words_to_digits(_normalize_phrase(text)))
 
     if not match:
         return None
@@ -1068,6 +1116,193 @@ NEWS_PHRASES = {
     "what is the news",
 }
 
+ENROLL_FACE_PHRASES = {
+    "learn my face",
+    "scan my face",
+    "remember my face",
+    "enroll my face",
+    "register my face",
+}
+
+GATE_ON_PHRASES = {
+    "camera gate on",
+    "turn on the camera gate",
+    "enable the camera gate",
+    "turn the camera gate on",
+    "enable face verification",
+}
+
+GATE_OFF_PHRASES = {
+    "camera gate off",
+    "turn off the camera gate",
+    "disable the camera gate",
+    "turn the camera gate off",
+    "disable face verification",
+}
+
+INTRUDER_QUERY_PHRASES = {
+    "were there any unauthorized users while i was gone",
+    "were there any unauthorized users",
+    "any unauthorized users while i was gone",
+    "any unauthorized users",
+    "did anyone try to use you while i was gone",
+    "did anyone use you while i was gone",
+    "any intruders",
+    "were there any intruders",
+    "any intruders while i was gone",
+}
+
+
+def run_enroll_face_command():
+    """Guided enrollment: several captures with spoken prompts, then a
+    fresh LBPH model. Owner-only in practice — re-enrollment on an
+    existing model only happens inside a verified (full-access) turn."""
+    if camera_gate.cv2 is None:
+        return "My face recognition libraries aren't installed."
+
+    speak("Alright, look at the camera and hold still.")
+
+    saved = 0
+    attempts = 0
+    prompts = {
+        3: "Turn your head slightly to the left.",
+        5: "Now slightly to the right.",
+        7: "Almost done, look straight at me.",
+    }
+
+    while saved < camera_gate.ENROLL_FRAME_COUNT and attempts < 16:
+        if saved in prompts:
+            speak(prompts.pop(saved))
+
+        if camera_gate.enroll_frame(saved):
+            saved += 1
+
+        attempts += 1
+
+    if saved < 4:
+        return (
+            "I couldn't see your face clearly enough to learn it. "
+            "Check the lighting and try again."
+        )
+
+    count = camera_gate.train_model()
+    camera_gate.mark_verified()
+    return f"Done — your face is enrolled from {count} captures. You're my authorized user now."
+
+
+def run_intruder_query_command():
+    """Yes/no + count, and puts the evidence photos on the HUD."""
+    intruders = camera_gate.unreviewed_intruders()
+
+    if not intruders:
+        return "No. Nobody unauthorized tried to use me."
+
+    count = len(intruders)
+    word = "person" if count == 1 else "people"
+
+    try:
+        requests.post(f"{HUB}/show_intruders", timeout=10)
+    except requests.RequestException as error:
+        print("show_intruders request failed:", error, flush=True)
+
+    camera_gate.mark_intruders_reviewed()
+    return (
+        f"Yes — {count} unauthorized {word} tried to use me. "
+        "Their photos are on screen now."
+    )
+
+
+# What a non-verified person may still do: strictly local, zero-token,
+# no personal data, no web, no physical actuation beyond timers.
+def _handle_restricted_turn(text):
+    """Dispatch for unverified users. Returns the spoken answer."""
+    instant = parse_instant_answer(text)
+
+    if instant is not None:
+        return instant
+
+    timer_seconds = parse_timer_set_command(text)
+
+    if timer_seconds is not None:
+        return run_timer_set_command(timer_seconds)
+
+    normalized = _normalize_phrase(text)
+
+    if normalized in TIMER_CANCEL_PHRASES:
+        return run_timer_cancel_command()
+
+    if normalized in TIMER_CHECK_PHRASES:
+        return run_timer_check_command()
+
+    reminder = parse_reminder_command(text)
+
+    if reminder is not None:
+        delay_seconds, message = reminder
+        memory_store.add_reminder(delay_seconds, message)
+        return f"Got it, I'll remind you in {describe_delay(delay_seconds)}."
+
+    return (
+        "You're not my authorized user, so I'm limited to local basics — "
+        "time, date, timers, and reminders."
+    )
+
+
+NETWORK_DEVICES_PHRASES = {
+    "what devices are on the network",
+    "what devices are on my network",
+    "what's on my network",
+    "whats on my network",
+    "what is on my network",
+    "list network devices",
+    "list the network devices",
+    "show network devices",
+    "show me the network devices",
+    "who's on my network",
+    "whos on my network",
+    "who is on my network",
+    "network devices",
+    "scan the network",
+}
+
+
+def run_network_devices_command():
+    """Speaks a roster of who's on the LAN, best names first. The HUD's
+    LAN DEVICES panel shows the same data continuously."""
+    try:
+        response = requests.get(f"{HUB}/network_devices", timeout=5)
+        response.raise_for_status()
+        devices = response.json().get("devices", [])
+    except requests.RequestException as error:
+        print("network_devices request failed:", error, flush=True)
+        return "I couldn't reach my network scanner."
+
+    if not devices:
+        return (
+            "My last network sweep hasn't finished yet — "
+            "give me a couple of minutes."
+        )
+
+    count = len(devices)
+    names = []
+
+    for device in devices:
+        name = device.get("hostname") or device.get("vendor")
+        if name:
+            names.append(name)
+
+    spoken = f"{count} devices online."
+
+    if names:
+        listed = ", ".join(names[:8])
+        spoken += f" I can identify: {listed}."
+        unnamed = count - len(names)
+
+        if unnamed > 0:
+            spoken += f" Plus {unnamed} I can't put a name to."
+
+    return spoken
+
+
 DIAGNOSTICS_PHRASES = {
     "run diagnostics",
     "run a diagnostic",
@@ -1119,13 +1354,15 @@ REMINDER_PATTERN = re.compile(
 def parse_reminder_command(text):
     """Returns (delay_seconds, message) for a 'remind me in N minutes/hours
     to...' request, otherwise None. Handled entirely locally — no model
-    call needed to schedule one."""
+    call needed to schedule one. Accepts spoken number words ('twenty
+    minutes') as well as digits."""
     normalized = text.lower().strip()
 
     for punctuation in [",", ".", "?", "!", ";", ":"]:
         normalized = normalized.replace(punctuation, " ")
 
     normalized = " ".join(normalized.split())
+    normalized = _words_to_digits(normalized)
 
     match = REMINDER_PATTERN.match(normalized)
 
@@ -1367,6 +1604,29 @@ MAX_FOLLOW_UP_ROUNDS = 3
 
 SENTENCE_SPLIT_RE = re.compile(r"([.!?]+)(\s+)")
 
+# The built-in web_search tool makes the model cite source URLs at the end
+# of answers. Nobody wants "h t t p s colon slash slash..." read aloud —
+# strip URLs (and the parenthetical/bracketed source framing around them)
+# from anything spoken or displayed. The raw answer with the citation
+# still exists in the model's own conversation context, so follow-up
+# questions that reference the source keep working.
+URL_PATTERN = re.compile(
+    r"[\(\[]?\s*(?:source|via|from|read more(?: at)?)?\s*:?\s*"
+    r"(?:https?://|www\.)\S+[\)\]]?",
+    re.IGNORECASE,
+)
+
+
+def strip_spoken_urls(text):
+    """Removes URLs and their 'source:' framing from text meant for TTS or
+    the HUD transcript. Collapses any leftover doubled whitespace and
+    dangling empty parentheses."""
+    cleaned = URL_PATTERN.sub("", text)
+    cleaned = re.sub(r"\(\s*\)|\[\s*\]", "", cleaned)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r"\s+([.!?,;:])", r"\1", cleaned)
+    return cleaned.strip()
+
 
 def _pop_complete_sentences(buffer):
     """Extracts complete sentences (ending in . ! or ? followed by
@@ -1602,7 +1862,10 @@ def ask_and_speak_streaming(question, model):
                 print("Skipping remaining sentence (barge-in):", sentence, flush=True)
                 continue
 
-            speak(sentence)
+            sentence = strip_spoken_urls(sentence)
+
+            if sentence:
+                speak(sentence)
     finally:
         barge_stop_event.set()
         watcher_thread.join(timeout=2)
@@ -1645,13 +1908,55 @@ def _answer_and_speak(text, model):
     answer, interrupted = ask_and_speak_streaming(text, model)
 
     print("A.T.L.A.S.:", answer)
-    log_qa(text, answer)
+    log_qa(text, strip_spoken_urls(answer))
 
     return answer, interrupted
 
 
 def handle_turn(model):
     try:
+        # Camera gate: one verify per lapsed validity window, only on
+        # activation — the camera never runs continuously. Unverified
+        # turns still proceed, but restricted to local basics.
+        restricted = False
+
+        if (
+            camera_gate.is_available()
+            and camera_gate.is_enabled()
+            and not camera_gate.is_verification_current()
+        ):
+            set_face("thinking")
+            speak("One moment — verifying.")
+            outcome = camera_gate.verify()
+
+            if outcome == "unauthorized":
+                restricted = True
+                speak(
+                    "I don't recognize you, so I'm in restricted mode. "
+                    "Local commands only."
+                )
+            elif outcome == "no_face":
+                restricted = True
+                speak(
+                    "I can't see anyone at the camera, so I'm in "
+                    "restricted mode for now."
+                )
+
+        if restricted:
+            set_face("listening")
+            record_audio()
+            set_face("thinking")
+            text = transcribe_audio(model)
+
+            if not text:
+                speak("I didn't catch that.")
+                return
+
+            answer = _handle_restricted_turn(text)
+            log_qa(f"[unverified] {text}", answer)
+            speak(answer)
+            return
+
         maybe_speak_greeting()
         memory_store.mark_interaction_now()
 
@@ -1781,6 +2086,38 @@ def handle_turn(model):
         if normalized_phrase in NEWS_PHRASES:
             set_face("thinking")
             answer = briefing.build_news_brief()
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        if normalized_phrase in ENROLL_FACE_PHRASES:
+            answer = run_enroll_face_command()
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        if normalized_phrase in GATE_ON_PHRASES:
+            camera_gate.set_enabled(True)
+            answer = "Camera gate on. I'll verify faces on wake."
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        if normalized_phrase in GATE_OFF_PHRASES:
+            camera_gate.set_enabled(False)
+            answer = "Camera gate off."
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        if normalized_phrase in INTRUDER_QUERY_PHRASES:
+            answer = run_intruder_query_command()
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        if normalized_phrase in NETWORK_DEVICES_PHRASES:
+            answer = run_network_devices_command()
             log_qa(text, answer)
             speak(answer)
             return

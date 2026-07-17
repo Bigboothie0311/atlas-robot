@@ -279,12 +279,34 @@ function applyTimers(state) {
   }
 }
 
+const AUTH_LABELS = {
+  VERIFIED: "AUTH VERIFIED",
+  STALE: "AUTH STANDBY",
+  OFF: "GATE OFF",
+  UNTRAINED: "",
+};
+
+function applyAuth(state) {
+  const indicator = document.getElementById("auth-indicator");
+  const auth = state.auth || {};
+  let label = AUTH_LABELS[auth.status] ?? "";
+
+  if (auth.unreviewed_intruders > 0) {
+    label = `${auth.unreviewed_intruders} INTRUDER ALERT${auth.unreviewed_intruders > 1 ? "S" : ""}`;
+  }
+
+  indicator.textContent = label ? `${label} · ` : "";
+  indicator.classList.toggle("alert", auth.unreviewed_intruders > 0);
+  indicator.classList.toggle("verified", auth.status === "VERIFIED");
+}
+
 async function pollState() {
   try {
     const response = await fetch("/state");
     const state = await response.json();
     applyState(state);
     applyTimers(state);
+    applyAuth(state);
     applyImage(state);
     applyGallery(state);
     applyQaLog(state);

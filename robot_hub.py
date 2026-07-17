@@ -11,6 +11,7 @@ from pathlib import Path
 import requests
 from piper import PiperVoice, SynthesisConfig
 
+import camera_gate
 import hud_stats
 import memory_store
 import network_sentinel
@@ -181,10 +182,19 @@ def hud_static(filename):
     return send_from_directory(HUD_DIR, filename)
 
 
+@app.get("/network_devices")
+def network_devices():
+    return jsonify({
+        "ok": True,
+        "devices": network_sentinel.get_online_devices(),
+    })
+
+
 @app.get("/hud/stats")
 def hud_stats_route():
     stats = hud_stats.get_hud_stats()
     stats["network"]["device_count"] = network_sentinel.get_online_device_count()
+    stats["network"]["devices"] = network_sentinel.get_online_devices()
     stats["printer"] = hud_stats.get_printer_stats()
     # Cache-only read — a cold headline cache must never stall the HUD's
     # 5s stats poll on a network fetch (the refresher thread fills it).
@@ -219,6 +229,7 @@ def get_state():
         state["gallery_until"] = gallery_until
 
     state.update(timers.to_state_dict())
+    state["auth"] = camera_gate.hud_status()
     return jsonify(state)
 
 
@@ -528,6 +539,52 @@ def show_images():
     })
 
 
+@app.post("/show_intruders")
+def show_intruders():
+    """Puts the unreviewed intruder captures on the HUD gallery. Copies
+    them into the gallery's own tmp slots first — gallery expiry deletes
+    its files, and the evidence originals in data/intruders/ must
+    survive that."""
+    global gallery_until
+
+    intruders = camera_gate.unreviewed_intruders()[:GALLERY_MAX_IMAGES]
+
+    if not intruders:
+        return jsonify({"ok": False, "error": "No intruder captures"}), 404
+
+    new_paths = []
+
+    for index, source in enumerate(intruders):
+        destination = f"{GALLERY_PATH_BASE}{index}.jpg"
+
+        try:
+            with open(source, "rb") as src, open(destination, "wb") as dst:
+                dst.write(src.read())
+            new_paths.append(destination)
+        except OSError as error:
+            print("Intruder copy failed:", error, flush=True)
+
+    if not new_paths:
+        return jsonify({"ok": False, "error": "Could not stage images"}), 500
+
+    with state_lock:
+        clear_image_state_locked()
+
+        old_paths = robot_state["gallery_image_paths"]
+        robot_state["gallery_image_paths"] = new_paths
+        robot_state["gallery_caption"] = "Unauthorized users"
+        gallery_until = time.time() + 30
+
+        for old_path in old_paths:
+            if old_path and old_path not in new_paths and os.path.exists(old_path):
+                try:
+                    os.remove(old_path)
+                except OSError:
+                    pass
+
+    return jsonify({"ok": True, "count": len(new_paths)})
+
+
 @app.get("/hud/gallery_image/<int:index>")
 def hud_gallery_image(index):
     with state_lock:
@@ -621,7 +678,18 @@ def end_focus():
 
 @app.post("/wake_pc")
 def wake_pc():
-    return jsonify({"ok": True, "message": pc_power.send_wake_packet()})
+    message = pc_power.send_wake_packet()
+
+    # Only chase confirmation when a signal actually went out — "already
+    # on" and "no MAC known" need no follow-up.
+    if message.startswith("Wake signal sent"):
+        threading.Thread(
+            target=pc_power.verify_wake,
+            args=(_speak_text, _log_proactive_qa),
+            daemon=True,
+        ).start()
+
+    return jsonify({"ok": True, "message": message})
 
 
 def _speak_text(text):
@@ -708,6 +776,56 @@ def _speak_text(text):
 
         if wav_path and os.path.exists(wav_path):
             os.remove(wav_path)
+
+
+CHIME_PATH = "/home/atlas/atlas-robot/data/chime.wav"
+
+
+def _ensure_chime_exists():
+    """Generates the timer chime on first use — a two-note ding (E5 then
+    A5) with exponential decay, pure stdlib, so no binary asset needs to
+    live in the repo."""
+    if os.path.exists(CHIME_PATH):
+        return
+
+    import math
+    import struct
+
+    sample_rate = 22050
+    notes = [(659.25, 0.28), (880.0, 0.42)]
+    samples = []
+
+    for frequency, duration in notes:
+        count = int(sample_rate * duration)
+
+        for i in range(count):
+            t = i / sample_rate
+            envelope = math.exp(-6.0 * t / duration)
+            value = 0.55 * envelope * math.sin(2 * math.pi * frequency * t)
+            samples.append(int(value * 32767))
+
+    os.makedirs(os.path.dirname(CHIME_PATH), exist_ok=True)
+
+    with wave.open(CHIME_PATH, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(struct.pack(f"<{len(samples)}h", *samples))
+
+
+def _play_chime():
+    """Audible ding through the same output device as speech. Best-effort —
+    a missing/broken chime must never block the spoken announcement."""
+    try:
+        _ensure_chime_exists()
+        subprocess.run(
+            ["aplay", "-D", AUDIO_DEVICE, CHIME_PATH],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+    except Exception as error:
+        print("Chime playback failed:", type(error).__name__, error, flush=True)
 
 
 @app.post("/interrupt")
@@ -974,7 +1092,7 @@ if __name__ == "__main__":
     threading.Thread(target=proactive_watcher_loop, daemon=True).start()
     threading.Thread(
         target=timers.watcher_loop,
-        args=(_speak_text, _log_proactive_qa),
+        args=(_speak_text, _log_proactive_qa, _play_chime),
         daemon=True,
     ).start()
     threading.Thread(

@@ -184,6 +184,15 @@ body.state-speaking .live-dot {
   margin-top: 6px;
 }
 
+#auth-indicator.verified {
+  color: var(--green);
+}
+
+#auth-indicator.alert {
+  color: var(--red);
+  animation: live-pulse 0.8s ease-in-out infinite;
+}
+
 @keyframes wordmark-in {
   from { letter-spacing: 28px; opacity: 0; }
   to   { letter-spacing: 10px; opacity: 1; }
