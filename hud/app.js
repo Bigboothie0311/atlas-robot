@@ -43,11 +43,51 @@ const COSMETIC_TERMINAL_LINES = [
 
 const COSMETIC_TERMINAL_MAX_LINES = 60;
 const COSMETIC_TERMINAL_INTERVAL_MS = 350;
+// How often a line is real telemetry instead of pure flavor text — high
+// enough to feel alive, low enough that it still reads as a system log
+// rather than a stats dashboard.
+const REAL_STATUS_LINE_CHANCE = 0.3;
+
+let latestStats = null;
+
+function buildRealStatusLine() {
+  if (!latestStats) {
+    return null;
+  }
+
+  const options = [
+    `CPU LOAD ${latestStats.cpu.percent}% NOMINAL`,
+    `DISK USAGE ${latestStats.disk.percent}%`,
+  ];
+
+  if (latestStats.network.ip) {
+    options.push(`NETWORK LINK ${latestStats.network.ip} STABLE`);
+  }
+
+  const hours = Math.floor(latestStats.uptime_seconds / 3600);
+  const minutes = Math.floor((latestStats.uptime_seconds % 3600) / 60);
+  options.push(`UPTIME ${hours}H ${minutes}M NOMINAL`);
+
+  const gamingPc = latestStats.gaming_pc;
+  if (gamingPc && gamingPc.online) {
+    options.push(`REMOTE NODE ONLINE — CPU ${gamingPc.cpu_percent}% / ${gamingPc.cpu_temp_c}°C`);
+    options.push(`REMOTE NODE GPU ${gamingPc.gpu_percent}% / ${gamingPc.gpu_temp_c}°C`);
+  }
+
+  return options[Math.floor(Math.random() * options.length)];
+}
 
 function addCosmeticTerminalLine() {
   const container = document.getElementById("cosmetic-terminal-lines");
   const line = document.createElement("div");
-  const phrase = COSMETIC_TERMINAL_LINES[Math.floor(Math.random() * COSMETIC_TERMINAL_LINES.length)];
+
+  const realLine = Math.random() < REAL_STATUS_LINE_CHANCE
+    ? buildRealStatusLine()
+    : null;
+
+  const phrase = realLine
+    || COSMETIC_TERMINAL_LINES[Math.floor(Math.random() * COSMETIC_TERMINAL_LINES.length)];
+
   line.textContent = `> ${phrase}`;
   container.appendChild(line);
 
@@ -206,6 +246,7 @@ async function pollStats() {
   try {
     const response = await fetch("/hud/stats");
     const stats = await response.json();
+    latestStats = stats;
 
     document.getElementById("cpu-percent").textContent = `${stats.cpu.percent}%`;
     document.getElementById("cpu-temp").textContent =

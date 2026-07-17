@@ -1,6 +1,8 @@
 import array
 import json
 import math
+import queue
+import re
 import subprocess
 import sys
 import threading
@@ -141,7 +143,7 @@ def speak(text):
 
 
 def listen_for_barge_in(model, stop_event):
-    """Runs only during speak_with_barge_in's TTS window, when
+    """Runs only during ask_and_speak_streaming's TTS window, when
     wake_listener.py's own mic loop has already released the device. Returns
     True if the wake phrase is verified before stop_event is set."""
     recorder = subprocess.Popen(
@@ -179,34 +181,6 @@ def listen_for_barge_in(model, stop_event):
         return False
     finally:
         wake_detection.stop_recorder(recorder)
-
-
-def speak_with_barge_in(text, model):
-    """Speaks text aloud while concurrently listening for the wake word.
-    If heard, interrupts playback immediately via the hub and returns True
-    so the caller can jump straight into a new turn."""
-    stop_event = threading.Event()
-    result = {"interrupted": False}
-
-    def watch():
-        if listen_for_barge_in(model, stop_event):
-            result["interrupted"] = True
-
-            try:
-                requests.post(f"{HUB}/interrupt", timeout=3)
-            except requests.RequestException as error:
-                print("Interrupt request failed:", error, flush=True)
-
-    watcher = threading.Thread(target=watch, daemon=True)
-    watcher.start()
-
-    try:
-        speak(text)
-    finally:
-        stop_event.set()
-        watcher.join(timeout=2)
-
-    return result["interrupted"]
 
 
 def log_qa(question, answer):
@@ -776,6 +750,79 @@ def run_gallery_search_command(query):
     speak(answer)
 
 
+TIME_PHRASES = {
+    "what time is it",
+    "what is the time",
+    "what's the time",
+    "whats the time",
+    "do you have the time",
+    "got the time",
+    "can you tell me the time",
+}
+
+DATE_PHRASES = {
+    "what is the date",
+    "what's the date",
+    "whats the date",
+    "what day is it",
+    "what is today's date",
+    "whats todays date",
+    "what's today's date",
+}
+
+UPTIME_PHRASES = {
+    "what is your uptime",
+    "what's your uptime",
+    "whats your uptime",
+    "how long have you been running",
+    "how long have you been up",
+    "how long have you been on",
+}
+
+PING_PHRASES = {
+    "are you there",
+    "you there",
+    "can you hear me",
+    "is anyone there",
+    "hello",
+    "anybody home",
+}
+
+
+def parse_instant_answer(text):
+    """Returns a canned answer for a handful of common questions that don't
+    need the model at all — instant and free instead of a full API round
+    trip. Returns None if text doesn't match any of them."""
+    normalized = text.lower().strip()
+
+    for punctuation in [",", ".", "?", "!", ";", ":"]:
+        normalized = normalized.replace(punctuation, " ")
+
+    normalized = " ".join(normalized.split())
+
+    if normalized in TIME_PHRASES:
+        return "It's " + datetime.now().strftime("%I:%M %p").lstrip("0") + "."
+
+    if normalized in DATE_PHRASES:
+        return "Today is " + datetime.now().strftime("%A, %B %d") + "."
+
+    if normalized in UPTIME_PHRASES:
+        uptime_seconds = hud_stats.get_uptime_seconds()
+        hours = uptime_seconds // 3600
+        minutes = (uptime_seconds % 3600) // 60
+        hour_word = "hour" if hours == 1 else "hours"
+        minute_word = "minute" if minutes == 1 else "minutes"
+        return (
+            f"I've been running for {hours} {hour_word} "
+            f"and {minutes} {minute_word}."
+        )
+
+    if normalized in PING_PHRASES:
+        return "Yes, I'm here and listening."
+
+    return None
+
+
 def handle_local_command(text, model):
     normalized = text.lower().strip()
 
@@ -913,26 +960,9 @@ def handle_local_command(text, model):
 
 
 
-def ask_atlas(question):
-    usage = load_usage()
-    spent = usage["spent_usd"]
-
-    print(
-        f"Local API spending for {usage['month']}: "
-        f"${spent:.6f} of ${MONTHLY_LIMIT_USD:.2f}"
-    )
-
-    if spent + NEXT_REQUEST_RESERVE_USD > MONTHLY_LIMIT_USD:
-        raise BudgetExceeded(
-            "The local monthly API spending limit has been reached."
-        )
-
-    client = OpenAI(
-        api_key=load_api_key(),
-        max_retries=0,
-        timeout=20.0
-    )
-
+def build_instructions_and_limits():
+    """Returns (instructions, max_tokens) shared by every path that talks to
+    the model, so the streaming and non-streaming call sites can't drift."""
     today = datetime.now().strftime("%Y-%m-%d")
     owner_name = load_owner_name()
     quiet = _in_quiet_hours()
@@ -969,6 +999,18 @@ def ask_atlas(question):
         "those won't be heard."
     )
 
+    weather = hud_stats.get_weather_stats()
+
+    if weather.get("temp_f") is not None:
+        instructions += (
+            f"\n\nCurrent weather at home: {weather['temp_f']}°F, "
+            f"{weather['condition']}, today's high {weather['high_f']}, "
+            f"low {weather['low_f']}, rain chance {weather['precip_chance']}%. "
+            "Answer questions about the current or today's weather at home "
+            "directly from this instead of calling the weather tool — only "
+            "call the tool for a different city or for tomorrow's forecast."
+        )
+
     memory_block = memory_store.build_memory_context_block()
 
     if memory_block:
@@ -978,33 +1020,88 @@ def ask_atlas(question):
             "mention that you have a memory system.\n\n" + memory_block
         )
 
-    response = client.responses.create(
+    return instructions, max_tokens
+
+
+# If Atlas asks a clarifying question, keep listening instead of going back
+# to idle and forcing the user to say the wake word again just to answer.
+# Capped so a model that keeps asking questions can't loop forever.
+MAX_FOLLOW_UP_ROUNDS = 3
+
+SENTENCE_SPLIT_RE = re.compile(r"([.!?]+)(\s+)")
+
+
+def _pop_complete_sentences(buffer):
+    """Extracts complete sentences (ending in . ! or ? followed by
+    whitespace) from the front of buffer. Returns (sentences, remaining)."""
+    sentences = []
+
+    while True:
+        match = SENTENCE_SPLIT_RE.search(buffer)
+
+        if not match:
+            break
+
+        end = match.end()
+        sentence = buffer[:end].strip()
+
+        if sentence:
+            sentences.append(sentence)
+
+        buffer = buffer[end:]
+
+    return sentences, buffer
+
+
+def _stream_answer_sentences(
+    question, instructions, max_tokens, client, sentence_queue, stop_event
+):
+    """Producer: streams the model's answer, pushing complete sentences onto
+    sentence_queue as they arrive so a consumer can start speaking the first
+    one before the rest has even finished generating. Falls back to a real
+    tool-call round trip when needed, streaming that continuation the same
+    way. Returns (full_text, total_input_tokens, total_output_tokens)."""
+    full_text = ""
+    buffer = ""
+    total_input_tokens = 0
+    total_output_tokens = 0
+
+    with client.responses.stream(
         model=MODEL_NAME,
         reasoning={"effort": "none"},
         instructions=instructions,
         input=question,
         tools=ai_tools.TOOLS,
         max_output_tokens=max_tokens
-    )
+    ) as stream:
+        for event in stream:
+            if stop_event.is_set():
+                break
 
-    total_input_tokens = int(
-        getattr(response.usage, "input_tokens", 0) or 0
-    )
-    total_output_tokens = int(
-        getattr(response.usage, "output_tokens", 0) or 0
-    )
+            if event.type == "response.output_text.delta":
+                buffer += event.delta
+                full_text += event.delta
+                sentences, buffer = _pop_complete_sentences(buffer)
+
+                for sentence in sentences:
+                    sentence_queue.put(sentence)
+
+        response = stream.get_final_response()
+
+    total_input_tokens += int(getattr(response.usage, "input_tokens", 0) or 0)
+    total_output_tokens += int(getattr(response.usage, "output_tokens", 0) or 0)
 
     function_calls = [
         item for item in response.output
         if getattr(item, "type", None) == "function_call"
     ]
 
-    if function_calls:
+    if function_calls and not stop_event.is_set():
         call = function_calls[0]
         arguments = json.loads(call.arguments)
         result = ai_tools.run_tool_call(call.name, arguments)
 
-        response = client.responses.create(
+        with client.responses.stream(
             model=MODEL_NAME,
             reasoning={"effort": "none"},
             instructions=instructions,
@@ -1018,21 +1115,136 @@ def ask_atlas(question):
             ],
             tools=ai_tools.TOOLS,
             max_output_tokens=max_tokens
-        )
+        ) as stream2:
+            for event in stream2:
+                if stop_event.is_set():
+                    break
+
+                if event.type == "response.output_text.delta":
+                    buffer += event.delta
+                    full_text += event.delta
+                    sentences, buffer = _pop_complete_sentences(buffer)
+
+                    for sentence in sentences:
+                        sentence_queue.put(sentence)
+
+            response2 = stream2.get_final_response()
 
         total_input_tokens += int(
-            getattr(response.usage, "input_tokens", 0) or 0
+            getattr(response2.usage, "input_tokens", 0) or 0
         )
         total_output_tokens += int(
-            getattr(response.usage, "output_tokens", 0) or 0
+            getattr(response2.usage, "output_tokens", 0) or 0
         )
 
-    answer = response.output_text.strip()
+    remainder = buffer.strip()
 
-    # Conservatively charge all input tokens at the full uncached rate.
+    if remainder:
+        sentence_queue.put(remainder)
+
+    sentence_queue.put(None)
+
+    return full_text.strip(), total_input_tokens, total_output_tokens
+
+
+def ask_and_speak_streaming(question, model):
+    """Streams the model's answer and speaks each sentence as soon as it's
+    ready instead of waiting for the whole answer to finish generating —
+    same total tokens as the non-streaming path, just delivered (and
+    spoken) incrementally. Returns (answer, interrupted)."""
+    usage = load_usage()
+    spent = usage["spent_usd"]
+
+    print(
+        f"Local API spending for {usage['month']}: "
+        f"${spent:.6f} of ${MONTHLY_LIMIT_USD:.2f}"
+    )
+
+    if spent + NEXT_REQUEST_RESERVE_USD > MONTHLY_LIMIT_USD:
+        raise BudgetExceeded(
+            "The local monthly API spending limit has been reached."
+        )
+
+    client = OpenAI(api_key=load_api_key(), max_retries=0, timeout=20.0)
+    instructions, max_tokens = build_instructions_and_limits()
+
+    sentence_queue = queue.Queue()
+    interrupt_event = threading.Event()
+
+    result = {
+        "full_text": "",
+        "total_input_tokens": 0,
+        "total_output_tokens": 0,
+        "error": None,
+    }
+
+    def produce():
+        try:
+            full_text, input_tokens, output_tokens = _stream_answer_sentences(
+                question, instructions, max_tokens, client,
+                sentence_queue, interrupt_event
+            )
+            result["full_text"] = full_text
+            result["total_input_tokens"] = input_tokens
+            result["total_output_tokens"] = output_tokens
+        except Exception as error:
+            result["error"] = error
+            sentence_queue.put(None)
+
+    producer_thread = threading.Thread(target=produce, daemon=True)
+    producer_thread.start()
+
+    # Spans the whole streamed answer rather than being restarted per
+    # sentence, so there's no gap between chunks where a barge-in wouldn't
+    # be heard.
+    barge_stop_event = threading.Event()
+    barge_result = {"interrupted": False}
+
+    def watch_for_barge_in():
+        if listen_for_barge_in(model, barge_stop_event):
+            barge_result["interrupted"] = True
+            interrupt_event.set()
+
+            try:
+                requests.post(f"{HUB}/interrupt", timeout=3)
+            except requests.RequestException as error:
+                print("Interrupt request failed:", error, flush=True)
+
+    watcher_thread = threading.Thread(target=watch_for_barge_in, daemon=True)
+    watcher_thread.start()
+
+    try:
+        while True:
+            try:
+                sentence = sentence_queue.get(timeout=30)
+            except queue.Empty:
+                print(
+                    "Sentence stream timed out waiting for the next chunk.",
+                    flush=True
+                )
+                break
+
+            if sentence is None:
+                break
+
+            if barge_result["interrupted"]:
+                continue
+
+            speak(sentence)
+    finally:
+        barge_stop_event.set()
+        watcher_thread.join(timeout=2)
+
+    producer_thread.join(timeout=5)
+
+    if result["error"] is not None:
+        raise result["error"]
+
+    answer = result["full_text"]
+
     request_cost = (
-        total_input_tokens * INPUT_PRICE_PER_TOKEN
-        + total_output_tokens * OUTPUT_PRICE_PER_TOKEN
+        result["total_input_tokens"] * INPUT_PRICE_PER_TOKEN
+        + result["total_output_tokens"] * OUTPUT_PRICE_PER_TOKEN
     )
 
     usage["spent_usd"] += request_cost
@@ -1040,38 +1252,28 @@ def ask_atlas(question):
     save_usage(usage)
 
     print(
-        f"Tokens: {total_input_tokens} input, "
-        f"{total_output_tokens} output"
+        f"Tokens: {result['total_input_tokens']} input, "
+        f"{result['total_output_tokens']} output"
     )
-    print(
-        f"Estimated request cost: ${request_cost:.6f}"
-    )
-    print(
-        f"Local monthly total: ${usage['spent_usd']:.6f}"
-    )
+    print(f"Estimated request cost: ${request_cost:.6f}")
+    print(f"Local monthly total: ${usage['spent_usd']:.6f}")
 
     if not answer:
-        return "I was unable to generate an answer."
+        answer = "I was unable to generate an answer."
 
     memory_store.record_turn(question, answer)
 
-    return answer
-
-
-# If Atlas asks a clarifying question, keep listening instead of going back
-# to idle and forcing the user to say the wake word again just to answer.
-# Capped so a model that keeps asking questions can't loop forever.
-MAX_FOLLOW_UP_ROUNDS = 3
+    return answer, barge_result["interrupted"]
 
 
 def _answer_and_speak(text, model):
-    """Runs the ask-AI-and-speak-it sequence for one question. Returns
-    (answer, interrupted) so callers can react to a barge-in."""
-    answer = ask_atlas(text)
+    """Runs the ask-AI-and-speak-it sequence for one question, streaming the
+    answer so speech can start on the first sentence instead of waiting for
+    the whole response. Returns (answer, interrupted)."""
+    answer, interrupted = ask_and_speak_streaming(text, model)
 
     print("A.T.L.A.S.:", answer)
     log_qa(text, answer)
-    interrupted = speak_with_barge_in(answer, model)
 
     return answer, interrupted
 
@@ -1128,6 +1330,14 @@ def handle_turn(model):
             answer = "Got it, I'll remember that."
             log_qa(text, answer)
             speak(answer)
+            return
+
+        instant_answer = parse_instant_answer(text)
+
+        if instant_answer is not None:
+            print("A.T.L.A.S. instant answer:", instant_answer, flush=True)
+            log_qa(text, instant_answer)
+            speak(instant_answer)
             return
 
         local_answer = handle_local_command(text, model)

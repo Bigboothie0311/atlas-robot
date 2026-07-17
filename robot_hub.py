@@ -550,11 +550,6 @@ def _speak_text(text):
         _playback_was_interrupted = False
 
     try:
-        with state_lock:
-            previous_expression = robot_state["expression"]
-            robot_state["expression"] = "talking"
-            robot_state["speaking"] = True
-
         with tempfile.NamedTemporaryFile(
             prefix="atlas_robot_",
             suffix=".wav",
@@ -573,6 +568,15 @@ def _speak_text(text):
                     wav_file,
                     syn_config=SynthesisConfig(volume=volume)
                 )
+
+            # Only flip to "talking" once synthesis is actually done and
+            # playback is about to start — synthesis alone measured 1.3s+
+            # for a typical answer on this hardware, which was previously
+            # showing as "SPEAKING" on the HUD well before any sound played.
+            with state_lock:
+                previous_expression = robot_state["expression"]
+                robot_state["expression"] = "talking"
+                robot_state["speaking"] = True
 
             process = subprocess.Popen([
                 "aplay",
