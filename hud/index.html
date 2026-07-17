@@ -7,8 +7,20 @@
 </head>
 <body class="state-idle">
   <div id="dashboard">
+
+    <header id="masthead">
+      <div id="masthead-left">
+        <div id="wordmark">A.T.L.A.S.</div>
+        <div id="wordmark-sub">AUTONOMOUS DESK INTELLIGENCE &middot; STATION HOME-01</div>
+      </div>
+      <div id="masthead-right">
+        <div id="masthead-state"><span class="live-dot"></span><span id="masthead-state-text">ALL SYSTEMS NOMINAL</span></div>
+        <div id="masthead-uplink">UPLINK SECURE &middot; LOCAL CORE ACTIVE</div>
+      </div>
+    </header>
+
     <div class="panel panel-system-status">
-      <div class="panel-label">VOICE ACTIVITY</div>
+      <div class="panel-label">VOICE ACTIVITY<span class="panel-code">AUD&middot;01</span></div>
       <div id="equalizer">
         <span class="eq-bar"></span>
         <span class="eq-bar"></span>
@@ -19,21 +31,41 @@
         <span class="eq-bar"></span>
       </div>
       <div class="panel-sub" id="system-status-detail">MEM -- % &middot; --</div>
+      <div class="gauge"><div class="gauge-fill" id="mem-gauge"></div></div>
     </div>
+
     <div class="panel panel-disk">
-      <div class="panel-label">DISK</div>
+      <div class="panel-label">DISK<span class="panel-code">STO&middot;02</span></div>
       <div class="panel-value" id="disk-percent">--%</div>
       <div class="panel-sub" id="disk-detail">-- / -- GB</div>
+      <div class="gauge"><div class="gauge-fill" id="disk-gauge"></div></div>
+    </div>
+
+    <div class="panel panel-core">
+      <div class="panel-label">CORE &middot; RPI 5<span class="panel-code">CPU&middot;06</span></div>
+      <div class="panel-value" id="core-cpu">--%</div>
+      <div class="panel-sub">QUAD CORTEX-A76 &middot; 2.4 GHZ</div>
+      <div class="gauge"><div class="gauge-fill" id="core-gauge"></div></div>
     </div>
 
     <div id="ring-column">
       <div id="ring-wrap">
+        <div id="ring-core-glow"></div>
+        <div id="ring-sweep"></div>
         <svg id="ring" viewBox="0 0 400 400">
+          <circle class="ring-segments" cx="200" cy="200" r="194"></circle>
           <circle class="ring-outer" cx="200" cy="200" r="180"></circle>
           <circle class="ring-ticks" cx="200" cy="200" r="180"></circle>
           <circle class="ring-middle" cx="200" cy="200" r="165"></circle>
           <circle class="ring-inner" cx="200" cy="200" r="150"></circle>
+          <g class="ring-cardinals">
+            <line x1="200" y1="8"   x2="200" y2="26"></line>
+            <line x1="200" y1="374" x2="200" y2="392"></line>
+            <line x1="8"   y1="200" x2="26"  y2="200"></line>
+            <line x1="374" y1="200" x2="392" y2="200"></line>
+          </g>
         </svg>
+        <div id="ring-orbit"><span id="ring-orbit-dot"></span></div>
         <div id="ring-center">
           <div id="clock">--:--:--</div>
           <div id="date">-- -- ----</div>
@@ -44,20 +76,22 @@
     </div>
 
     <div class="panel panel-weather">
-      <div class="panel-label">WEATHER &middot; HOME, CA</div>
+      <div class="panel-label">WEATHER &middot; HOME, CA<span class="panel-code">ENV&middot;03</span></div>
       <div class="panel-value" id="weather-temp">--&deg;F</div>
       <div class="panel-sub" id="weather-condition">--</div>
       <div class="panel-sub" id="weather-range">H -- / L --</div>
       <div class="panel-sub" id="weather-precip">Rain --%</div>
     </div>
+
     <div class="panel panel-system">
-      <div class="panel-label">NETWORK</div>
+      <div class="panel-label">NETWORK<span class="panel-code">NET&middot;04</span></div>
       <div class="panel-value" id="network-ip">--</div>
       <div class="panel-label panel-label-spaced">UPTIME</div>
       <div class="panel-sub" id="uptime">--</div>
     </div>
+
     <div class="panel panel-gaming-pc">
-      <div class="panel-label">GAMING PC</div>
+      <div class="panel-label">GAMING PC<span class="panel-code">RMT&middot;05</span></div>
       <div class="panel-value" id="gaming-pc-status">OFFLINE</div>
       <div class="panel-sub" id="gaming-pc-cpu">CPU -- % / -- &deg;C</div>
       <div class="panel-sub" id="gaming-pc-gpu">GPU -- % / -- &deg;C</div>
@@ -65,7 +99,7 @@
     </div>
 
     <div id="cosmetic-terminal">
-      <div class="panel-label">SYS.LOG</div>
+      <div class="panel-label">SYS.LOG<span class="panel-code">LOG&middot;00</span></div>
       <div id="cosmetic-terminal-lines"></div>
     </div>
   </div>

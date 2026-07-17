@@ -88,7 +88,12 @@ function addCosmeticTerminalLine() {
   const phrase = realLine
     || COSMETIC_TERMINAL_LINES[Math.floor(Math.random() * COSMETIC_TERMINAL_LINES.length)];
 
-  line.textContent = `> ${phrase}`;
+  const now = new Date();
+  const time = document.createElement("span");
+  time.className = "log-time";
+  time.textContent = `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+  line.appendChild(time);
+  line.appendChild(document.createTextNode(`> ${phrase}`));
   container.appendChild(line);
 
   while (container.children.length > COSMETIC_TERMINAL_MAX_LINES) {
@@ -139,16 +144,20 @@ function applyState(state) {
 
   let stateClass = "state-idle";
   let label = "IDLE";
+  let mastheadText = "ALL SYSTEMS NOMINAL";
 
   if (speaking || expression === "talking") {
     stateClass = "state-speaking";
     label = "SPEAKING";
+    mastheadText = "TRANSMITTING";
   } else if (expression === "listening") {
     stateClass = "state-listening";
     label = "LISTENING";
+    mastheadText = "AUDIO CHANNEL OPEN";
   } else if (expression === "thinking") {
     stateClass = "state-thinking";
     label = state.activity_label || "THINKING";
+    mastheadText = "PROCESSING";
   }
 
   // Only touch the state-* classes here — updateClock owns quiet-hours, so
@@ -156,6 +165,7 @@ function applyState(state) {
   document.body.classList.remove(...STATE_CLASSES);
   document.body.classList.add(stateClass);
   document.getElementById("status-label").textContent = label;
+  document.getElementById("masthead-state-text").textContent = mastheadText;
 }
 
 function applyImage(state) {
@@ -259,9 +269,16 @@ async function pollStats() {
     document.getElementById("system-status-detail").textContent =
       `MEM ${stats.memory.percent}% · ${isHot ? "WARNING" : "NOMINAL"}`;
 
+    document.getElementById("mem-gauge").style.width = `${stats.memory.percent}%`;
+
+    document.getElementById("core-cpu").textContent = `${stats.cpu.percent}%`;
+    document.getElementById("core-gauge").style.width = `${stats.cpu.percent}%`;
+    document.querySelector(".panel-core").classList.toggle("warning", isHot);
+
     document.getElementById("disk-percent").textContent = `${stats.disk.percent}%`;
     document.getElementById("disk-detail").textContent =
       `${stats.disk.used_gb} / ${stats.disk.total_gb} GB`;
+    document.getElementById("disk-gauge").style.width = `${stats.disk.percent}%`;
 
     const weather = stats.weather;
     document.getElementById("weather-temp").textContent =
