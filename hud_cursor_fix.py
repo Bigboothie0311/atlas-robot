@@ -16,7 +16,20 @@ time (surface creation, page load) varies enough between runs that a nudge
 timed too early lands before there's anything to receive it, and the
 cursor stays stuck. Nudging several times over a longer window makes this
 robust to that variance instead of depending on one lucky guess.
+
+Runs as atlas-hud.service's ExecStartPost, which means any unhandled
+exception here fails the *entire* service start under Type=simple —
+Restart=on-failure then kills the already-running cage/Chromium and
+retries the whole thing, over what should only ever be a cosmetic nudge.
+Confirmed this happening for real on a cold boot: /dev/uinput briefly
+doesn't have the group permissions the udev rule grants it (a timing gap
+between the uinput module loading and udev applying the rule), UInput()
+raised, and the whole kiosk got yanked down and restarted because of it.
+Every failure path below is caught and swallowed instead of raised, and
+UInput creation itself is retried with backoff to ride out exactly that
+kind of transient permission gap.
 """
+import sys
 import time
 
 from evdev import UInput, ecodes as e
@@ -31,6 +44,12 @@ CAPABILITIES = {
 # sometimes lands before there's a surface ready to receive the nudge.
 NUDGE_DELAYS_SECONDS = [3, 6, 10, 15, 20]
 
+# Retries opening the virtual mouse device itself, separate from the
+# nudge-timing retries above — this is for the case where /dev/uinput
+# isn't fully ready yet (module just loaded, permissions not applied).
+UINPUT_OPEN_RETRIES = 5
+UINPUT_OPEN_RETRY_DELAY_SECONDS = 1
+
 
 def nudge(ui):
     ui.write(e.EV_REL, e.REL_X, 1)
@@ -42,17 +61,47 @@ def nudge(ui):
     ui.syn()
 
 
+def open_uinput():
+    last_error = None
+
+    for attempt in range(UINPUT_OPEN_RETRIES):
+        try:
+            return UInput(CAPABILITIES, name="atlas-virtual-mouse")
+        except Exception as error:
+            last_error = error
+            time.sleep(UINPUT_OPEN_RETRY_DELAY_SECONDS)
+
+    print("hud_cursor_fix: could not open /dev/uinput:", last_error, flush=True)
+    return None
+
+
 def main():
-    with UInput(CAPABILITIES, name="atlas-virtual-mouse") as ui:
-        elapsed = 0.0
+    ui = open_uinput()
 
-        for delay in NUDGE_DELAYS_SECONDS:
-            time.sleep(delay - elapsed)
-            elapsed = delay
-            nudge(ui)
+    if ui is None:
+        return
 
-        time.sleep(1)
+    try:
+        with ui:
+            elapsed = 0.0
+
+            for delay in NUDGE_DELAYS_SECONDS:
+                time.sleep(delay - elapsed)
+                elapsed = delay
+                nudge(ui)
+
+            time.sleep(1)
+    except Exception as error:
+        print("hud_cursor_fix: nudge failed:", error, flush=True)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as error:
+        print("hud_cursor_fix: unexpected failure:", error, flush=True)
+
+    # Never fail the service over a cosmetic fix — a stuck cursor is
+    # vastly preferable to Restart=on-failure yanking down an otherwise
+    # working HUD because of it.
+    sys.exit(0)
