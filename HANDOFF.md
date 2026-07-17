@@ -1,3 +1,45 @@
+# Handoff — 2026-07-17 session (cursor, finally, for real)
+
+The cursor saga did not actually end at the bottom of this file. One
+more round happened the next day:
+
+- User reported the cursor was STILL back after the "delete all uinput
+  plumbing" fix below. Stopped trusting reports and installed `grim`
+  (`sudo apt install -y grim`) to screenshot the REAL compositor output
+  directly (`WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/run/user/1000
+  grim -c out.png`) instead of relying on secondhand descriptions —
+  this should be the go-to verification method for any future HUD
+  visual issue, it doesn't lie the way a screenshot of just the browser
+  DOM would.
+- Confirmed via grim: cursor genuinely visible, even with zero pointer
+  devices on the system (checked `/proc/bus/input/devices` — none).
+  Ruled out the "needs a pointer device" theory entirely.
+- **Root cause finally nailed via `strings` on the actual library
+  doing the work**: `libwlroots-0.18.so` contains `XCURSOR_PATH` but
+  NEVER `XCURSOR_THEME` or `XCURSOR_SIZE`. Every fix earlier in this
+  file that set `XCURSOR_THEME` was a complete no-op for this cage/
+  wlroots version — it never did anything, on either attempt. (The
+  "yes thank you" confirmation from the user earlier likely coincided
+  with something else, or a restart timing fluke — not the env var.)
+- The actual bitmap being rendered: `/usr/share/icons/Adwaita/cursors/
+  default` (a real 78KB file; `left_ptr`, `arrow`, `top_left_arrow`,
+  `move` are all symlinks to it). Backed it up to `default.orig-backup`
+  in the same directory, then overwrote it with a fully transparent,
+  multi-size (16-128px) Xcursor file. **Verified gone via grim
+  screenshot** — genuine compositor-level proof, not a claim.
+  Also tried `update-alternatives --set x-cursor-theme` to repoint the
+  system default theme first — did NOT work on its own (still showed
+  the cursor), confirming the fix had to be the actual bitmap file, not
+  theme-name indirection.
+- **This fix is system-level, not in the repo** — README.md's cage
+  setup section and `systemd/atlas-hud.service`'s comments were
+  rewritten with the real explanation and the exact commands to redo
+  this on a fresh install. If this kiosk is ever rebuilt on new
+  hardware/OS, `/usr/share/icons/Adwaita/cursors/default` needs to be
+  replaced again from scratch — nothing currently automates it.
+
+---
+
 # Handoff — 2026-07-16 session
 
 Everything below was built/fixed in one long session tonight, on top of

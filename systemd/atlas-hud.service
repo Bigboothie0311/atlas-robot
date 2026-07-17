@@ -28,20 +28,22 @@ Requires=atlas-robot.service seatd.service
 Type=simple
 User=YOUR_USERNAME
 Environment=XDG_RUNTIME_DIR=/run/user/1000
-# The arrow on screen is cage's OWN default cursor, not Chromium's — cage
-# draws its built-in left_ptr sprite itself, which is why it's visible
-# from cold boot before any pointer device even exists, and why the HUD
-# page's `cursor: none` never had any effect on it (that CSS only governs
-# Chromium's cursor). Confirmed live via WAYLAND_DEBUG protocol trace:
-# Chromium's set_cursor(nil) hide request was sent and received, yet the
-# sprite stayed — and holding a virtual pointer device open made no
-# difference either. (WLR_NO_HARDWARE_CURSORS=1 was also tried and ruled
-# out — cursor movement/visibility was identical with and without it.)
-# The fix is a fully transparent Xcursor theme: cage documents XCURSOR_THEME
-# in its man page, and Chromium's Wayland backend honors it too, so every
-# cursor either compositor or browser could ever draw is invisible.
-# Theme lives at /usr/share/icons/atlas-invisible (generated 24x24
-# all-transparent left_ptr + symlinks for common cursor names).
+# The arrow on screen was cage's OWN default cursor, not Chromium's — cage
+# draws its built-in left_ptr sprite itself regardless of any pointer
+# device existing, which is why the HUD page's `cursor: none` never had
+# any effect on it (that CSS only governs Chromium's own cursor).
+# XCURSOR_THEME below is kept for documentation/any future consumer that
+# does read it, but it is NOT what actually hides the cursor — confirmed
+# by grepping libwlroots-0.18.so's strings: it contains XCURSOR_PATH but
+# never XCURSOR_THEME or XCURSOR_SIZE, so wlroots (and therefore cage)
+# never reads this variable at all. The REAL fix lives outside this repo,
+# in system-installed cursor theme files: /usr/share/icons/Adwaita/
+# cursors/default (the actual bitmap cage ends up rendering — left_ptr,
+# arrow, top_left_arrow, and move are all symlinks to it) was overwritten
+# with a fully transparent, multi-size (16-128px) Xcursor file; the
+# original was preserved alongside it as default.orig-backup. This isn't
+# captured by the repo/install script — if this kiosk is ever set up on a
+# fresh machine, that same file needs to be replaced again.
 Environment=XCURSOR_THEME=atlas-invisible
 # A cold-boot HDMI display can take several seconds to complete its
 # handshake after power-on. A blind fixed sleep here isn't long enough on

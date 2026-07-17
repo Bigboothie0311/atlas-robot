@@ -286,28 +286,57 @@ service so that directory exists at boot regardless of any login:
 sudo loginctl enable-linger YOUR_USERNAME
 ```
 
-If there's no physical mouse attached, Chromium can never get the one
-mouse-enter event it needs to honor the HUD page's "hide the cursor" CSS
-request, and shows a stuck default cursor forever. `atlas-hud.service`
-works around this by nudging a temporary virtual mouse at startup
-(`hud_cursor_fix.py`), which needs `python3-evdev`, a udev rule granting
-`/dev/uinput` access to the `input` group, and the `uinput` kernel module
-loaded early (otherwise it only loads reactively on first access, racing
-udev's rule application and sometimes losing — confirmed on a real cold
-boot):
+With no physical mouse attached, `cage` shows its own built-in default
+cursor sprite motionless on screen forever — this has nothing to do with
+Chromium or the HUD page's CSS (`cursor: none` there only ever governed
+Chromium's own cursor, never cage's). It's also **not** fixable via the
+`XCURSOR_THEME` environment variable, despite `cage`'s man page
+documenting it: confirmed by grepping the strings in
+`libwlroots-0.18.so` (the library actually doing cursor theme lookups on
+this Pi's cage/wlroots version) — it contains `XCURSOR_PATH` but never
+`XCURSOR_THEME` or `XCURSOR_SIZE`, so that env var is a no-op here.
+
+The actual fix is replacing the real cursor bitmap file cage renders.
+On this system that file is `/usr/share/icons/Adwaita/cursors/default`
+(`left_ptr`, `arrow`, `top_left_arrow`, and `move` are all symlinks to
+it) — overwrite it with a fully transparent, multi-size Xcursor file:
 
 ```bash
-sudo apt install -y python3-evdev
-sudo cp systemd/99-uinput.rules /etc/udev/rules.d/
-sudo cp systemd/uinput.conf /etc/modules-load.d/
-sudo udevadm control --reload-rules
-sudo udevadm trigger
-sudo modprobe uinput
+sudo cp /usr/share/icons/Adwaita/cursors/default \
+        /usr/share/icons/Adwaita/cursors/default.orig-backup
+python3 - <<'EOF'
+import struct
+
+MAGIC, HEADER_SIZE, VERSION, IMAGE_TYPE = b"Xcur", 16, 0x10000, 0xFFFD0002
+SIZES = [16, 22, 24, 32, 40, 48, 64, 72, 96, 128]
+
+toc, images, offset = b"", b"", HEADER_SIZE + len(SIZES) * 12
+for size in SIZES:
+    toc += struct.pack("<III", IMAGE_TYPE, size, offset)
+    chunk = struct.pack("<IIIIIIIII", 36, IMAGE_TYPE, size, 1, size, size, 0, 0, 0) \
+        + b"\x00" * (size * size * 4)
+    images += chunk
+    offset += len(chunk)
+
+with open("/tmp/transparent_cursor", "wb") as f:
+    f.write(MAGIC + struct.pack("<III", HEADER_SIZE, VERSION, len(SIZES)) + toc + images)
+EOF
+sudo cp /tmp/transparent_cursor /usr/share/icons/Adwaita/cursors/default
+sudo systemctl restart atlas-hud
 ```
 
-The user account running `atlas-hud.service` must be a member of the
-`input` group (check with `groups`). Skip all of this if a real mouse is
-attached — the cursor will already be hideable.
+Verify with a real screencopy of the compositor output (not a guess —
+`grim` reads what cage is *actually* drawing, cursor included):
+
+```bash
+sudo apt install -y grim
+WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/run/user/1000 grim -c /tmp/check.png
+```
+
+This step is **system-level, not part of this repo** — a fresh install
+on a new machine needs it redone. Skip all of this if a real mouse is
+attached, since a real pointer device gives Chromium its own cursor
+lifecycle that the HUD's `cursor: none` CSS then correctly controls.
 
 Logs: `journalctl -u atlas-robot -f` / `journalctl -u atlas-wake -f` / `journalctl -u atlas-hud -f`.
 
