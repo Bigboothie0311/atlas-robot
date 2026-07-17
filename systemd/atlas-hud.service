@@ -54,19 +54,15 @@ Environment=XCURSOR_THEME=atlas-invisible
 # block startup forever (Restart=on-failure below is still the safety net).
 ExecStartPre=/bin/bash -c 'for i in $(seq 1 30); do grep -q ^connected /sys/class/drm/card*-HDMI-*/status 2>/dev/null && break; sleep 1; done'
 ExecStart=/usr/bin/cage -- /usr/bin/chromium --kiosk --no-first-run --disable-restore-session-state --ozone-platform=wayland --start-fullscreen http://127.0.0.1:5051/hud
-# There's no physical mouse on this Pi. Chromium can only honor the HUD
-# page's `cursor: none` CSS after receiving one real mouse-enter event
-# with a Wayland input serial — without a pointer device ever generating
-# one, that request never resolves and the default cursor sprite just
-# sits on screen forever. This creates a temporary virtual mouse via
-# uinput and nudges it periodically over 90s (Chromium's own startup time
-# varies enough that anything shorter missed the window on a real cold
-# boot). Requires the udev rule in systemd/99-uinput.rules so the User=
-# account above can access /dev/uinput without root. Backgrounded with
-# setsid — 90s exceeds systemd's default start-job timeout, and this is a
-# cosmetic side effect that has no bearing on whether cage/Chromium
-# actually started, so it must not block the job or gate Restart=on-failure.
-ExecStartPost=/bin/bash -c 'setsid /usr/bin/python3 /home/atlas/atlas-robot/hud_cursor_fix.py 2>&1 | systemd-cat -t hud_cursor_fix &'
+# NOTE: there must be NO pointer input on this kiosk — not even a
+# virtual one. A uinput "cursor nudge" script used to run here as
+# ExecStartPost; it turned out to be the thing MAKING the cursor
+# visible: any pointer enter event causes Chromium to set its own
+# client-drawn cursor bitmap (which ignores XCURSOR_THEME), and cage
+# never honors the later hide request, so the arrow stuck around
+# forever. With zero pointer devices Chromium never draws a cursor at
+# all, and cage's own default cursor is handled by the transparent
+# theme above.
 Restart=on-failure
 RestartSec=2
 

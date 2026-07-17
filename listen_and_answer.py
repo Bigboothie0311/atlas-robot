@@ -17,6 +17,7 @@ from vosk import Model, KaldiRecognizer
 
 import ai_tools
 import briefing
+import diagnostics
 import hud_stats
 import memory_store
 import web_search
@@ -1067,6 +1068,21 @@ NEWS_PHRASES = {
     "what is the news",
 }
 
+DIAGNOSTICS_PHRASES = {
+    "run diagnostics",
+    "run a diagnostic",
+    "run your diagnostics",
+    "run a system check",
+    "system check",
+    "self test",
+    "run a self test",
+    "run self test",
+    "check your systems",
+    "run a system diagnostic",
+    "how are your systems",
+    "diagnostics",
+}
+
 BRIEFING_PHRASES = {
     "morning briefing",
     "daily briefing",
@@ -1765,6 +1781,13 @@ def handle_turn(model):
         if normalized_phrase in NEWS_PHRASES:
             set_face("thinking")
             answer = briefing.build_news_brief()
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        if normalized_phrase in DIAGNOSTICS_PHRASES:
+            set_face("thinking")
+            answer = diagnostics.build_diagnostics_report()
             log_qa(text, answer)
             speak(answer)
             return

@@ -10,12 +10,24 @@ the HUD v1/v2 work from the previous session (see git log before
 A second work wave happened after the handoff below was written. In
 order:
 
-1. **Cursor mystery actually solved** — see the rewritten Cursor bullet
-   under "Still open"; the nudge theory was wrong, the arrow was cage's
-   own cursor, fixed via transparent `XCURSOR_THEME=atlas-invisible`
-   (theme generated at `/usr/share/icons/atlas-invisible`, system-side
-   only). User-confirmed gone. `hud_cursor_fix.py` + uinput plumbing now
-   redundant, left in place, safe to remove later.
+1. **Cursor mystery actually solved — in two layers.** Layer one: the
+   boot-visible arrow was cage's own default cursor (not Chromium's),
+   fixed via transparent `XCURSOR_THEME=atlas-invisible` (theme
+   generated at `/usr/share/icons/atlas-invisible`, system-side only,
+   not in the repo). Layer two, found when the cursor CAME BACK after a
+   later restart: `hud_cursor_fix.py`'s own virtual-mouse nudges were
+   re-summoning it — any pointer enter event makes Chromium set its own
+   client-drawn cursor bitmap (which ignores XCURSOR_THEME), and cage
+   never honors the later hide request, so it sticks until the next
+   restart's window expires. **Final fix: the nudge script and all its
+   uinput plumbing are DELETED** (`hud_cursor_fix.py`,
+   `systemd/uinput.conf`, `systemd/99-uinput.rules`, plus the installed
+   `/etc/modules-load.d/uinput.conf` and `/etc/udev/rules.d/99-uinput.
+   rules`, and the ExecStartPost line). The kiosk must NEVER have any
+   pointer device, real or virtual — with zero pointers Chromium never
+   draws a cursor at all and the theme covers cage's. Don't recreate
+   uinput test mice while the HUD is up; that re-shows the cursor until
+   the next service restart.
 2. **HUD v3 cinematic redesign** — A.T.L.A.S. masthead with animated
    wordmark + state-reactive status line, tactical grid + vignette,
    corner brackets + panel ID codes, reactor radar sweep/orbit
@@ -60,15 +72,19 @@ order:
      print at 13%, layer 6/724) — it's in PRINTER_ACTIVE_STATES.
      Finish/fail announcement not yet observed end-to-end (print still
      running at session end).
-4. **Feature ideas 11 (internet radio via mpv) and 12 (spoken
-   self-diagnostics) were pitched, awaiting user yes/no.** Ideas 9/10
-   (camera) were declined — camera hardware is disconnected.
+4. **Self-diagnostics built (idea 12, approved)** — `diagnostics.py`,
+   voice: "run diagnostics" / "system check" / "self test" etc. Checks
+   all four services, disk/memory/CPU temp, internet, mic presence,
+   gaming PC, printer, and OpenAI budget spend; speaks a one-breath
+   verdict listing problems first if any. Verified live against real
+   state. **Idea 11 (internet radio) was declined** — don't build.
+   Ideas 9/10 (camera) were declined — camera hardware is disconnected.
 
 Voice command list for the user: "boot my PC", "set a timer for 10
 minutes", "cancel the timer", "how long on the timer", "focus mode
 (for 45 minutes)", "end focus mode", "take a note ...", "read my
 notes", "clear my notes", "morning briefing" / "brief me", "what's in
-the news".
+the news", "run diagnostics".
 
 ## Current verified state (as of this handoff)
 
