@@ -12,9 +12,17 @@
 
 [Unit]
 Description=A.T.L.A.S. JARVIS HUD Kiosk
-After=network-online.target atlas-robot.service
+# seatd grants cage its DRM/VT permissions. Without an explicit ordering
+# dependency here, systemd is free to start this unit before seatd is
+# actually ready on a cold boot (both just depend on generic targets like
+# multi-user.target) — cage then fails to get a seat, and Restart=on-failure
+# just keeps retrying every RestartSec until seatd happens to come up on its
+# own. That looks exactly like "stuck on the console until something
+# unrelated (an SSH login) nudges it," when it's really just a race that
+# happened to resolve around the same time.
+After=network-online.target atlas-robot.service seatd.service
 Wants=network-online.target
-Requires=atlas-robot.service
+Requires=atlas-robot.service seatd.service
 
 [Service]
 Type=simple
