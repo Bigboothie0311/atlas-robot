@@ -44,10 +44,14 @@ ExecStart=/usr/bin/cage -- /usr/bin/chromium --kiosk --no-first-run --disable-re
 # with a Wayland input serial — without a pointer device ever generating
 # one, that request never resolves and the default cursor sprite just
 # sits on screen forever. This creates a temporary virtual mouse via
-# uinput and nudges it once, which is enough to unblock it. Requires the
-# udev rule in systemd/99-uinput.rules so the User= account above can
-# access /dev/uinput without root.
-ExecStartPost=/usr/bin/python3 /home/atlas/atlas-robot/hud_cursor_fix.py
+# uinput and nudges it periodically over 90s (Chromium's own startup time
+# varies enough that anything shorter missed the window on a real cold
+# boot). Requires the udev rule in systemd/99-uinput.rules so the User=
+# account above can access /dev/uinput without root. Backgrounded with
+# setsid — 90s exceeds systemd's default start-job timeout, and this is a
+# cosmetic side effect that has no bearing on whether cage/Chromium
+# actually started, so it must not block the job or gate Restart=on-failure.
+ExecStartPost=/bin/bash -c 'setsid /usr/bin/python3 /home/atlas/atlas-robot/hud_cursor_fix.py 2>&1 | systemd-cat -t hud_cursor_fix &'
 Restart=on-failure
 RestartSec=2
 

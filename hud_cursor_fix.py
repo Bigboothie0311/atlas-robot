@@ -14,8 +14,14 @@ pixel and back, which is enough to generate that one enter event. A single
 nudge at a fixed delay turned out unreliable — Chromium's actual startup
 time (surface creation, page load) varies enough between runs that a nudge
 timed too early lands before there's anything to receive it, and the
-cursor stays stuck. Nudging several times over a longer window makes this
-robust to that variance instead of depending on one lucky guess.
+cursor stays stuck. A first attempt at spreading several nudges over 20s
+still wasn't enough — confirmed on a real cold boot where the service
+didn't report "Started" until 22s in, after every one of 5 nudges (at
+3/6/10/15/20s) had already fired into a surface that didn't exist yet.
+Nudging periodically over a much longer window fixes this properly
+instead of guessing at a fixed cutoff — cheap and harmless to keep
+trying since a nudge into a not-yet-ready surface is a silent no-op, not
+an error.
 
 Runs as atlas-hud.service's ExecStartPost, which means any unhandled
 exception here fails the *entire* service start under Type=simple —
@@ -39,10 +45,11 @@ CAPABILITIES = {
     e.EV_KEY: [e.BTN_LEFT],
 }
 
-# Spread across a wide window rather than one fixed guess — cage/Chromium
-# startup time varies enough between runs that a single-attempt delay
-# sometimes lands before there's a surface ready to receive the nudge.
-NUDGE_DELAYS_SECONDS = [3, 6, 10, 15, 20]
+# Nudge periodically over a long window rather than a short fixed list —
+# confirmed on a real cold boot that cage/Chromium can take 20+ seconds to
+# actually report started, so a handful of early attempts isn't enough.
+NUDGE_INTERVAL_SECONDS = 5
+NUDGE_DURATION_SECONDS = 90
 
 # Retries opening the virtual mouse device itself, separate from the
 # nudge-timing retries above — this is for the case where /dev/uinput
@@ -85,12 +92,10 @@ def main():
         with ui:
             elapsed = 0.0
 
-            for delay in NUDGE_DELAYS_SECONDS:
-                time.sleep(delay - elapsed)
-                elapsed = delay
+            while elapsed < NUDGE_DURATION_SECONDS:
+                time.sleep(NUDGE_INTERVAL_SECONDS)
+                elapsed += NUDGE_INTERVAL_SECONDS
                 nudge(ui)
-
-            time.sleep(1)
     except Exception as error:
         print("hud_cursor_fix: nudge failed:", error, flush=True)
 
