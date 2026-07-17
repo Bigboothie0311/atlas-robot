@@ -273,6 +273,19 @@ sudo apt install -y cage seatd
 sudo systemctl enable --now seatd
 ```
 
+`cage` also needs `XDG_RUNTIME_DIR` (`/run/user/<uid>`) to already exist,
+which systemd normally only creates once that user actually logs in —
+on a cold boot with no interactive login, `atlas-hud.service` fails
+repeatedly ("Unable to open Wayland socket: Invalid argument") until
+something logs in and creates it (confirmed via the exact timestamps of
+a real cold boot: two failed attempts before `/run/user/1000` existed,
+success right after). Enable lingering for the account running the
+service so that directory exists at boot regardless of any login:
+
+```bash
+sudo loginctl enable-linger YOUR_USERNAME
+```
+
 If there's no physical mouse attached, Chromium can never get the one
 mouse-enter event it needs to honor the HUD page's "hide the cursor" CSS
 request, and shows a stuck default cursor forever. `atlas-hud.service`
