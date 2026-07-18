@@ -876,6 +876,25 @@ def _normalize_phrase(text):
 # All zero-token — parsed here, executed via the hub or local files.
 # ---------------------------------------------------------------------
 
+WOL_DIAGNOSE_PHRASES = {
+    "why won't my pc wake",
+    "why wont my pc wake",
+    "why won't my pc turn on",
+    "why wont my pc turn on",
+    "diagnose wake on lan",
+    "diagnose the pc wake",
+    "why can't you wake my pc",
+    "why cant you wake my pc",
+    "what's wrong with boot my pc",
+    "whats wrong with boot my pc",
+}
+
+
+def run_wol_diagnose_command():
+    answer, _evidence = pc_power.diagnose_wol()
+    return answer
+
+
 WAKE_PC_PHRASES = {
     "turn on my pc",
     "turn on my computer",
@@ -2460,6 +2479,12 @@ def _handle_turn_body(model):
             return
 
         normalized_phrase = _normalize_phrase(text)
+
+        if normalized_phrase in WOL_DIAGNOSE_PHRASES:
+            answer = run_wol_diagnose_command()
+            log_qa(text, answer)
+            speak(answer)
+            return
 
         if normalized_phrase in WAKE_PC_PHRASES:
             answer = run_wake_pc_command()

@@ -173,6 +173,86 @@ def send_wake_packet():
     return "Wake signal sent. I'll tell you when your PC actually comes up."
 
 
+# MAC OUI prefixes known to belong to USB network-adapter makers. A USB
+# NIC generally can't do Wake-on-LAN because it loses bus power when the
+# PC sleeps or shuts down — so a WoL target on one of these is the most
+# common "boot my PC does nothing" cause, and it's a hardware fact no
+# software change on the Pi can fix.
+USB_ADAPTER_OUIS = {
+    "80:3f:5d": "Winstars Technology",
+    "00:e0:4c": "Realtek USB",
+    "00:13:3b": "USB NIC",
+    "00:05:1b": "USB NIC",
+}
+
+
+def diagnose_wol():
+    """Read-only Wake-on-LAN diagnosis from the Pi's side. Explains what
+    can and can't be fixed in software vs. what needs PC-side work.
+    Returns (spoken_report, evidence_dict)."""
+    import network_sentinel
+
+    mac = get_pc_mac()
+    evidence = {"mac": mac}
+
+    # Which interface would the packet leave from, and is it wired?
+    try:
+        route = subprocess.run(
+            ["ip", "route", "get", pc_stats.load_gaming_pc_ip() or "192.168.0.1"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout
+        iface = route.split("dev", 1)[1].split()[0] if "dev" in route else "?"
+    except (subprocess.SubprocessError, OSError, IndexError):
+        iface = "?"
+
+    evidence["egress_iface"] = iface
+    evidence["egress_is_wifi"] = iface.startswith(("wlan", "wl"))
+
+    parts = []
+
+    if mac is None:
+        return (
+            "I don't have your PC's hardware address yet, so I can't wake "
+            "it. I learn it automatically while the PC is on.",
+            evidence,
+        )
+
+    oui = mac[:8].lower()
+    vendor = network_sentinel._vendor_for_mac(mac) or ""
+    evidence["vendor"] = vendor
+    is_usb_adapter = oui in USB_ADAPTER_OUIS or "winstars" in vendor.lower()
+    evidence["target_is_usb_adapter"] = is_usb_adapter
+
+    parts.append("From my side, the magic packet sends fine")
+
+    if evidence["egress_is_wifi"]:
+        parts.append(
+            "though I'm on Wi-Fi, so the packet reaches your PC through "
+            "your router rather than a direct cable — that's usually okay "
+            "but less reliable than wired"
+        )
+
+    if is_usb_adapter:
+        parts.append(
+            f"but here's the real problem: the network address I wake is a "
+            f"{vendor or 'USB'} adapter, which is a USB network dongle. USB "
+            "adapters almost never support Wake-on-LAN because they lose "
+            "power when the PC sleeps or shuts off. No change on my end can "
+            "fix that — you'd need to wake the PC through its built-in "
+            "Ethernet port instead, with a cable, and enable Wake-on-LAN in "
+            "the BIOS plus turn off Windows fast startup"
+        )
+    else:
+        parts.append(
+            "so if it's not waking, the cause is on the PC: enable "
+            "Wake-on-LAN in the BIOS, turn off Windows fast startup, and "
+            "allow the network card to wake the machine in its power "
+            "settings"
+        )
+
+    return ". ".join(parts) + ".", evidence
+
+
 WAKE_VERIFY_TIMEOUT_SECONDS = 90
 WAKE_VERIFY_POLL_SECONDS = 5
 
