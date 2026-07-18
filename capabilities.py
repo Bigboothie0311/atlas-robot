@@ -106,6 +106,8 @@ REGISTRY = [
      "aliases": ["how's my PC"], "confirm": False, "requires": "pc", "category": "pc"},
     {"id": "empty_recycle_bin", "name": "empty Recycle Bin", "description": "empties the PC Recycle Bin",
      "aliases": ["empty the recycle bin"], "confirm": True, "requires": "pc", "category": "pc"},
+    {"id": "pc_profiles", "name": "app profiles", "description": "opens a set of apps and sets volume/focus for work, design, or game mode",
+     "aliases": ["work mode", "design mode", "game mode"], "confirm": False, "requires": "pc", "category": "pc"},
 
     # --- Printer (status only; no new printer features) -------------
     {"id": "print_status", "name": "print status", "description": "reports 3D print progress and ETA",

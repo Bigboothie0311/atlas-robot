@@ -84,6 +84,35 @@ def open_claude():
     return "Opening Claude." if ok else data
 
 
+def open_app(app_name):
+    """Opens an app from the companion's approved_apps whitelist (optional
+    companion action). Degrades gracefully if unsupported."""
+    ok, data = _call("open_app", {"app": app_name})
+    return ok, (f"Opening {app_name}." if ok else data)
+
+
+def set_volume_level(level):
+    """Sets an absolute PC volume 0-100 via repeated volume-down then up
+    steps (companion media keys are relative, so normalize from 0)."""
+    # Floor to 0 first (many downs), then step up to target. Media-key
+    # steps are ~2% each on Windows.
+    _call("volume", {"action": "down", "repeat": 50})
+    ups = max(0, min(100, int(level))) // 2
+    if ups:
+        _call("volume", {"action": "up", "repeat": ups})
+    return True
+
+
+def open_spotify():
+    ok, data = _call("open_spotify")
+    return "Opening Spotify." if ok else data
+
+
+def open_claude():
+    ok, data = _call("open_claude")
+    return "Opening Claude." if ok else data
+
+
 def empty_recycle_bin():
     ok, data = _call("empty_recycle_bin")
     return "The Recycle Bin is empty." if ok else data

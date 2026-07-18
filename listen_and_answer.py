@@ -1850,6 +1850,29 @@ def run_internet_check_command():
     return f"Internet looks {quality}: " + ", ".join(parts) + "."
 
 
+PROFILE_PATTERN = re.compile(
+    r"^(?:activate |start |switch to |enter )?(work|design|game) mode$"
+)
+
+
+def parse_profile_command(text):
+    m = PROFILE_PATTERN.match(_normalize_phrase(text))
+    return m.group(1) if m else None
+
+
+def run_profile_command(name):
+    import pc_profiles
+
+    def _set_focus(on):
+        try:
+            requests.post(f"{HUB}/focus" if on else f"{HUB}/focus/end",
+                          json={"minutes": 60} if on else {}, timeout=5)
+        except requests.RequestException:
+            pass
+
+    return pc_profiles.activate(name, set_focus=_set_focus)
+
+
 MEMORY_QUERY_PATTERN = re.compile(r"^what do you (?:remember|know) about (.+)$")
 FORGET_ABOUT_PATTERN = re.compile(r"^forget (?:that |about |everything about )(.+)$")
 ADD_PRIORITY_PATTERN = re.compile(
@@ -3327,6 +3350,14 @@ def _handle_turn_body(model):
         if normalized_phrase in CONNECTION_PHRASES:
             set_face("thinking")
             answer = run_connection_health_command()
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        profile_name = parse_profile_command(text)
+        if profile_name is not None:
+            set_face("thinking")
+            answer = run_profile_command(profile_name)
             log_qa(text, answer)
             speak(answer)
             return

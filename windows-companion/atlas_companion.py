@@ -208,6 +208,20 @@ def act_youtube_search(body):
     return {"ok": True, "query": query}
 
 
+def act_open_app(body):
+    """Opens an app from the approved_apps whitelist in the config — used
+    by ATLAS app profiles. Never launches an arbitrary path."""
+    name = str(body.get("app", "")).strip()
+    approved = CONFIG.get("approved_apps", {})
+    path = approved.get(name)
+
+    if not path:
+        return {"ok": False, "error": f"app '{name}' not in approved_apps"}
+
+    subprocess.Popen([path])
+    return {"ok": True, "opened": name}
+
+
 def act_system_info(_body):
     """Read-only PC health: OS disk free %, CPU load %, RAM used %, and
     uptime. PowerShell/CIM only — no changes."""
@@ -249,6 +263,7 @@ ACTIONS = {
     "run_script": act_run_script,
     "slicer_status": act_slicer_status,
     "system_info": act_system_info,
+    "open_app": act_open_app,
 }
 
 
