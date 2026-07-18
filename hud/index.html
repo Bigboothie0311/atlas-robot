@@ -44,7 +44,7 @@
     <div class="panel panel-core">
       <div class="panel-label">CORE &middot; RPI 5<span class="panel-code">CPU&middot;06</span></div>
       <div class="panel-value" id="core-cpu">--%</div>
-      <div class="panel-sub">QUAD CORTEX-A76 &middot; 2.4 GHZ</div>
+      <div class="panel-sub" id="uptime">UPTIME --</div>
       <div class="gauge"><div class="gauge-fill" id="core-gauge"></div></div>
     </div>
 
@@ -81,7 +81,7 @@
         <div class="panel-sub" id="printer-detail"></div>
       </div>
       <div class="panel" id="devices-panel">
-        <div class="panel-label">LAN DEVICES<span class="panel-code">NET&middot;08</span></div>
+        <div class="panel-label"><span id="devices-title">LAN DEVICES</span><span class="panel-code">NET&middot;08</span></div>
         <div id="devices-list"></div>
       </div>
     </div>
@@ -94,12 +94,9 @@
       <div class="panel-sub" id="weather-precip">Rain --%</div>
     </div>
 
-    <div class="panel panel-system">
-      <div class="panel-label">NETWORK<span class="panel-code">NET&middot;04</span></div>
-      <div class="panel-value" id="network-ip">--</div>
-      <div class="panel-sub" id="device-count"></div>
-      <div class="panel-label panel-label-spaced">UPTIME</div>
-      <div class="panel-sub" id="uptime">--</div>
+    <div class="panel panel-news">
+      <div class="panel-label">NEWS WIRE<span class="panel-code">NWS&middot;04</span></div>
+      <div id="news-headlines"></div>
     </div>
 
     <div class="panel panel-gaming-pc">
@@ -108,11 +105,6 @@
       <div class="panel-sub" id="gaming-pc-cpu">CPU -- % / -- &deg;C</div>
       <div class="panel-sub" id="gaming-pc-gpu">GPU -- % / -- &deg;C</div>
       <div class="panel-sub" id="gaming-pc-ram">RAM -- %</div>
-    </div>
-
-    <div id="news-ticker" class="empty">
-      <span id="news-ticker-label">NEWS</span>
-      <div id="ticker-viewport"><div id="ticker-content"></div></div>
     </div>
 
     <div id="cosmetic-terminal">

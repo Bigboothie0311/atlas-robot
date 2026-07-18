@@ -75,7 +75,7 @@ body.quiet-hours {
 #dashboard {
   display: grid;
   grid-template-columns: 1fr 1.4fr 1fr;
-  grid-template-rows: 72px 1fr 1fr 1fr auto auto;
+  grid-template-rows: 72px 1fr 1fr 1fr auto;
   gap: 24px;
   width: 1920px;
   height: 1080px;
@@ -131,7 +131,7 @@ body.state-speaking #masthead::after {
 }
 
 #wordmark-sub {
-  font-size: 12px;
+  font-size: 14px;
   letter-spacing: 4px;
   color: var(--cyan);
   opacity: 0.6;
@@ -143,7 +143,7 @@ body.state-speaking #masthead::after {
 }
 
 #masthead-state {
-  font-size: 15px;
+  font-size: 17px;
   letter-spacing: 3px;
   color: var(--cyan);
 }
@@ -177,7 +177,7 @@ body.state-speaking .live-dot {
 }
 
 #masthead-uplink {
-  font-size: 11px;
+  font-size: 13px;
   letter-spacing: 3px;
   color: var(--cyan);
   opacity: 0.45;
@@ -252,7 +252,7 @@ body.state-speaking .live-dot {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  font-size: 13px;
+  font-size: 15px;
   letter-spacing: 3px;
   color: var(--cyan);
   opacity: 0.75;
@@ -260,7 +260,7 @@ body.state-speaking .live-dot {
 }
 
 .panel-code {
-  font-size: 10px;
+  font-size: 12px;
   letter-spacing: 2px;
   opacity: 0.55;
 }
@@ -278,7 +278,7 @@ body.state-speaking .live-dot {
 }
 
 .panel-sub {
-  font-size: 15px;
+  font-size: 18px;
   color: var(--cyan);
   opacity: 0.8;
   margin-top: 2px;
@@ -306,62 +306,44 @@ body.state-speaking .live-dot {
 /* Cosmetic terminal                                                   */
 /* ------------------------------------------------------------------ */
 
-/* News ticker — one slim scrolling line, hidden until headlines exist. */
-#news-ticker {
-  grid-column: 1 / span 3;
-  grid-row: 5;
-  display: flex;
-  align-items: center;
-  gap: 18px;
-  height: 36px;
-  padding: 0 22px;
-  border: 1px solid var(--cyan-dim);
-  border-radius: 4px;
-  background: linear-gradient(180deg, rgba(52, 226, 255, 0.04), rgba(52, 226, 255, 0.01));
-  overflow: hidden;
-  animation: boot-in 0.6s ease-out 0.45s backwards;
+/* News wire panel — right column, cycling batches of headlines with a
+   fade. A scrolling marquee is unreadable at this screen's real
+   resolution; static text that rotates is not. */
+.panel-news {
+  grid-column: 3;
+  grid-row: 3;
 }
 
-#news-ticker.empty {
-  display: none;
-}
-
-#news-ticker-label {
-  font-size: 12px;
-  letter-spacing: 3px;
-  color: var(--amber);
-  opacity: 0.85;
-  flex-shrink: 0;
-}
-
-#ticker-viewport {
-  flex: 1;
-  overflow: hidden;
-}
-
-#ticker-content {
-  display: inline-block;
-  white-space: nowrap;
-  padding-left: 100%;
-  font-size: 14px;
+#news-headlines {
+  margin-top: 10px;
+  font-size: 17px;
+  line-height: 1.45;
   color: var(--cyan);
-  opacity: 0.85;
-  animation: ticker-scroll 70s linear infinite;
+  opacity: 0.9;
+  transition: opacity 0.6s ease;
 }
 
-@keyframes ticker-scroll {
-  to { transform: translateX(-100%); }
+#news-headlines.fading {
+  opacity: 0;
+}
+
+#news-headlines .headline {
+  margin-bottom: 10px;
+}
+
+#news-headlines .headline::before {
+  content: "\25B8 ";
+  color: var(--amber);
 }
 
 #cosmetic-terminal {
   grid-column: 1 / span 3;
-  grid-row: 6;
+  grid-row: 5;
   position: relative;
   border: 1px solid var(--cyan-dim);
   border-radius: 4px;
   padding: 10px 22px;
   background: linear-gradient(180deg, rgba(52, 226, 255, 0.04), rgba(52, 226, 255, 0.01));
-  height: 110px;
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -369,10 +351,13 @@ body.state-speaking .live-dot {
 }
 
 #cosmetic-terminal-lines {
-  flex: 1;
+  /* Exactly three lines (3 x 27px) — a fractional-line window lets the
+     bottom-pinned scroll show a half-clipped line under the label. */
+  flex: none;
+  height: 81px;
   overflow-y: hidden;
-  font-size: 13px;
-  line-height: 1.7;
+  font-size: 16px;
+  line-height: 27px;
   color: var(--cyan);
   opacity: 0.75;
 }
@@ -398,7 +383,6 @@ body.state-speaking .live-dot {
 .panel-disk    { grid-column: 1; grid-row: 3; }
 .panel-core    { grid-column: 1; grid-row: 4; }
 .panel-weather { grid-column: 3; grid-row: 2; }
-.panel-system  { grid-column: 3; grid-row: 3; }
 .panel-gaming-pc { grid-column: 3; grid-row: 4; }
 
 .panel-gaming-pc.offline .panel-value {
@@ -710,7 +694,7 @@ body.state-speaking .ring-outer {
 }
 
 #date {
-  font-size: 16px;
+  font-size: 18px;
   letter-spacing: 2px;
   opacity: 0.75;
   margin-top: 6px;
@@ -718,7 +702,7 @@ body.state-speaking .ring-outer {
 
 #status-label {
   margin-top: 14px;
-  font-size: 14px;
+  font-size: 16px;
   letter-spacing: 5px;
   color: var(--cyan);
   opacity: 0.85;
@@ -794,7 +778,7 @@ body.focus-mode #printer-panel.visible {
   max-height: 260px;
   overflow-y: auto;
   scrollbar-width: none;
-  font-size: 14px;
+  font-size: 16px;
   line-height: 1.5;
   padding: 12px 16px;
   border: 1px solid var(--cyan-dim);
@@ -838,7 +822,7 @@ body.focus-mode #printer-panel.visible {
   margin-top: 8px;
   columns: 2;
   column-gap: 28px;
-  font-size: 13px;
+  font-size: 15px;
   line-height: 1.8;
 }
 

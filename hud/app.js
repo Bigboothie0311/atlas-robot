@@ -61,7 +61,11 @@ function buildRealStatusLine() {
   ];
 
   if (latestStats.network.ip) {
-    options.push(`NETWORK LINK ${latestStats.network.ip} STABLE`);
+    options.push("NETWORK LINK STABLE");
+  }
+
+  if (latestStats.network.device_count) {
+    options.push(`${latestStats.network.device_count} NODES ON LOCAL MESH`);
   }
 
   const hours = Math.floor(latestStats.uptime_seconds / 3600);
@@ -364,17 +368,11 @@ async function pollStats() {
     document.getElementById("weather-precip").textContent =
       `Rain ${weather.precip_chance ?? "--"}%`;
 
-    document.getElementById("network-ip").textContent = stats.network.ip || "--";
-
-    const deviceCount = stats.network.device_count || 0;
-    document.getElementById("device-count").textContent =
-      deviceCount > 0 ? `DEVICES ONLINE: ${deviceCount}` : "";
-
-    applyDeviceList(stats.network.devices || []);
+    applyDeviceList(stats.network.devices || [], stats.network.device_count || 0);
 
     const hours = Math.floor(stats.uptime_seconds / 3600);
     const minutes = Math.floor((stats.uptime_seconds % 3600) / 60);
-    document.getElementById("uptime").textContent = `${hours}h ${minutes}m`;
+    document.getElementById("uptime").textContent = `UPTIME ${hours}H ${minutes}M`;
 
     const gamingPc = stats.gaming_pc || { online: false };
     const gamingPcPanel = document.querySelector(".panel-gaming-pc");
@@ -435,7 +433,7 @@ async function pollStats() {
 const DEVICE_LIST_MAX_ROWS = 12;
 let lastDeviceListKey = "";
 
-function applyDeviceList(devices) {
+function applyDeviceList(devices, deviceCount) {
   const panel = document.getElementById("devices-panel");
   const list = document.getElementById("devices-list");
 
@@ -445,6 +443,8 @@ function applyDeviceList(devices) {
   }
 
   panel.classList.add("visible");
+  document.getElementById("devices-title").textContent =
+    `LAN DEVICES · ${deviceCount} ONLINE`;
 
   const rows = devices.slice(0, DEVICE_LIST_MAX_ROWS);
   const key = rows.map((d) => `${d.mac}|${d.ip}|${d.hostname}|${d.vendor}`).join(",");
@@ -475,27 +475,62 @@ function applyDeviceList(devices) {
   }
 }
 
-let lastTickerText = "";
+// News wire: show HEADLINES_PER_PAGE at a time, fading to the next batch
+// on a timer — readable at low resolution, unlike a scrolling marquee.
+const HEADLINES_PER_PAGE = 3;
+const HEADLINE_ROTATE_MS = 15000;
 
-function applyHeadlines(headlines) {
-  const ticker = document.getElementById("news-ticker");
-  const content = document.getElementById("ticker-content");
+let currentHeadlines = [];
+let headlinePage = 0;
 
-  if (!headlines.length) {
-    ticker.classList.add("empty");
+function renderHeadlinePage() {
+  const container = document.getElementById("news-headlines");
+  container.innerHTML = "";
+
+  if (!currentHeadlines.length) {
     return;
   }
 
-  const text = headlines.join("      ◆      ");
+  const start = headlinePage * HEADLINES_PER_PAGE;
+  const page = currentHeadlines.slice(start, start + HEADLINES_PER_PAGE);
 
-  // Only touch the DOM when the headlines actually change — resetting
-  // textContent restarts the scroll animation from the right edge.
-  if (text !== lastTickerText) {
-    lastTickerText = text;
-    content.textContent = text;
+  for (const headline of page) {
+    const row = document.createElement("div");
+    row.className = "headline";
+    row.textContent = headline;
+    container.appendChild(row);
+  }
+}
+
+function rotateHeadlines() {
+  if (currentHeadlines.length <= HEADLINES_PER_PAGE) {
+    return;
   }
 
-  ticker.classList.remove("empty");
+  const container = document.getElementById("news-headlines");
+  const pages = Math.ceil(currentHeadlines.length / HEADLINES_PER_PAGE);
+  container.classList.add("fading");
+
+  setTimeout(() => {
+    headlinePage = (headlinePage + 1) % pages;
+    renderHeadlinePage();
+    container.classList.remove("fading");
+  }, 600);
+}
+
+setInterval(rotateHeadlines, HEADLINE_ROTATE_MS);
+
+function applyHeadlines(headlines) {
+  const key = headlines.join("|");
+  const previousKey = currentHeadlines.join("|");
+
+  if (key === previousKey) {
+    return;
+  }
+
+  currentHeadlines = headlines;
+  headlinePage = 0;
+  renderHeadlinePage();
 }
 
 updateClock();
