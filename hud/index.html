@@ -11,11 +11,11 @@
     <header id="masthead">
       <div id="masthead-left">
         <div id="wordmark">A.T.L.A.S.</div>
-        <div id="wordmark-sub">AUTONOMOUS DESK INTELLIGENCE &middot; STATION HOME-01</div>
+        <div id="wordmark-sub">AUTONOMOUS DESK INTELLIGENCE &middot; <span id="station-name">STATION</span></div>
       </div>
       <div id="masthead-right">
         <div id="masthead-state"><span class="live-dot"></span><span id="masthead-state-text">ALL SYSTEMS NOMINAL</span></div>
-        <div id="masthead-uplink"><span id="auth-indicator"></span>UPLINK SECURE &middot; LOCAL CORE ACTIVE</div>
+        <div id="masthead-uplink"><span id="auth-indicator"></span><span id="device-count-mast"></span>UPLINK SECURE &middot; LOCAL CORE ACTIVE</div>
       </div>
     </header>
 
@@ -80,14 +80,10 @@
         <div class="gauge"><div class="gauge-fill" id="printer-gauge"></div></div>
         <div class="panel-sub" id="printer-detail"></div>
       </div>
-      <div class="panel" id="devices-panel">
-        <div class="panel-label"><span id="devices-title">LAN DEVICES</span><span class="panel-code">NET&middot;08</span></div>
-        <div id="devices-list"></div>
-      </div>
     </div>
 
     <div class="panel panel-weather">
-      <div class="panel-label">WEATHER &middot; HOME, CA<span class="panel-code">ENV&middot;03</span></div>
+      <div class="panel-label">WEATHER &middot; <span id="weather-city">--</span><span class="panel-code">ENV&middot;03</span></div>
       <div class="panel-value" id="weather-temp">--&deg;F</div>
       <div class="panel-sub" id="weather-condition">--</div>
       <div class="panel-sub" id="weather-range">H -- / L --</div>
@@ -110,6 +106,17 @@
     <div id="cosmetic-terminal">
       <div class="panel-label">SYS.LOG<span class="panel-code">LOG&middot;00</span></div>
       <div id="cosmetic-terminal-lines"></div>
+    </div>
+  </div>
+
+  <div id="security-overlay">
+    <div id="security-header">AWAY / SECURITY REVIEW</div>
+    <div id="security-body">
+      <div id="intruder-photo-wrap">
+        <img id="intruder-photo" src="" alt="">
+        <div id="intruder-meta"></div>
+      </div>
+      <div id="intruder-list"></div>
     </div>
   </div>
 

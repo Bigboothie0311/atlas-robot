@@ -10,10 +10,11 @@ import pc_stats
 
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 
-# Home — hardcoded since the robot lives in one physical place;
-# avoids a geocoding round-trip on every poll.
-HOME_LATITUDE = 0.0
-HOME_LONGITUDE = -0.0
+# The robot lives in one physical place — read from config/robot.env
+# (gitignored) so the real coordinates never land in tracked source.
+import robot_config
+
+HOME_LATITUDE, HOME_LONGITUDE, HOME_CITY = robot_config.home_location()
 
 WEATHER_CACHE_SECONDS = 600
 
@@ -54,6 +55,7 @@ def _fetch_weather():
         "low_f": round(low_f) if low_f is not None else None,
         "precip_chance": precip_chance,
         "condition": WEATHER_CODE_DESCRIPTIONS.get(code, "unknown conditions"),
+        "city": HOME_CITY,
         "stale": False,
     }
 
@@ -256,4 +258,5 @@ def get_hud_stats():
         "network": get_network_stats(),
         "uptime_seconds": get_uptime_seconds(),
         "gaming_pc": pc_stats.get_gaming_pc_stats(),
+        "station_name": robot_config.get("STATION_NAME", "STATION-01"),
     }

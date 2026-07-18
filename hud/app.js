@@ -300,6 +300,74 @@ function applyAlertAndScreen(state) {
   }
 }
 
+// Contextual HUD layouts. Most panels are shared; layout classes let CSS
+// promote the security/diagnostics/alert views over the idle default.
+const LAYOUT_CLASSES = [
+  "layout-idle",
+  "layout-security",
+  "layout-diagnostics",
+  "layout-red_alert",
+];
+
+function applyLayout(state) {
+  const layout = state.hud_layout || "idle";
+  document.body.classList.remove(...LAYOUT_CLASSES);
+  document.body.classList.add(`layout-${layout}`);
+
+  if (layout === "security") {
+    renderSecurity(state);
+  }
+}
+
+let lastSecurityKey = "";
+
+function renderSecurity(state) {
+  const records = state.intruder_records || [];
+  const active = state.active_intruder_photo;
+
+  // The list of all intruder records (left rail).
+  const key = JSON.stringify(records.map((r) => r.id));
+  if (key !== lastSecurityKey) {
+    lastSecurityKey = key;
+    const list = document.getElementById("intruder-list");
+    list.innerHTML = "";
+    for (const record of records) {
+      const entry = document.createElement("div");
+      entry.className = "intruder-entry";
+      const time = new Date(record.timestamp * 1000).toLocaleTimeString();
+      const denied = record.denied_commands || [];
+      entry.innerHTML =
+        `<span class="intruder-time">${time}</span>` +
+        (denied.length
+          ? `<div class="intruder-denied">Tried: ${denied.map(escapeHtml).join("; ")}</div>`
+          : `<div class="intruder-denied">No commands attempted</div>`);
+      list.appendChild(entry);
+    }
+  }
+
+  // The full-screen photo of whichever record is being narrated.
+  const photo = document.getElementById("intruder-photo");
+  const meta = document.getElementById("intruder-meta");
+
+  if (active) {
+    photo.src = `/hud/intruder_photo/${active.id}?t=${Math.floor(active.until)}`;
+    const time = new Date(active.timestamp * 1000).toLocaleString();
+    const denied = active.denied_commands || [];
+    meta.textContent = denied.length
+      ? `${time} — tried: ${denied.join("; ")}`
+      : `${time} — no commands attempted`;
+  } else {
+    photo.removeAttribute("src");
+    meta.textContent = "";
+  }
+}
+
+function escapeHtml(text) {
+  const div = document.createElement("div");
+  div.textContent = text;
+  return div.innerHTML;
+}
+
 function applyAuth(state) {
   const indicator = document.getElementById("auth-indicator");
   const auth = state.auth || {};
@@ -322,6 +390,7 @@ async function pollState() {
     applyTimers(state);
     applyAuth(state);
     applyAlertAndScreen(state);
+    applyLayout(state);
     applyImage(state);
     applyGallery(state);
     applyQaLog(state);
@@ -358,7 +427,12 @@ async function pollStats() {
       `${stats.disk.used_gb} / ${stats.disk.total_gb} GB`;
     document.getElementById("disk-gauge").style.width = `${stats.disk.percent}%`;
 
+    if (stats.station_name) {
+      document.getElementById("station-name").textContent = stats.station_name;
+    }
+
     const weather = stats.weather;
+    document.getElementById("weather-city").textContent = weather.city || "--";
     document.getElementById("weather-temp").textContent =
       weather.temp_f !== null ? `${weather.temp_f}°F` : "--°F";
     document.getElementById("weather-condition").textContent =
@@ -368,7 +442,12 @@ async function pollStats() {
     document.getElementById("weather-precip").textContent =
       `Rain ${weather.precip_chance ?? "--"}%`;
 
-    applyDeviceList(stats.network.devices || [], stats.network.device_count || 0);
+    // LAN roster panel was removed for privacy; only the device COUNT is
+    // shown (on the masthead). The full roster stays server-side for
+    // "what's on my network".
+    const deviceCount = stats.network.device_count || 0;
+    document.getElementById("device-count-mast").textContent =
+      deviceCount > 0 ? `${deviceCount} DEVICES · ` : "";
 
     const hours = Math.floor(stats.uptime_seconds / 3600);
     const minutes = Math.floor((stats.uptime_seconds % 3600) / 60);
@@ -427,51 +506,6 @@ async function pollStats() {
     applyHeadlines(stats.headlines || []);
   } catch (error) {
     console.error("stats poll failed", error);
-  }
-}
-
-const DEVICE_LIST_MAX_ROWS = 12;
-let lastDeviceListKey = "";
-
-function applyDeviceList(devices, deviceCount) {
-  const panel = document.getElementById("devices-panel");
-  const list = document.getElementById("devices-list");
-
-  if (!devices.length) {
-    panel.classList.remove("visible");
-    return;
-  }
-
-  panel.classList.add("visible");
-  document.getElementById("devices-title").textContent =
-    `LAN DEVICES · ${deviceCount} ONLINE`;
-
-  const rows = devices.slice(0, DEVICE_LIST_MAX_ROWS);
-  const key = rows.map((d) => `${d.mac}|${d.ip}|${d.hostname}|${d.vendor}`).join(",");
-
-  if (key === lastDeviceListKey) {
-    return;
-  }
-  lastDeviceListKey = key;
-
-  list.innerHTML = "";
-  for (const device of rows) {
-    const row = document.createElement("div");
-    row.className = "device-row";
-
-    const name = document.createElement("span");
-    name.className = "device-name";
-    name.textContent = (
-      device.hostname || device.vendor || device.mac.toUpperCase()
-    );
-
-    const ip = document.createElement("span");
-    ip.className = "device-ip";
-    ip.textContent = device.ip;
-
-    row.appendChild(name);
-    row.appendChild(ip);
-    list.appendChild(row);
   }
 }
 

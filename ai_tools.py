@@ -28,11 +28,13 @@ WEATHER_CODE_DESCRIPTIONS = {
     99: "thunderstorms with heavy hail",
 }
 
-# Matches hud_stats.py's HOME_LATITUDE/LONGITUDE — the robot's own
-# physical location, used as the default so the model never has to ask the
-# user where they are just to answer "what's the weather".
-HOME_LATITUDE = 0.0
-HOME_LONGITUDE = -0.0
+# The robot's own physical location, used as the default so the model
+# never has to ask where the user is just to answer "what's the weather".
+# Read from config/robot.env (gitignored) so real coordinates stay out of
+# tracked source — see robot_config.py.
+import robot_config
+
+HOME_LATITUDE, HOME_LONGITUDE, _HOME_CITY = robot_config.home_location()
 HOME_LOCATION_NAME = "home"
 
 TOOLS = [
