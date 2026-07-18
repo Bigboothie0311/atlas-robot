@@ -18,6 +18,7 @@ from vosk import Model, KaldiRecognizer
 import ai_tools
 import briefing
 import camera_gate
+import capabilities
 import diagnostics
 import hud_stats
 import logbook
@@ -1849,6 +1850,23 @@ def run_internet_check_command():
     return f"Internet looks {quality}: " + ", ".join(parts) + "."
 
 
+CAPABILITIES_PHRASES = {
+    "what can you control",
+    "what can you do",
+    "what are you able to do",
+    "what can you help me with",
+    "what commands do you have",
+    "what are your commands",
+    "list your commands",
+    "what can i ask you",
+    "what can i ask you to do",
+}
+
+
+def run_capabilities_command():
+    return capabilities.describe_all()
+
+
 DIAGNOSTICS_PHRASES = {
     "run diagnostics",
     "run a diagnostic",
@@ -2280,6 +2298,15 @@ def build_instructions_and_limits():
         "it as a direct question ending in '?' — never as a statement "
         "like 'if you want, I can...' or 'let me know if...', since "
         "those won't be heard."
+    )
+
+    # Ground the model in what A.T.L.A.S. can ACTUALLY do, so it never
+    # claims an unimplemented ability. This is the authoritative registry.
+    instructions += (
+        "\n\nThese are the ONLY device actions you can actually perform. "
+        "If asked to do something not in this list, say plainly that you "
+        "can't do it yet — never imply you can:\n"
+        + capabilities.instruction_summary()
     )
 
     weather = hud_stats.get_weather_stats()
@@ -3083,6 +3110,12 @@ def _handle_turn_body(model):
 
         if is_network_devices_command(normalized_phrase):
             answer = run_network_devices_command()
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        if normalized_phrase in CAPABILITIES_PHRASES:
+            answer = run_capabilities_command()
             log_qa(text, answer)
             speak(answer)
             return
