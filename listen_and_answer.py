@@ -1850,6 +1850,54 @@ def run_internet_check_command():
     return f"Internet looks {quality}: " + ", ".join(parts) + "."
 
 
+SKY_WATCH_PHRASES = {
+    "sky watch", "what's up in the sky", "whats up in the sky",
+    "what's in the sky", "whats in the sky", "sky report",
+    "anything in the sky", "what's happening in the sky",
+}
+STARGAZING_PHRASES = {
+    "is it good for stargazing", "how's stargazing tonight",
+    "hows stargazing tonight", "can i see stars tonight", "stargazing",
+}
+METEOR_PHRASES = {
+    "any meteor showers", "when's the next meteor shower",
+    "whens the next meteor shower", "next meteor shower",
+}
+LAUNCH_PHRASES = {
+    "when's the next rocket launch", "whens the next rocket launch",
+    "next rocket launch", "any rocket launches", "upcoming launches",
+}
+MOON_PHRASES = {
+    "what's the moon phase", "whats the moon phase", "what phase is the moon",
+    "moon phase", "what's the moon doing", "whats the moon doing",
+}
+
+
+def run_sky_watch_command(kind):
+    import sky_watch
+    if kind == "summary":
+        return sky_watch.spoken_summary()
+    if kind == "stargazing":
+        s = sky_watch.stargazing_tonight()
+        if s["verdict"] == "unknown":
+            return "I couldn't get tonight's cloud cover."
+        return (f"Stargazing tonight looks {s['verdict']} — {s['cloud_cover']} percent "
+                f"cloud cover, and the moon is {s['moon']['illumination_percent']} percent lit.")
+    if kind == "meteor":
+        m = sky_watch.next_meteor_shower()
+        return (f"The {m['name']} meteor shower peaks on {m['date']}, "
+                f"in {m['days_away']} days." if m else "I couldn't find a meteor shower.")
+    if kind == "launch":
+        launches = sky_watch.upcoming_launches(2)
+        if not launches:
+            return "I couldn't reach the launch schedule."
+        return "Upcoming launches: " + "; ".join(l["name"] for l in launches) + "."
+    if kind == "moon":
+        mp = sky_watch.moon_phase()
+        return f"The moon is a {mp['phase']}, {mp['illumination_percent']} percent illuminated."
+    return "I couldn't read the sky."
+
+
 TOOL_STATUS_PHRASES = {
     "check your tools", "check for tool updates", "what tools can you upgrade",
     "check your versions", "what version are your tools", "check for updates",
@@ -3376,6 +3424,20 @@ def _handle_turn_body(model):
         if normalized_phrase in CONNECTION_PHRASES:
             set_face("thinking")
             answer = run_connection_health_command()
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        _sky_kind = (
+            "summary" if normalized_phrase in SKY_WATCH_PHRASES else
+            "stargazing" if normalized_phrase in STARGAZING_PHRASES else
+            "meteor" if normalized_phrase in METEOR_PHRASES else
+            "launch" if normalized_phrase in LAUNCH_PHRASES else
+            "moon" if normalized_phrase in MOON_PHRASES else None
+        )
+        if _sky_kind is not None:
+            set_face("thinking")
+            answer = run_sky_watch_command(_sky_kind)
             log_qa(text, answer)
             speak(answer)
             return

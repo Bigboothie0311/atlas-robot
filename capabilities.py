@@ -42,6 +42,8 @@ REGISTRY = [
      "aliases": ["morning briefing", "brief me"], "confirm": False, "requires": "none", "category": "information"},
     {"id": "news", "name": "news", "description": "reads the top news headlines",
      "aliases": ["what's in the news"], "confirm": False, "requires": "none", "category": "information"},
+    {"id": "sky_watch", "name": "sky watch", "description": "reports meteor showers, launches, moon phase, and stargazing conditions",
+     "aliases": ["sky watch", "what's up in the sky", "next meteor shower"], "confirm": False, "requires": "none", "category": "information"},
     {"id": "weather", "name": "weather", "description": "answers weather questions for home or another city",
      "aliases": ["what's the weather", "will it rain tomorrow"], "confirm": False, "requires": "none", "category": "information"},
 
