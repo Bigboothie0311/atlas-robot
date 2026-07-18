@@ -1690,6 +1690,28 @@ DIAGNOSTICS_PHRASES = {
 }
 
 # "Get the whole system healthy" — full diagnose + safe repair sweep (P1-D).
+CHIEF_OF_STAFF_PHRASES = {
+    "what am i forgetting this week",
+    "what am i forgetting",
+    "what's on my plate",
+    "whats on my plate",
+    "what's on my plate this week",
+    "whats on my plate this week",
+    "what do i have coming up",
+    "what's coming up this week",
+    "whats coming up this week",
+    "chief of staff",
+    "what are my deadlines",
+    "what's due this week",
+    "whats due this week",
+}
+
+
+def run_chief_of_staff_command():
+    import chief_of_staff
+    return chief_of_staff.weekly_rundown()
+
+
 SYSTEM_HEALTH_PHRASES = {
     "get the whole system healthy",
     "get the system healthy",
@@ -2800,6 +2822,13 @@ def _handle_turn_body(model):
 
         if normalized_phrase in LOG_QUERY_PHRASES:
             answer = run_log_query_command()
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        if normalized_phrase in CHIEF_OF_STAFF_PHRASES:
+            set_face("thinking")
+            answer = run_chief_of_staff_command()
             log_qa(text, answer)
             speak(answer)
             return
