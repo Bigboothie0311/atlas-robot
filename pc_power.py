@@ -6,6 +6,7 @@ is learned automatically from the kernel's neighbor (ARP) table whenever
 the PC is reachable and cached to disk, so "power on my PC" still works
 later when the machine is off and absent from the ARP table.
 """
+import ipaddress
 import json
 import re
 import socket
@@ -44,23 +45,63 @@ def _load_configured_mac():
     return None
 
 
-def _broadcast_addresses():
-    """The subnet-directed broadcast (e.g. 192.168.0.255) plus the global
-    one. Directed broadcast is more reliable on networks where the OS or
-    switch filters 255.255.255.255."""
-    addresses = ["255.255.255.255"]
+def _directed_broadcast_for_pc():
+    """Finds the broadcast address on the interface that routes to the PC."""
+    target_ip = pc_stats.load_gaming_pc_ip()
+
+    if not target_ip:
+        return None
 
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            sock.connect(("8.8.8.8", 80))
-            own_ip = sock.getsockname()[0]
+        target = ipaddress.ip_address(target_ip)
+        route_output = subprocess.run(
+            ["ip", "-4", "route", "get", target_ip],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout
+        route_parts = route_output.split()
 
-        octets = own_ip.split(".")
-        addresses.insert(0, ".".join(octets[:3] + ["255"]))
-    except OSError:
-        pass
+        if "dev" not in route_parts:
+            return None
 
-    return addresses
+        interface = route_parts[route_parts.index("dev") + 1]
+        address_output = subprocess.run(
+            ["ip", "-4", "-o", "addr", "show", "dev", interface],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout
+    except (ValueError, subprocess.SubprocessError, OSError, IndexError):
+        return None
+
+    for line in address_output.splitlines():
+        parts = line.split()
+
+        if "inet" not in parts:
+            continue
+
+        try:
+            network = ipaddress.ip_interface(
+                parts[parts.index("inet") + 1]
+            ).network
+        except (ValueError, IndexError):
+            continue
+
+        if target in network:
+            return str(network.broadcast_address)
+
+    return None
+
+
+def _broadcast_addresses():
+    """Uses the PC's routed network first, then global broadcast."""
+    directed_broadcast = _directed_broadcast_for_pc()
+    return (
+        [directed_broadcast, "255.255.255.255"]
+        if directed_broadcast
+        else ["255.255.255.255"]
+    )
 
 
 def _lookup_mac_from_neighbors(ip):
@@ -131,6 +172,20 @@ def get_pc_mac():
     return _load_configured_mac() or refresh_mac_cache() or _load_cached_mac()
 
 
+def _pc_is_online():
+    """Checks either the hardware monitor or authenticated PC companion."""
+    if pc_stats.get_gaming_pc_stats().get("online"):
+        return True
+
+    try:
+        import pc_control
+        return pc_control.pc_reachable()
+    except Exception as error:
+        print("PC reachability check failed:", error, flush=True)
+        return False
+
+
+
 def send_wake_packet():
     """Sends WoL magic packets to the gaming PC — both standard ports,
     directed + global broadcast, several repeats, since a single UDP
@@ -146,7 +201,7 @@ def send_wake_packet():
             "You can also set WOL_MAC in my config to skip the wait."
         )
 
-    if pc_stats.get_gaming_pc_stats().get("online"):
+    if _pc_is_online():
         return "Your PC already looks like it's on."
 
     payload = bytes.fromhex("ff" * 6 + mac.replace(":", "") * 16)
@@ -266,7 +321,7 @@ def verify_wake(speak, log):
     while time.monotonic() < deadline:
         time.sleep(WAKE_VERIFY_POLL_SECONDS)
 
-        if pc_stats.get_gaming_pc_stats().get("online"):
+        if _pc_is_online():
             message = "Your PC is up."
             log(message)
             speak(message)
