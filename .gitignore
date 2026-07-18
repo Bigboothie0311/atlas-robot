@@ -29,3 +29,6 @@ docs/superpowers/
 
 # Claude Code local settings — not part of the project
 .claude/
+
+# Whisper.cpp third-party checkout + models — 200MB+, build locally, never commit
+tools/

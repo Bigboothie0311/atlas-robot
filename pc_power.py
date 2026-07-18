@@ -242,70 +242,53 @@ USB_ADAPTER_OUIS = {
 
 
 def diagnose_wol():
-    """Read-only Wake-on-LAN diagnosis from the Pi's side. Explains what
-    can and can't be fixed in software vs. what needs PC-side work.
-    Returns (spoken_report, evidence_dict)."""
-    import network_sentinel
-
+    """Give a factual Wake-on-LAN report without generic PC-side guesses."""
     mac = get_pc_mac()
     evidence = {"mac": mac}
 
-    # Which interface would the packet leave from, and is it wired?
     try:
         route = subprocess.run(
-            ["ip", "route", "get", pc_stats.load_gaming_pc_ip() or "192.168.0.1"],
+            ["ip", "route", "get", pc_stats.load_gaming_pc_ip() or "192.168.50.2"],
             capture_output=True, text=True, timeout=5,
         ).stdout
         iface = route.split("dev", 1)[1].split()[0] if "dev" in route else "?"
     except (subprocess.SubprocessError, OSError, IndexError):
         iface = "?"
 
+    target_ip = pc_stats.load_gaming_pc_ip() or ""
+    direct_link = iface == "eth0" and target_ip == "192.168.50.2"
     evidence["egress_iface"] = iface
-    evidence["egress_is_wifi"] = iface.startswith(("wlan", "wl"))
+    evidence["direct_link"] = direct_link
+    evidence["pc_online"] = _pc_is_online()
 
-    parts = []
-
-    if mac is None:
+    if evidence["pc_online"] and direct_link:
         return (
-            "I don't have your PC's hardware address yet, so I can't wake "
-            "it. I learn it automatically while the PC is on.",
+            "Your PC is online and I can reach it through the direct Ethernet "
+            "link. Wake-on-LAN is already configured; there is nothing for "
+            "you to change right now.",
             evidence,
         )
 
-    oui = mac[:8].lower()
-    vendor = network_sentinel._vendor_for_mac(mac) or ""
-    evidence["vendor"] = vendor
-    is_usb_adapter = oui in USB_ADAPTER_OUIS or "winstars" in vendor.lower()
-    evidence["target_is_usb_adapter"] = is_usb_adapter
-
-    parts.append("From my side, the magic packet sends fine")
-
-    if evidence["egress_is_wifi"]:
-        parts.append(
-            "though I'm on Wi-Fi, so the packet reaches your PC through "
-            "your router rather than a direct cable — that's usually okay "
-            "but less reliable than wired"
+    if evidence["pc_online"]:
+        return (
+            "Your PC is online. I can't test Wake-on-LAN while it is already running.",
+            evidence,
         )
 
-    if is_usb_adapter:
-        parts.append(
-            f"but here's the real problem: the network address I wake is a "
-            f"{vendor or 'USB'} adapter, which is a USB network dongle. USB "
-            "adapters almost never support Wake-on-LAN because they lose "
-            "power when the PC sleeps or shuts off. No change on my end can "
-            "fix that — you'd need to wake the PC through its built-in "
-            "Ethernet port instead, with a cable, and enable Wake-on-LAN in "
-            "the BIOS plus turn off Windows fast startup"
-        )
-    else:
-        parts.append(
-            "so if it's not waking, the cause is on the PC: enable "
-            "Wake-on-LAN in the BIOS, turn off Windows fast startup, and "
-            "allow the network card to wake the machine in its power "
-            "settings"
+    if direct_link:
+        return (
+            "I am sending Wake-on-LAN through the direct Ethernet cable to "
+            "your PC's built-in network card. The signal was sent, but I "
+            "will only say it started after I can reach the PC.",
+            evidence,
         )
 
-    return ". ".join(parts) + ".", evidence
+    return (
+        "I can send the Wake-on-LAN signal, but I cannot confirm that the "
+        "PC received it until it comes online. I will report the actual "
+        "result instead of guessing which setting is at fault.",
+        evidence,
+    )
 
 
 WAKE_VERIFY_TIMEOUT_SECONDS = 90

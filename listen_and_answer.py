@@ -22,7 +22,9 @@ import diagnostics
 import hud_stats
 import logbook
 import pc_control
+import pc_power
 import memory_store
+import speech_repair
 import web_search
 import wake_detection
 
@@ -31,6 +33,9 @@ HUB = "http://127.0.0.1:5051"
 ATLAS_HUB = "http://127.0.0.1:5050"
 MODEL_PATH = "/home/atlas/atlas-robot/models/vosk-model-small-en-us-0.15"
 AUDIO_PATH = "/tmp/atlas-listen.wav"
+WHISPER_CLI = "/home/atlas/atlas-robot/tools/whisper.cpp/build/bin/whisper-cli"
+WHISPER_MODEL = "/home/atlas/atlas-robot/tools/whisper.cpp/models/ggml-base.en.bin"
+WHISPER_OUTPUT = "/tmp/atlas-whisper.txt"
 VISION_SCRIPT = "/home/atlas/atlas-robot/vision_test.py"
 ENV_PATH = Path("/home/atlas/atlas-robot/config/openai.env")
 ROBOT_ENV_PATH = Path("/home/atlas/atlas-robot/config/robot.env")
@@ -359,11 +364,65 @@ def record_audio():
 # Set by record_audio each turn so the logbook can capture the mic level
 # even though record_audio's real job is writing the WAV.
 _last_audio_rms = None
+_last_transcription_alternatives = []
+
+
+def _transcribe_with_whisper():
+    """Higher-quality local command transcription. Vosk remains the fallback."""
+    executable = Path(WHISPER_CLI)
+    model = Path(WHISPER_MODEL)
+    output = Path(WHISPER_OUTPUT)
+
+    if not executable.exists() or not model.exists():
+        return ""
+
+    output.unlink(missing_ok=True)
+
+    try:
+        result = subprocess.run(
+            [
+                str(executable),
+                "-m", str(model),
+                "-f", AUDIO_PATH,
+                "-l", "en",
+                "-t", "4",
+                "-nt",
+                "-otxt",
+                "-of", str(output.with_suffix("")),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        print("Whisper transcription failed:", error, flush=True)
+        return ""
+
+    if result.returncode != 0:
+        print("Whisper transcription returned an error:", result.stderr[-500:], flush=True)
+        return ""
+
+    try:
+        return output.read_text().strip()
+    except OSError:
+        return ""
 
 
 def transcribe_audio(model):
+    global _last_transcription_alternatives
+
+    whisper_text = _transcribe_with_whisper()
+
+    if whisper_text:
+        _last_transcription_alternatives = [whisper_text]
+        print("Whisper heard:", whisper_text, flush=True)
+        return whisper_text
+
+    print("Whisper unavailable; falling back to Vosk.", flush=True)
+
     with wave.open(AUDIO_PATH, "rb") as audio:
         recognizer = KaldiRecognizer(model, audio.getframerate())
+        recognizer.SetMaxAlternatives(5)
 
         while True:
             data = audio.readframes(4000)
@@ -374,7 +433,19 @@ def transcribe_audio(model):
             recognizer.AcceptWaveform(data)
 
     result = json.loads(recognizer.FinalResult())
-    return result.get("text", "").strip()
+    alternatives = []
+
+    for alternative in result.get("alternatives", []):
+        candidate = str(alternative.get("text", "")).strip()
+        if candidate and candidate not in alternatives:
+            alternatives.append(candidate)
+
+    primary = str(result.get("text", "")).strip()
+    if primary and primary not in alternatives:
+        alternatives.insert(0, primary)
+
+    _last_transcription_alternatives = alternatives
+    return alternatives[0] if alternatives else ""
 
 
 
@@ -1354,6 +1425,46 @@ INTRUDER_QUERY_PHRASES = {
     "were there any intruders",
     "any intruders while i was gone",
 }
+
+_INTRUDER_QUERY_VERBS = {
+    "any", "were", "was", "did", "do", "show", "check", "see", "have",
+    "pull", "what", "who", "my", "review", "read", "give", "tell",
+}
+
+
+def is_intruder_query(normalized):
+    """Word-based match for intruder/security-alert questions — the exact
+    phrase set kept missing natural wordings ('intruder alerts', 'show me
+    my alerts', 'did anyone break in'), so those leaked to the paid model
+    which answered 'I don't have access to that.' Any short utterance
+    mentioning intruders/unauthorized users, or 'alert(s)' with a query
+    verb, routes to the local review command."""
+    if normalized in INTRUDER_QUERY_PHRASES:
+        return True
+
+    words = set(normalized.split())
+
+    if len(normalized.split()) > 10:
+        return False
+
+    if words & {"intruder", "intruders", "unauthorized"}:
+        return True
+
+    # "alert(s)" is only intruder-ish in a short command ("any alerts",
+    # "show my alerts") or alongside a security-context word — never in a
+    # long general question like "what causes a security alert in X".
+    security_context = words & {
+        "intruder", "unauthorized", "gone", "away",
+        "someone", "anyone", "stranger",
+    }
+    if words & {"alert", "alerts"} and words & _INTRUDER_QUERY_VERBS:
+        if len(normalized.split()) <= 5 or security_context:
+            return True
+
+    if "break in" in normalized or "broke in" in normalized:
+        return True
+
+    return False
 
 
 def run_enroll_face_command():
@@ -2592,7 +2703,7 @@ def _classify_intent(text):
         return "system_health"
     if is_network_devices_command(normalized) or normalized in SECURE_NETWORK_PHRASES:
         return "network"
-    if is_enroll_face_command(normalized) or normalized in INTRUDER_QUERY_PHRASES:
+    if is_enroll_face_command(normalized) or is_intruder_query(normalized):
         return "security"
     if normalized in NEWS_PHRASES or normalized in BRIEFING_PHRASES:
         return "briefing"
@@ -2610,17 +2721,53 @@ def _classify_intent(text):
 _current_turn = None
 
 
-def _log_transcript(text):
+def _log_transcript(text, raw_text=None, corrections=None):
     """Records transcript, mic level, and classified intent on the current
     turn — called right after each transcription."""
     if _current_turn is None:
         return
 
-    _current_turn.set(
-        transcript=text,
-        audio_rms=_last_audio_rms,
-        intent=_classify_intent(text) if text else "no_speech",
+    fields = {
+        "transcript": text,
+        "audio_rms": _last_audio_rms,
+        "intent": _classify_intent(text) if text else "no_speech",
+        "transcription_alternatives": _last_transcription_alternatives,
+    }
+    if raw_text is not None:
+        fields["raw_transcript"] = raw_text
+    if corrections:
+        fields["speech_corrections"] = corrections
+    _current_turn.set(**fields)
+
+
+SPEECH_DIAGNOSTIC_PHRASES = {
+    "what did you hear", "what did atlas hear", "what did you think i said",
+    "show me what you heard", "why did you misunderstand me",
+}
+SPEECH_TEACH_PATTERN = re.compile(
+    r"^(?:teach|learn) (?:atlas )?(?:that )?(?:when i say )?(.+?) "
+    r"(?:means|should mean) (open spotify|open claude|open fusion(?: 360)?)$"
+)
+APPROVED_SPEECH_ALIAS_TARGETS = {
+    "open spotify", "open claude", "open fusion", "open fusion 360",
+}
+
+def _repair_turn_transcript(raw_text):
+    repaired, corrections = speech_repair.repair(raw_text)
+    speech_repair.record(
+        raw_text, repaired, corrections, _last_transcription_alternatives
     )
+    if corrections:
+        print("Speech repair:", corrections, flush=True)
+    return repaired, corrections
+
+def _speech_teach_request(normalized):
+    match = SPEECH_TEACH_PATTERN.match(normalized)
+    if not match:
+        return None
+    alias, target = match.groups()
+    target = _normalize_phrase(target)
+    return (alias, target) if target in APPROVED_SPEECH_ALIAS_TARGETS else None
 
 
 def handle_turn(model):
@@ -2682,8 +2829,9 @@ def _handle_turn_body(model):
             set_face("listening")
             record_audio()
             set_face("thinking")
-            text = transcribe_audio(model)
-            _log_transcript(text)
+            raw_text = transcribe_audio(model)
+            text, corrections = _repair_turn_transcript(raw_text)
+            _log_transcript(text, raw_text=raw_text, corrections=corrections)
 
             if not text:
                 speak("I didn't catch that.")
@@ -2702,8 +2850,9 @@ def _handle_turn_body(model):
         record_audio()
 
         set_face("thinking")
-        text = transcribe_audio(model)
-        _log_transcript(text)
+        raw_text = transcribe_audio(model)
+        text, corrections = _repair_turn_transcript(raw_text)
+        _log_transcript(text, raw_text=raw_text, corrections=corrections)
 
         print(f"{load_owner_name()}:", text)
 
@@ -2758,6 +2907,21 @@ def _handle_turn_body(model):
             return
 
         normalized_phrase = _normalize_phrase(text)
+
+        if normalized_phrase in SPEECH_DIAGNOSTIC_PHRASES:
+            answer = speech_repair.previous_report()
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        teach_request = _speech_teach_request(normalized_phrase)
+        if teach_request is not None:
+            alias, target = teach_request
+            speech_repair.teach(alias, target)
+            answer = f"Okay. I'll treat {alias} as {target}."
+            log_qa(text, answer)
+            speak(answer)
+            return
 
         pc_search = parse_pc_search_command(text)
 
@@ -2911,7 +3075,7 @@ def _handle_turn_body(model):
             speak(answer)
             return
 
-        if normalized_phrase in INTRUDER_QUERY_PHRASES:
+        if is_intruder_query(normalized_phrase):
             answer = run_intruder_query_command()
             log_qa(text, answer)
             speak(answer)
