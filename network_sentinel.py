@@ -234,6 +234,16 @@ def _read_neighbors():
             continue
 
         ip = parts[0]
+
+        # `ip neigh` lists IPv6 neighbors too (fe80::...) — keep IPv4
+        # only, both for the device roster and because mixing address
+        # families breaks the ip_address sort in the scan loop.
+        try:
+            if ipaddress.ip_address(ip).version != 4:
+                continue
+        except ValueError:
+            continue
+
         mac = parts[parts.index("lladdr") + 1].lower()
 
         if MAC_PATTERN.match(mac):

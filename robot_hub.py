@@ -144,13 +144,15 @@ PIPER_DATA_DIR = "/home/atlas/atlas-robot/voices"
 PIPER_VOLUME = 0.75
 PIPER_MODEL_PATH = f"{PIPER_DATA_DIR}/{PIPER_MODEL}.onnx"
 
-# HDMI1 (vc4hdmi1, card 3) — routes speech through the connected screen's
-# speakers instead of the GPIO/I2S MAX98357A amp (card 0). Switched from
-# card 2 (vc4hdmi0) on 2026-07-16 after the HDMI cable moved to the other
-# port (confirmed via /sys/class/drm/card1-HDMI-A-*/status — A-1 read
-# "disconnected", A-2 read "connected"). Check `aplay -l` if the card
-# number ever shifts again (e.g. after a reboot or hardware change).
-AUDIO_DEVICE = "plughw:3,0"
+# HDMI1 (vc4hdmi1) — routes speech through the connected screen's
+# speakers instead of the GPIO/I2S MAX98357A amp. Addressed BY NAME, not
+# card number: plugging in the USB camera (which carries its own audio
+# interface) shifted every card number down one, silently pointing the
+# old "plughw:3,0" at the disconnected HDMI port — every /speak then
+# died with "audio open error: Unknown error 524" while wake detection
+# kept working, which presented as "Atlas hears but never answers."
+# ALSA card NAMES are stable across enumeration order; numbers are not.
+AUDIO_DEVICE = "plughw:CARD=vc4hdmi1,DEV=0"
 
 piper_lock = threading.Lock()
 playback_lock = threading.Lock()
