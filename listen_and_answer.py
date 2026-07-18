@@ -1124,6 +1124,27 @@ ENROLL_FACE_PHRASES = {
     "register my face",
 }
 
+_ENROLL_VERB_WORDS = {
+    "learn", "learned", "scan", "remember", "enroll", "register",
+}
+
+
+def is_enroll_face_command(normalized):
+    """Word-based enrollment match — Vosk garbles short commands ('learn
+    my face' came through as 'learn in my face' in live testing, missed
+    the exact set, and fell through to a paid model call). A short
+    utterance containing 'face' plus an enrollment verb is unambiguous
+    enough."""
+    if normalized in ENROLL_FACE_PHRASES:
+        return True
+
+    words = set(normalized.split())
+    return (
+        "face" in words
+        and bool(words & _ENROLL_VERB_WORDS)
+        and len(normalized.split()) <= 5
+    )
+
 GATE_ON_PHRASES = {
     "camera gate on",
     "turn on the camera gate",
@@ -2325,7 +2346,7 @@ def handle_turn(model):
             speak(answer)
             return
 
-        if normalized_phrase in ENROLL_FACE_PHRASES:
+        if is_enroll_face_command(normalized_phrase):
             answer = run_enroll_face_command()
             log_qa(text, answer)
             speak(answer)
