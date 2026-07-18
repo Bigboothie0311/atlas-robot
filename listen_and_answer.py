@@ -20,6 +20,7 @@ import briefing
 import camera_gate
 import diagnostics
 import hud_stats
+import logbook
 import memory_store
 import web_search
 import wake_detection
@@ -304,6 +305,7 @@ def record_audio():
     speech_started = False
     silence_since_speech = 0.0
     start = time.monotonic()
+    peak_rms = 0
 
     try:
         while time.monotonic() - start < RECORD_MAX_SECONDS:
@@ -320,6 +322,7 @@ def record_audio():
                 math.sqrt(sum(sample * sample for sample in samples) / len(samples))
                 if samples else 0
             )
+            peak_rms = max(peak_rms, rms)
             chunk_seconds = len(chunk) / 2 / 16000
 
             if rms >= RECORD_MIN_SPEECH_RMS:
@@ -347,6 +350,14 @@ def record_audio():
         wav_file.setsampwidth(2)
         wav_file.setframerate(16000)
         wav_file.writeframes(b"".join(chunks))
+
+    global _last_audio_rms
+    _last_audio_rms = round(peak_rms)
+
+
+# Set by record_audio each turn so the logbook can capture the mic level
+# even though record_audio's real job is writing the WAV.
+_last_audio_rms = None
 
 
 def transcribe_audio(model):
@@ -1571,6 +1582,95 @@ DIAGNOSTICS_PHRASES = {
     "diagnostics",
 }
 
+# "Get the whole system healthy" — full diagnose + safe repair sweep (P1-D).
+SYSTEM_HEALTH_PHRASES = {
+    "get the whole system healthy",
+    "get the system healthy",
+    "make the system healthy",
+    "get everything healthy",
+    "fix the whole system",
+    "run a full system check and fix",
+    "heal the system",
+    "get yourself healthy",
+}
+
+# "Secure my network" — network defense audit (P1-F).
+SECURE_NETWORK_PHRASES = {
+    "secure my network",
+    "secure the network",
+    "check my network security",
+    "audit my network",
+    "is my network secure",
+    "run a network security check",
+}
+
+# Diagnostic-history questions answered from the persistent logbook.
+LOG_QUERY_PHRASES = {
+    "why didn't you hear me",
+    "why couldn't you hear me",
+    "what went wrong",
+    "what went wrong earlier",
+    "how have you been running",
+    "check your logs",
+    "what do your logs say",
+    "any recent errors",
+    "have you had any errors",
+}
+
+
+def run_system_health_command():
+    """Full Pi-side health sweep: diagnose, safe-repair, verify, back up,
+    report. Sets the diagnostics HUD layout while it runs."""
+    import system_health
+
+    try:
+        requests.post(f"{HUB}/layout", json={"layout": "diagnostics"}, timeout=5)
+    except requests.RequestException:
+        pass
+
+    result = system_health.run_full_sweep()
+
+    try:
+        requests.post(f"{HUB}/layout", json={"layout": "idle"}, timeout=5)
+    except requests.RequestException:
+        pass
+
+    return system_health.spoken_summary(result)
+
+
+def run_secure_network_command():
+    """Read-only network defense audit — unknown devices, exposed
+    services, failed SSH attempts. Never blocks anything."""
+    import net_defense
+
+    return net_defense.spoken_report(net_defense.audit())
+
+
+def run_log_query_command():
+    """Answers diagnostic-history questions from the persistent logbook —
+    recent turn count, error rate, latency, wake confidence. Zero tokens."""
+    summary = logbook.diagnostic_summary()
+
+    if summary["count"] == 0:
+        return "I don't have any interaction history logged yet."
+
+    parts = [f"Over my last {summary['count']} interactions"]
+
+    if summary["errors"] == 0:
+        parts.append("I had no errors")
+    else:
+        parts.append(f"I hit {summary['errors']} errors")
+        if summary["last_error"]:
+            parts.append(f"the most recent was {summary['last_error']}")
+
+    if summary["avg_latency_ms"]:
+        parts.append(f"averaging {summary['avg_latency_ms'] / 1000:.1f} seconds per turn")
+
+    if summary["avg_wake_confidence"] is not None:
+        parts.append(f"wake confidence averaged {summary['avg_wake_confidence']}")
+
+    return ". ".join([parts[0] + ", " + parts[1]] + parts[2:]) + "."
+
 BRIEFING_PHRASES = {
     "morning briefing",
     "daily briefing",
@@ -2172,7 +2272,82 @@ def _answer_and_speak(text, model):
     return answer, interrupted
 
 
+def _classify_intent(text):
+    """Coarse deterministic intent label for the log — mirrors the
+    dispatch priority in _handle_turn_body. Zero tokens."""
+    normalized = _normalize_phrase(text)
+
+    if is_vision_command(text):
+        return "vision"
+    if parse_gallery_search_query(text) or parse_image_search_query(text):
+        return "image_search"
+    if parse_timer_set_command(text) or normalized in TIMER_CANCEL_PHRASES \
+            or normalized in TIMER_CHECK_PHRASES:
+        return "timer"
+    if parse_focus_start_command(text) is not None or normalized in FOCUS_END_PHRASES:
+        return "focus"
+    if normalized in WAKE_PC_PHRASES:
+        return "wake_pc"
+    if normalized in DIAGNOSTICS_PHRASES:
+        return "diagnostics"
+    if normalized in SYSTEM_HEALTH_PHRASES:
+        return "system_health"
+    if is_network_devices_command(normalized) or normalized in SECURE_NETWORK_PHRASES:
+        return "network"
+    if is_enroll_face_command(normalized) or normalized in INTRUDER_QUERY_PHRASES:
+        return "security"
+    if normalized in NEWS_PHRASES or normalized in BRIEFING_PHRASES:
+        return "briefing"
+    if memory_store.parse_note_command(text) or memory_store.is_read_notes_command(text):
+        return "notes"
+    if parse_reminder_command(text):
+        return "reminder"
+    if memory_store.parse_remember_command(text):
+        return "memory"
+    if parse_instant_answer(text) is not None:
+        return "instant"
+    return "ai_question"
+
+
+_current_turn = None
+
+
+def _log_transcript(text):
+    """Records transcript, mic level, and classified intent on the current
+    turn — called right after each transcription."""
+    if _current_turn is None:
+        return
+
+    _current_turn.set(
+        transcript=text,
+        audio_rms=_last_audio_rms,
+        intent=_classify_intent(text) if text else "no_speech",
+    )
+
+
 def handle_turn(model):
+    """Logging wrapper: every turn is recorded to the persistent logbook
+    (wake confidence, mic, RMS, transcript, intent, latency, errors,
+    outcome) regardless of which branch handled it or whether it raised."""
+    global _current_turn
+    _current_turn = logbook.start_turn()
+    _current_turn.set(microphone=MIC_DEVICE, output_device="piper/hdmi1")
+    outcome = "ok"
+
+    try:
+        _handle_turn_body(model)
+    except Exception as error:
+        _current_turn.add_error(f"{type(error).__name__}: {error}")
+        outcome = "error"
+        raise
+    finally:
+        if _current_turn.data.get("intent") is None:
+            _current_turn.set(intent="no_speech")
+        _current_turn.finish(outcome)
+        _current_turn = None
+
+
+def _handle_turn_body(model):
     try:
         # A wake-up always brings the screen back from "go dark" —
         # idempotent and cheap when it wasn't dark.
@@ -2210,6 +2385,7 @@ def handle_turn(model):
             record_audio()
             set_face("thinking")
             text = transcribe_audio(model)
+            _log_transcript(text)
 
             if not text:
                 speak("I didn't catch that.")
@@ -2229,6 +2405,7 @@ def handle_turn(model):
 
         set_face("thinking")
         text = transcribe_audio(model)
+        _log_transcript(text)
 
         print(f"{load_owner_name()}:", text)
 
@@ -2429,6 +2606,27 @@ def handle_turn(model):
         if normalized_phrase in DIAGNOSTICS_PHRASES:
             set_face("thinking")
             answer = diagnostics.build_diagnostics_report()
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        if normalized_phrase in LOG_QUERY_PHRASES:
+            answer = run_log_query_command()
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        if normalized_phrase in SYSTEM_HEALTH_PHRASES:
+            set_face("thinking")
+            speak("Running a full system health sweep. One moment.")
+            answer = run_system_health_command()
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        if normalized_phrase in SECURE_NETWORK_PHRASES:
+            set_face("thinking")
+            answer = run_secure_network_command()
             log_qa(text, answer)
             speak(answer)
             return

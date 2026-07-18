@@ -756,6 +756,23 @@ def stand_down():
     return jsonify({"ok": True, "was_active": alerts.stand_down()})
 
 
+VALID_LAYOUTS = {"idle", "security", "diagnostics", "red_alert"}
+
+
+@app.post("/layout")
+def set_layout():
+    data = request.get_json(silent=True) or {}
+    layout = str(data.get("layout", "idle")).strip()
+
+    if layout not in VALID_LAYOUTS:
+        return jsonify({"ok": False, "error": "unknown layout"}), 400
+
+    with state_lock:
+        robot_state["hud_layout"] = layout
+
+    return jsonify({"ok": True, "layout": layout})
+
+
 @app.get("/phone")
 def phone():
     return jsonify({"ok": True, **network_sentinel.phone_presence()})

@@ -7,6 +7,7 @@ import requests
 from vosk import Model
 
 import listen_and_answer
+import logbook
 from wake_detection import (
     WAKE_PHRASE,
     MIN_WORD_CONFIDENCE,
@@ -231,6 +232,13 @@ def listen_for_wake_word(model):
                 print(
                     "Verified wake phrase detected.",
                     flush=True
+                )
+                # Hand the accepted wake's confidence/level to the logbook
+                # so the turn it triggers records why it woke.
+                logbook.set_pending_wake(
+                    round(minimum_confidence, 2),
+                    utterance_peak_rms,
+                    MIC_DEVICE,
                 )
                 return "listen"
 
