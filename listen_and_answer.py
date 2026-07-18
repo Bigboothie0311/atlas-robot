@@ -2830,11 +2830,20 @@ SPEECH_DIAGNOSTIC_PHRASES = {
     "show me what you heard", "why did you misunderstand me",
 }
 SPEECH_TEACH_PATTERN = re.compile(
-    r"^(?:teach|learn) (?:atlas )?(?:that )?(?:when i say )?(.+?) "
-    r"(?:means|should mean) (open spotify|open claude|open fusion(?: 360)?)$"
+    r"^(?:(?:teach|learn) (?:atlas )?(?:that )?)?when i say (.+?) "
+    r"i (?:mean|meant)"
+    r" (.+)$"
 )
+# Older/explicit phrasing kept working too.
+SPEECH_TEACH_PATTERN_ALT = re.compile(
+    r"^(?:teach|learn) (?:atlas )?(?:that )?(.+?) (?:means|should mean) (.+)$"
+)
+# Aliases may only point at these real, safe command phrases.
 APPROVED_SPEECH_ALIAS_TARGETS = {
     "open spotify", "open claude", "open fusion", "open fusion 360",
+    "boot my pc", "shut down my pc", "empty the recycle bin",
+    "what's on my network", "check connections", "run diagnostics",
+    "how's my pc", "go dark", "lights up",
 }
 
 def _repair_turn_transcript(raw_text):
@@ -2847,12 +2856,77 @@ def _repair_turn_transcript(raw_text):
     return repaired, corrections
 
 def _speech_teach_request(normalized):
-    match = SPEECH_TEACH_PATTERN.match(normalized)
+    match = SPEECH_TEACH_PATTERN.match(normalized) or SPEECH_TEACH_PATTERN_ALT.match(normalized)
     if not match:
         return None
     alias, target = match.groups()
     target = _normalize_phrase(target)
     return (alias, target) if target in APPROVED_SPEECH_ALIAS_TARGETS else None
+
+
+# --- "Did you mean X?" one-shot clarification -----------------------
+import difflib
+
+# Set when a confirmed suggestion should be re-run without re-recording.
+_injected_command = None
+
+# Canonical short command phrases the clarifier can suggest. Built from
+# the capability registry aliases plus a few high-frequency exact phrases.
+def _canonical_command_phrases():
+    phrases = set()
+    for entry in capabilities.REGISTRY:
+        for alias in entry["aliases"]:
+            core = alias.lower().replace("...", "").replace("(", "").replace(")", "").strip()
+            # Keep only concrete short phrases (skip templated ones).
+            if core and 2 <= len(core.split()) <= 5 and "from the phone" not in core:
+                phrases.add(core)
+    phrases.update({
+        "open spotify", "open claude", "open fusion", "boot my pc",
+        "shut down my pc", "empty the recycle bin", "what's on my network",
+        "check connections", "run diagnostics", "what can you control",
+    })
+    return phrases
+
+
+_CLARIFY_MIN_RATIO = 0.72
+_CLARIFY_MAX_RATIO = 0.97
+
+
+def _maybe_clarify_command(text, model):
+    """If text is close to a known command but not exact, ask 'did you
+    mean X?'. On yes, re-run that command. Returns True if it handled the
+    turn (asked + acted or declined), False to let the AI answer."""
+    global _injected_command
+
+    normalized = _normalize_phrase(text)
+    candidates = _canonical_command_phrases()
+
+    best = None
+    best_ratio = 0.0
+    for phrase in candidates:
+        ratio = difflib.SequenceMatcher(None, normalized, phrase).ratio()
+        if ratio > best_ratio:
+            best_ratio, best = ratio, phrase
+
+    if best is None or not (_CLARIFY_MIN_RATIO <= best_ratio < _CLARIFY_MAX_RATIO):
+        return False
+
+    speak(f"Did you mean: {best}? Say yes or no.")
+    set_face("listening")
+    subprocess.run([
+        "arecord", "-D", MIC_DEVICE, "-f", "S16_LE", "-r", "16000",
+        "-c", "1", "-d", "3", AUDIO_PATH,
+    ], check=False)
+    set_face("thinking")
+
+    reply = _normalize_phrase(transcribe_audio(model))
+    if reply.split() and reply.split()[0] in {"yes", "yeah", "yep", "correct", "right", "sure"}:
+        _injected_command = best
+        _handle_turn_body(model)
+        return True
+
+    speak("Okay, never mind.")
+    return True
 
 
 def handle_turn(model):
@@ -2930,14 +3004,22 @@ def _handle_turn_body(model):
         maybe_speak_greeting()
         memory_store.mark_interaction_now()
 
-        speak("Go ahead.")
-        set_face("listening")
-        record_audio()
+        global _injected_command
+        if _injected_command is not None:
+            # A confirmed "did you mean X?" — run that phrase without
+            # re-recording the mic.
+            text = _injected_command
+            _injected_command = None
+            corrections = []
+        else:
+            speak("Go ahead.")
+            set_face("listening")
+            record_audio()
 
-        set_face("thinking")
-        raw_text = transcribe_audio(model)
-        text, corrections = _repair_turn_transcript(raw_text)
-        _log_transcript(text, raw_text=raw_text, corrections=corrections)
+            set_face("thinking")
+            raw_text = transcribe_audio(model)
+            text, corrections = _repair_turn_transcript(raw_text)
+            _log_transcript(text, raw_text=raw_text, corrections=corrections)
 
         print(f"{load_owner_name()}:", text)
 
@@ -3269,6 +3351,12 @@ def _handle_turn_body(model):
             print("A.T.L.A.S. local command:", local_answer)
             log_qa(text, local_answer)
             speak(local_answer)
+            return
+
+        # Nothing matched a command. Before spending a paid model call,
+        # see if the transcript is CLOSE to a real command (mis-heard) and
+        # offer a one-shot "did you mean X?" — a yes re-runs that command.
+        if _maybe_clarify_command(text, model):
             return
 
         answer, interrupted = _answer_and_speak(text, model)
