@@ -88,6 +88,66 @@ def add_fact(text):
     save_facts(facts)
 
 
+def search_facts(keyword):
+    """Facts mentioning keyword — powers 'what do you remember about X'."""
+    keyword = keyword.lower().strip()
+    if not keyword:
+        return []
+    return [f["text"] for f in load_facts() if keyword in f["text"].lower()]
+
+
+def forget_matching(keyword):
+    """Removes facts mentioning keyword — 'forget that X'. Returns how many
+    were removed."""
+    keyword = keyword.lower().strip()
+    if not keyword:
+        return 0
+    facts = load_facts()
+    kept = [f for f in facts if keyword not in f["text"].lower()]
+    removed = len(facts) - len(kept)
+    if removed:
+        save_facts(kept)
+    return removed
+
+
+PRIORITIES_PATH = Path("/home/atlas/atlas-robot/data/priorities.json")
+MAX_PRIORITIES = 20
+
+
+def load_priorities():
+    if not PRIORITIES_PATH.exists():
+        return []
+    try:
+        data = json.loads(PRIORITIES_PATH.read_text())
+        return [p for p in data if isinstance(p, dict) and p.get("text")] if isinstance(data, list) else []
+    except (json.JSONDecodeError, OSError):
+        return []
+
+
+def save_priorities(priorities):
+    PRIORITIES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = PRIORITIES_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(priorities, indent=2))
+    tmp.replace(PRIORITIES_PATH)
+
+
+def add_priority(text):
+    text = text.strip()
+    if not text:
+        return
+    priorities = load_priorities()
+    priorities.append({"text": text, "added": time.time()})
+    save_priorities(priorities[-MAX_PRIORITIES:])
+
+
+def clear_priorities():
+    save_priorities([])
+
+
+def get_priorities_summary():
+    return [p["text"] for p in load_priorities()]
+
+
 def clear_facts():
     save_facts([])
 

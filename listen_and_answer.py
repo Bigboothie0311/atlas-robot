@@ -1850,6 +1850,70 @@ def run_internet_check_command():
     return f"Internet looks {quality}: " + ", ".join(parts) + "."
 
 
+MEMORY_QUERY_PATTERN = re.compile(r"^what do you (?:remember|know) about (.+)$")
+FORGET_ABOUT_PATTERN = re.compile(r"^forget (?:that |about |everything about )(.+)$")
+ADD_PRIORITY_PATTERN = re.compile(
+    r"^(?:make|my|a) (?:top )?priority (?:is )?(.+)$|"
+    r"^(?:make|set) (.+?) (?:a |my )?(?:top )?priority$|"
+    r"^prioriti[sz]e (.+)$"
+)
+PRIORITIES_QUERY_PHRASES = {
+    "what are my priorities", "what's my priority", "whats my priority",
+    "list my priorities", "what are my top priorities",
+}
+TODAY_PHRASES = {
+    "what's my day", "whats my day", "what does my day look like",
+    "what's on today", "whats on today", "today", "my day",
+    "what do i have today",
+}
+
+
+def parse_memory_query(text):
+    m = MEMORY_QUERY_PATTERN.match(_normalize_phrase(text))
+    return m.group(1).strip() if m else None
+
+
+def parse_forget_about(text):
+    normalized = _normalize_phrase(text)
+    if memory_store.is_forget_command(text):  # "forget everything" handled elsewhere
+        return None
+    m = FORGET_ABOUT_PATTERN.match(normalized)
+    return m.group(1).strip() if m else None
+
+
+def parse_add_priority(text):
+    m = ADD_PRIORITY_PATTERN.match(_normalize_phrase(text))
+    if not m:
+        return None
+    return next((g for g in m.groups() if g), None)
+
+
+def run_memory_query_command(topic):
+    facts = memory_store.search_facts(topic)
+    if not facts:
+        return f"I don't have anything remembered about {topic}."
+    return f"About {topic}, I remember: " + "; ".join(facts) + "."
+
+
+def run_today_command():
+    parts = []
+    reminders = memory_store.load_reminders()
+    if reminders:
+        parts.append(f"{len(reminders)} reminder{'s' if len(reminders) != 1 else ''} scheduled")
+    priorities = memory_store.get_priorities_summary()
+    if priorities:
+        parts.append("your priorities are " + "; ".join(priorities[:5]))
+    notes = memory_store.load_notes()
+    if notes:
+        parts.append(f"{len(notes)} note{'s' if len(notes) != 1 else ''} saved")
+    weather = hud_stats.get_weather_stats()
+    if weather.get("temp_f") is not None:
+        parts.insert(0, f"it's {weather['temp_f']} degrees and {weather['condition']}")
+    if not parts:
+        return "Your day looks clear — nothing I'm tracking."
+    return "Today: " + ". ".join(p[0].upper() + p[1:] for p in parts) + "."
+
+
 CONNECTION_PHRASES = {
     "check connections",
     "check my connections",
@@ -3263,6 +3327,45 @@ def _handle_turn_body(model):
         if normalized_phrase in CONNECTION_PHRASES:
             set_face("thinking")
             answer = run_connection_health_command()
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        memory_topic = parse_memory_query(text)
+        if memory_topic is not None:
+            answer = run_memory_query_command(memory_topic)
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        forget_topic = parse_forget_about(text)
+        if forget_topic is not None:
+            removed = memory_store.forget_matching(forget_topic)
+            answer = (f"Okay, I've forgotten what I knew about {forget_topic}."
+                      if removed else f"I didn't have anything about {forget_topic}.")
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        priority_text = parse_add_priority(text)
+        if priority_text is not None:
+            memory_store.add_priority(priority_text)
+            answer = f"Got it — {priority_text} is a priority now."
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        if normalized_phrase in PRIORITIES_QUERY_PHRASES:
+            prios = memory_store.get_priorities_summary()
+            answer = ("Your priorities: " + "; ".join(prios) + "."
+                      if prios else "You haven't set any priorities.")
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        if normalized_phrase in TODAY_PHRASES:
+            set_face("thinking")
+            answer = run_today_command()
             log_qa(text, answer)
             speak(answer)
             return
