@@ -53,7 +53,12 @@ robot_state = {
     "image_caption": None,
     "gallery_image_paths": [],
     "gallery_caption": None,
-    "qa_log": []
+    "qa_log": [],
+    # Contextual HUD layout: idle | red_alert | security | diagnostics.
+    # The renderer picks the layout; most panels stay shared across them.
+    "hud_layout": "idle",
+    "intruder_records": [],
+    "active_intruder_photo": None,
 }
 
 QA_LOG_MAX_ENTRIES = 20
@@ -235,6 +240,18 @@ def get_state():
     state.update(timers.to_state_dict())
     state["auth"] = camera_gate.hud_status()
     state["red_alert"] = alerts.red_alert_state()
+
+    # Expire a finished full-screen intruder photo so the HUD returns to
+    # the security list on its own even if the caller never clears it.
+    active_photo = state.get("active_intruder_photo")
+    if active_photo and time.time() >= active_photo.get("until", 0):
+        with state_lock:
+            robot_state["active_intruder_photo"] = None
+        state["active_intruder_photo"] = None
+
+    # Red alert forces its layout regardless of what else was set.
+    if state["red_alert"]["active"]:
+        state["hud_layout"] = "red_alert"
 
     with _screen_lock:
         state["screen_dark"] = _screen_dark
@@ -548,50 +565,79 @@ def show_images():
     })
 
 
-@app.post("/show_intruders")
-def show_intruders():
-    """Puts the unreviewed intruder captures on the HUD gallery. Copies
-    them into the gallery's own tmp slots first — gallery expiry deletes
-    its files, and the evidence originals in data/intruders/ must
-    survive that."""
-    global gallery_until
-
-    intruders = camera_gate.unreviewed_intruders()[:GALLERY_MAX_IMAGES]
-
-    if not intruders:
-        return jsonify({"ok": False, "error": "No intruder captures"}), 404
-
-    new_paths = []
-
-    for index, source in enumerate(intruders):
-        destination = f"{GALLERY_PATH_BASE}{index}.jpg"
-
-        try:
-            with open(source, "rb") as src, open(destination, "wb") as dst:
-                dst.write(src.read())
-            new_paths.append(destination)
-        except OSError as error:
-            print("Intruder copy failed:", error, flush=True)
-
-    if not new_paths:
-        return jsonify({"ok": False, "error": "Could not stage images"}), 500
+@app.post("/security_review")
+def security_review():
+    """Switches the HUD to the Away/Security layout and loads the current
+    intruder records (photo id, timestamp, denied commands) for it."""
+    records = camera_gate.unreviewed_intruders()
 
     with state_lock:
-        clear_image_state_locked()
+        robot_state["hud_layout"] = "security"
+        robot_state["intruder_records"] = [
+            {
+                "id": r["id"],
+                "timestamp": r["timestamp"],
+                "denied_commands": [d["command"] for d in r.get("denied_commands", [])],
+            }
+            for r in records
+        ]
 
-        old_paths = robot_state["gallery_image_paths"]
-        robot_state["gallery_image_paths"] = new_paths
-        robot_state["gallery_caption"] = "Unauthorized users"
-        gallery_until = time.time() + 30
+    return jsonify({"ok": True, "count": len(records)})
 
-        for old_path in old_paths:
-            if old_path and old_path not in new_paths and os.path.exists(old_path):
-                try:
-                    os.remove(old_path)
-                except OSError:
-                    pass
 
-    return jsonify({"ok": True, "count": len(new_paths)})
+@app.post("/security_review/close")
+def security_review_close():
+    with state_lock:
+        robot_state["hud_layout"] = "idle"
+        robot_state["intruder_records"] = []
+        robot_state["active_intruder_photo"] = None
+
+    return jsonify({"ok": True})
+
+
+@app.post("/show_intruder_photo")
+def show_intruder_photo():
+    """Full-screens a single intruder photo by record id for `duration`
+    seconds. The photo is served from data/intruders/ via
+    /hud/intruder_photo/<id>; the caller deletes it after display."""
+    data = request.get_json(silent=True) or {}
+    record_id = str(data.get("id", "")).strip()
+
+    try:
+        duration = float(data.get("duration", 10))
+    except (TypeError, ValueError):
+        duration = 10
+
+    record = next(
+        (r for r in camera_gate.unreviewed_intruders() if r["id"] == record_id),
+        None,
+    )
+
+    if record is None or not record.get("photo") or not os.path.exists(record["photo"]):
+        return jsonify({"ok": False, "error": "No such intruder photo"}), 404
+
+    with state_lock:
+        robot_state["active_intruder_photo"] = {
+            "id": record_id,
+            "timestamp": record["timestamp"],
+            "denied_commands": [d["command"] for d in record.get("denied_commands", [])],
+            "until": time.time() + duration,
+        }
+
+    return jsonify({"ok": True})
+
+
+@app.get("/hud/intruder_photo/<record_id>")
+def hud_intruder_photo(record_id):
+    record = next(
+        (r for r in camera_gate.unreviewed_intruders() if r["id"] == record_id),
+        None,
+    )
+
+    if record is None or not record.get("photo") or not os.path.exists(record["photo"]):
+        return jsonify({"ok": False, "error": "No such photo"}), 404
+
+    return send_file(record["photo"])
 
 
 @app.get("/hud/gallery_image/<int:index>")

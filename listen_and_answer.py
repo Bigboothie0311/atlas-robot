@@ -1175,62 +1175,93 @@ INTRUDER_QUERY_PHRASES = {
 
 
 def run_enroll_face_command():
-    """Guided enrollment: several captures with spoken prompts, then a
-    fresh LBPH model. Owner-only in practice — re-enrollment on an
-    existing model only happens inside a verified (full-access) turn."""
+    """Guided enrollment: one burst capture (spoken cue to hold still),
+    quality-controlled crops, fresh LBPH model. Owner-only in practice —
+    re-enrollment on an existing model only happens inside a verified
+    (full-access) turn."""
     if camera_gate.cv2 is None:
         return "My face recognition libraries aren't installed."
 
-    speak("Alright, look at the camera and hold still.")
+    def progress(step):
+        if step == "start":
+            speak("Look at the camera and hold still for a moment.")
 
-    saved = 0
-    attempts = 0
-    prompts = {
-        3: "Turn your head slightly to the left.",
-        5: "Now slightly to the right.",
-        7: "Almost done, look straight at me.",
-    }
+    count = camera_gate.enroll(progress=progress)
 
-    while saved < camera_gate.ENROLL_FRAME_COUNT and attempts < 16:
-        if saved in prompts:
-            speak(prompts.pop(saved))
-
-        if camera_gate.enroll_frame(saved):
-            saved += 1
-
-        attempts += 1
-
-    if saved < 4:
+    if count == 0:
         return (
             "I couldn't see your face clearly enough to learn it. "
-            "Check the lighting and try again."
+            "Check the lighting, face me directly, and try again."
         )
 
-    count = camera_gate.train_model()
     camera_gate.mark_verified()
-    return f"Done — your face is enrolled from {count} captures. You're my authorized user now."
+    return (
+        f"Done — your face is enrolled from {count} captures. "
+        "You're my authorized user now."
+    )
 
 
 def run_intruder_query_command():
-    """Yes/no + count, and puts the evidence photos on the HUD."""
+    """Answers 'were there any unauthorized users while I was gone'. If
+    yes: opens the security HUD page, displays each photo full-screen for
+    10 seconds (deleting each after it's shown), then scrubs the alert."""
     intruders = camera_gate.unreviewed_intruders()
 
     if not intruders:
-        return "No. Nobody unauthorized tried to use me."
+        return "No. Nobody unauthorized tried to use me while you were gone."
 
     count = len(intruders)
     word = "person" if count == 1 else "people"
 
+    # Summarize what they tried before showing the evidence.
+    attempted = []
+    for record in intruders:
+        for denied in record.get("denied_commands", []):
+            attempted.append(denied["command"])
+
+    speak(
+        f"Yes — {count} unauthorized {word} tried to use me while you "
+        "were gone. Showing you the records now."
+    )
+
+    # Open the security review layout and hand it the records.
     try:
-        requests.post(f"{HUB}/show_intruders", timeout=10)
+        requests.post(f"{HUB}/security_review", timeout=10)
     except requests.RequestException as error:
-        print("show_intruders request failed:", error, flush=True)
+        print("security_review request failed:", error, flush=True)
+
+    # Full-screen each photo for 10 seconds, deleting after display.
+    for record in intruders:
+        try:
+            requests.post(
+                f"{HUB}/show_intruder_photo",
+                json={"id": record["id"], "duration": 10},
+                timeout=10,
+            )
+        except requests.RequestException as error:
+            print("show_intruder_photo failed:", error, flush=True)
+            continue
+
+        when = time.strftime("%-I:%M %p", time.localtime(record["timestamp"]))
+        denied = record.get("denied_commands", [])
+
+        if denied:
+            tried = "; ".join(d["command"] for d in denied)
+            speak(f"At {when}, they tried: {tried}. All denied.")
+        else:
+            speak(f"At {when}. They didn't get past the lock.")
+
+        time.sleep(10)
+        camera_gate.delete_intruder_photo(record["id"])
 
     camera_gate.mark_intruders_reviewed()
-    return (
-        f"Yes — {count} unauthorized {word} tried to use me. "
-        "Their photos are on screen now."
-    )
+
+    try:
+        requests.post(f"{HUB}/security_review/close", timeout=5)
+    except requests.RequestException:
+        pass
+
+    return "That's everyone. The alert is cleared."
 
 
 # What a non-verified person may still do: strictly local, zero-token,
@@ -1262,6 +1293,9 @@ def _handle_restricted_turn(text):
         memory_store.add_reminder(delay_seconds, message)
         return f"Got it, I'll remind you in {describe_delay(delay_seconds)}."
 
+    # Anything beyond local basics is denied AND recorded against the
+    # intruder so the owner can review what was attempted.
+    camera_gate.record_denied_command(text)
     return (
         "You're not my authorized user, so I'm limited to local basics — "
         "time, date, timers, and reminders."

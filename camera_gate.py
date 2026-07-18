@@ -1,22 +1,25 @@
 """Authorized-user camera gate.
 
 The camera runs ONLY on activation — a wake-up whose last successful
-verification is older than the validity window triggers one capture-and-
-verify pass; nothing streams continuously. Recognition is fully local
+verification is older than the validity window triggers one burst-capture-
+and-verify pass; nothing streams continuously. Recognition is fully local
 (OpenCV LBPH, zero tokens): the owner enrolls via "learn my face", crops
-live in data/faces/authorized/, and the trained model in
-data/face_model.yml.
+live in data/faces/authorized/, the trained model in data/face_model.yml.
 
-Outcomes per verify: "authorized" (full functionality), "unauthorized"
-(a face that isn't the owner — the frame is saved to data/intruders/ and
-the turn is restricted to local-only commands), or "no_face" (nobody
-visible — also restricted, but nothing is logged as an intruder).
+A verify grabs a short BURST of frames in a single camera session (one
+ffmpeg spawn, not one per frame — that camera-open overhead was the
+"long delay"), runs LBPH on every detectable face, and combines the
+results by majority vote so a single bad frame (blink, motion, glance)
+can't decide the outcome.
 
-State lives in data/auth_state.json so the hub can render camera-gate
-status on the HUD and both processes agree on enablement.
+Outcomes: "authorized" (full functionality), "unauthorized" (a face that
+isn't the owner — recorded to the intruder log with its photo and any
+commands it then tries), or "no_face" (nobody visible — restricted but
+not logged as an intruder).
 """
 import json
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
@@ -37,17 +40,27 @@ AUTH_STATE_PATH = DATA_DIR / "auth_state.json"
 FACES_DIR = DATA_DIR / "faces" / "authorized"
 MODEL_PATH = DATA_DIR / "face_model.yml"
 INTRUDERS_DIR = DATA_DIR / "intruders"
-CAPTURE_PATH = "/tmp/atlas_gate_capture.jpg"
+INTRUDER_LOG_PATH = DATA_DIR / "intruder_log.json"
+# Single rolling file for the most recent successful verification — the
+# task requires these NOT to accumulate. Enrollment crops in FACES_DIR are
+# never touched by rotation.
+VERIFIED_CAPTURE_PATH = DATA_DIR / "last_verified.jpg"
 
-# A successful verification is good for this long; the next wake after it
-# lapses re-verifies.
 VALIDITY_WINDOW_SECONDS = 10 * 60
 
 # LBPH distance — LOWER is more similar. Accept below this.
 LBPH_ACCEPT_THRESHOLD = 70.0
 
-ENROLL_FRAME_COUNT = 8
-VERIFY_ATTEMPTS = 3
+# Enrollment: capture a generous burst, keep the quality faces.
+ENROLL_BURST_FRAMES = 20
+ENROLL_MIN_CROPS = 5
+ENROLL_MAX_CROPS = 15
+
+# Verification: burst of frames, decide by majority vote over detected
+# faces. Require a minimum number of usable (face-bearing) frames so a
+# near-empty burst doesn't authorize on one lucky match.
+VERIFY_BURST_FRAMES = 8
+VERIFY_MIN_USABLE_FRAMES = 2
 
 FACE_CROP_SIZE = (200, 200)
 
@@ -55,6 +68,14 @@ _face_cascade = None
 _recognizer = None
 _model_loaded_at = 0.0
 
+FACE_CASCADE_PATH = (
+    "/usr/share/opencv4/haarcascades/haarcascade_frontalface_default.xml"
+)
+
+
+# ---------------------------------------------------------------------
+# State
+# ---------------------------------------------------------------------
 
 def _load_state():
     if not AUTH_STATE_PATH.exists():
@@ -77,7 +98,6 @@ def _save_state(updates):
 
 
 def is_available():
-    """The gate can only run with OpenCV installed and a trained model."""
     return cv2 is not None and MODEL_PATH.exists()
 
 
@@ -98,8 +118,15 @@ def mark_verified():
     _save_state({"last_verified_at": time.time()})
 
 
-def capture_frame(path=CAPTURE_PATH):
-    """One still off the USB camera via v4l2. Returns the path or None."""
+# ---------------------------------------------------------------------
+# Capture
+# ---------------------------------------------------------------------
+
+def capture_burst(frame_count, directory):
+    """Grabs frame_count consecutive frames in ONE camera session. Returns
+    a sorted list of frame paths (may be shorter than requested)."""
+    pattern = str(Path(directory) / "frame_%03d.jpg")
+
     try:
         subprocess.run(
             [
@@ -107,24 +134,33 @@ def capture_frame(path=CAPTURE_PATH):
                 "-f", "v4l2", "-input_format", "mjpeg",
                 "-video_size", "640x480",
                 "-i", CAMERA_DEVICE,
-                "-frames:v", "1", "-update", "1",
-                path,
+                "-frames:v", str(frame_count), "-vsync", "0",
+                pattern,
             ],
             check=True,
-            timeout=15,
+            timeout=20,
         )
-        return path
     except (subprocess.SubprocessError, OSError) as error:
-        print("Camera capture failed:", type(error).__name__, error, flush=True)
-        return None
+        print("Camera burst failed:", type(error).__name__, error, flush=True)
+
+    return sorted(Path(directory).glob("frame_*.jpg"))
 
 
-# OpenCV 5 wheels no longer bundle the Haar cascades — this comes from
-# Debian's opencv-data package instead (apt install opencv-data).
-FACE_CASCADE_PATH = (
-    "/usr/share/opencv4/haarcascades/haarcascade_frontalface_default.xml"
-)
+def capture_frame(path=str(DATA_DIR / "tmp_capture.jpg")):
+    """Single still — used only where one frame is genuinely enough."""
+    with tempfile.TemporaryDirectory() as directory:
+        frames = capture_burst(1, directory)
 
+        if not frames:
+            return None
+
+        Path(path).write_bytes(frames[0].read_bytes())
+        return path
+
+
+# ---------------------------------------------------------------------
+# Detection / recognition
+# ---------------------------------------------------------------------
 
 def _get_face_cascade():
     global _face_cascade
@@ -143,7 +179,7 @@ def _get_face_cascade():
 
 def _detect_face_crop(image_path):
     """Largest face in the image as a normalized grayscale crop, or None."""
-    image = cv2.imread(image_path)
+    image = cv2.imread(str(image_path))
 
     if image is None:
         return None
@@ -161,25 +197,60 @@ def _detect_face_crop(image_path):
     return cv2.resize(gray[y:y + h, x:x + w], FACE_CROP_SIZE)
 
 
-def enroll_frame(index):
-    """Captures one enrollment frame. Returns True if a face was saved."""
-    path = capture_frame()
+def _get_recognizer():
+    global _recognizer, _model_loaded_at
 
-    if path is None:
-        return False
+    model_mtime = MODEL_PATH.stat().st_mtime
 
-    crop = _detect_face_crop(path)
+    if _recognizer is None or model_mtime > _model_loaded_at:
+        _recognizer = cv2.face.LBPHFaceRecognizer_create()
+        _recognizer.read(str(MODEL_PATH))
+        _model_loaded_at = model_mtime
 
-    if crop is None:
-        return False
+    return _recognizer
+
+
+# ---------------------------------------------------------------------
+# Enrollment
+# ---------------------------------------------------------------------
+
+def enroll(progress=None):
+    """Burst-captures enrollment frames, keeps the quality face crops, and
+    trains the model. progress(step) is an optional callback for spoken
+    prompts. Returns the number of crops trained on (0 = failure)."""
+    if cv2 is None:
+        return 0
 
     FACES_DIR.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(FACES_DIR / f"face_{index:02d}.jpg"), crop)
-    return True
+
+    for old in FACES_DIR.glob("*.jpg"):
+        old.unlink()
+
+    saved = 0
+
+    with tempfile.TemporaryDirectory() as directory:
+        if progress:
+            progress("start")
+
+        frames = capture_burst(ENROLL_BURST_FRAMES, directory)
+
+        for frame in frames:
+            if saved >= ENROLL_MAX_CROPS:
+                break
+
+            crop = _detect_face_crop(frame)
+
+            if crop is not None:
+                cv2.imwrite(str(FACES_DIR / f"face_{saved:02d}.jpg"), crop)
+                saved += 1
+
+    if saved < ENROLL_MIN_CROPS:
+        return 0
+
+    return _train_model()
 
 
-def train_model():
-    """(Re)trains LBPH from every enrolled crop. Returns the crop count."""
+def _train_model():
     crops = sorted(FACES_DIR.glob("*.jpg"))
 
     if not crops:
@@ -195,89 +266,182 @@ def train_model():
     return len(images)
 
 
-def _get_recognizer():
-    global _recognizer, _model_loaded_at
+# ---------------------------------------------------------------------
+# Verification
+# ---------------------------------------------------------------------
 
-    model_mtime = MODEL_PATH.stat().st_mtime
-
-    if _recognizer is None or model_mtime > _model_loaded_at:
-        _recognizer = cv2.face.LBPHFaceRecognizer_create()
-        _recognizer.read(str(MODEL_PATH))
-        _model_loaded_at = model_mtime
-
-    return _recognizer
-
-
-def _save_intruder_frame():
-    INTRUDERS_DIR.mkdir(parents=True, exist_ok=True)
-    stamp = time.strftime("%Y%m%d-%H%M%S")
-    destination = INTRUDERS_DIR / f"intruder_{stamp}.jpg"
+def _rotate_verified_capture(source_frame):
+    """Keeps only the newest verified-user capture. Overwrites the single
+    rolling file — never accumulates, never touches enrollment data."""
+    if source_frame is None:
+        return
 
     try:
-        destination.write_bytes(Path(CAPTURE_PATH).read_bytes())
+        VERIFIED_CAPTURE_PATH.write_bytes(Path(source_frame).read_bytes())
     except OSError as error:
-        print("Intruder frame save failed:", error, flush=True)
+        print("Verified capture rotate failed:", error, flush=True)
 
 
 def verify():
-    """One activation-triggered check. Returns 'authorized',
-    'unauthorized', or 'no_face'. A few attempts ride out blinks and
-    mid-motion frames; a stranger's frame is kept as evidence."""
+    """Burst-capture + majority-vote check. Returns 'authorized',
+    'unauthorized', or 'no_face'. On unauthorized, opens a new intruder
+    record; its id is stashed so a following restricted turn can attach
+    the commands the stranger then tries."""
+    global _last_intruder_id
+
     if not is_available():
         return "authorized"  # No model/deps — gate can't gate.
 
-    saw_face = False
+    with tempfile.TemporaryDirectory() as directory:
+        frames = capture_burst(VERIFY_BURST_FRAMES, directory)
 
-    for _ in range(VERIFY_ATTEMPTS):
-        path = capture_frame()
+        accept_votes = 0
+        reject_votes = 0
+        best_accept_frame = None
+        first_face_frame = None
 
-        if path is None:
-            continue
+        for frame in frames:
+            crop = _detect_face_crop(frame)
 
-        crop = _detect_face_crop(path)
+            if crop is None:
+                continue
 
-        if crop is None:
-            time.sleep(0.4)
-            continue
+            if first_face_frame is None:
+                first_face_frame = frame
 
-        saw_face = True
-        _, distance = _get_recognizer().predict(crop)
-        print(f"Face gate: LBPH distance {distance:.1f} "
-              f"(accept < {LBPH_ACCEPT_THRESHOLD})", flush=True)
+            _, distance = _get_recognizer().predict(crop)
 
-        if distance < LBPH_ACCEPT_THRESHOLD:
+            if distance < LBPH_ACCEPT_THRESHOLD:
+                accept_votes += 1
+                best_accept_frame = frame
+            else:
+                reject_votes += 1
+
+        usable = accept_votes + reject_votes
+        print(
+            f"Face gate vote: {accept_votes} accept / {reject_votes} reject "
+            f"over {usable} usable frames",
+            flush=True,
+        )
+
+        if usable < VERIFY_MIN_USABLE_FRAMES:
+            return "no_face"
+
+        if accept_votes >= reject_votes:
             mark_verified()
+            _rotate_verified_capture(best_accept_frame or first_face_frame)
             return "authorized"
 
-    if saw_face:
-        _save_intruder_frame()
+        _last_intruder_id = _record_intruder(first_face_frame)
         return "unauthorized"
 
-    return "no_face"
+
+# ---------------------------------------------------------------------
+# Intruder records
+# ---------------------------------------------------------------------
+
+_last_intruder_id = None
+
+
+def _load_intruder_log():
+    if not INTRUDER_LOG_PATH.exists():
+        return []
+
+    try:
+        data = json.loads(INTRUDER_LOG_PATH.read_text())
+        return data if isinstance(data, list) else []
+    except (json.JSONDecodeError, OSError):
+        return []
+
+
+def _save_intruder_log(records):
+    INTRUDER_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = INTRUDER_LOG_PATH.with_suffix(".tmp")
+    temporary_path.write_text(json.dumps(records, indent=2))
+    temporary_path.replace(INTRUDER_LOG_PATH)
+
+
+def _record_intruder(source_frame):
+    """Saves the intruder's photo and opens a log record. Returns its id."""
+    INTRUDERS_DIR.mkdir(parents=True, exist_ok=True)
+    now = time.time()
+    record_id = time.strftime("%Y%m%d-%H%M%S", time.localtime(now))
+    photo_path = INTRUDERS_DIR / f"intruder_{record_id}.jpg"
+
+    try:
+        if source_frame is not None:
+            photo_path.write_bytes(Path(source_frame).read_bytes())
+    except OSError as error:
+        print("Intruder photo save failed:", error, flush=True)
+
+    records = _load_intruder_log()
+    records.append({
+        "id": record_id,
+        "photo": str(photo_path),
+        "timestamp": now,
+        "denied_commands": [],
+        "reviewed": False,
+    })
+    _save_intruder_log(records)
+    return record_id
+
+
+def record_denied_command(command):
+    """Attaches a denied command to the most recent open intruder record.
+    Called by the restricted-turn handler when a stranger tries something
+    beyond local basics."""
+    if _last_intruder_id is None:
+        return
+
+    records = _load_intruder_log()
+
+    for record in records:
+        if record["id"] == _last_intruder_id:
+            record["denied_commands"].append({
+                "command": command,
+                "at": time.time(),
+            })
+            _save_intruder_log(records)
+            return
 
 
 def unreviewed_intruders():
-    """Intruder captures newer than the last review, newest first."""
-    last_review = float(_load_state().get("last_review_at", 0.0))
+    """Open intruder records (newest first), each with photo, timestamp,
+    and denied commands. Fast — reads one JSON file, no camera work."""
+    records = [r for r in _load_intruder_log() if not r.get("reviewed")]
+    return sorted(records, key=lambda r: r["timestamp"], reverse=True)
 
-    if not INTRUDERS_DIR.exists():
-        return []
 
-    return sorted(
-        (p for p in INTRUDERS_DIR.glob("*.jpg")
-         if p.stat().st_mtime > last_review),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
+def delete_intruder_photo(record_id):
+    """Deletes an intruder's photo after it has been displayed on request."""
+    records = _load_intruder_log()
+
+    for record in records:
+        if record["id"] == record_id:
+            photo = Path(record.get("photo") or "")
+
+            if photo and photo.exists():
+                try:
+                    photo.unlink()
+                except OSError:
+                    pass
+
+            record["photo"] = None
+            _save_intruder_log(records)
+            return
 
 
 def mark_intruders_reviewed():
-    _save_state({"last_review_at": time.time()})
+    """Scrubs the alert: marks every open record reviewed."""
+    records = _load_intruder_log()
+
+    for record in records:
+        record["reviewed"] = True
+
+    _save_intruder_log(records)
 
 
 def hud_status():
-    """Camera-gate state for the HUD: OFF / UNTRAINED / VERIFIED / STALE,
-    plus how many intruder shots await review."""
     if cv2 is None or not MODEL_PATH.exists():
         status = "UNTRAINED"
     elif not is_enabled():
