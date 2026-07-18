@@ -887,6 +887,20 @@ OPEN_FUSION_PHRASES = {
     "open fusion three sixty",
 }
 
+OPEN_SPOTIFY_PHRASES = {"open spotify", "launch spotify", "open spot of i", "open spotifi"}
+OPEN_CLAUDE_PHRASES = {"open claude", "launch claude", "open cloud"}
+EMPTY_RECYCLE_BIN_PHRASES = {
+    "empty the recycle bin", "empty recycle bin", "empty my recycle bin", "clear the recycle bin",
+}
+
+SHUTDOWN_PC_PHRASES = {
+    "shut down my pc", "shutdown my pc", "shut down my computer",
+    "turn off my pc", "turn off my computer",
+}
+CANCEL_PC_SHUTDOWN_PHRASES = {
+    "cancel pc shutdown", "cancel my pc shutdown", "abort pc shutdown",
+}
+
 PC_APPS_PHRASES = {
     "what's open on my pc", "whats open on my pc", "what is open on my pc",
     "what's running on my pc", "whats running on my pc",
@@ -912,6 +926,30 @@ VOLUME_MUTE_PHRASES = {"mute", "mute my pc", "mute the volume", "unmute", "unmut
 MEDIA_PLAY_PHRASES = {"play", "pause", "play pause", "pause my music", "play my music", "resume my music"}
 MEDIA_NEXT_PHRASES = {"next track", "skip this song", "next song", "skip track", "skip"}
 MEDIA_PREV_PHRASES = {"previous track", "last song", "previous song", "go back a track"}
+
+
+def _is_open_spotify_phrase(normalized):
+    """Accept common speech-to-text renderings of Spotify, but only after
+    an explicit open/launch command."""
+    starts_open = normalized.startswith(("open ", "launch "))
+    spotify_sounds = (
+        "spotify", "spotifi", "spot of i", "spotify", "spot if i",
+    )
+    return starts_open and any(sound in normalized for sound in spotify_sounds)
+
+
+def _is_open_claude_phrase(normalized):
+    return normalized.startswith(("open ", "launch ")) and (
+        "claude" in normalized or normalized.endswith(" cloud")
+    )
+
+
+def _is_empty_recycle_bin_phrase(normalized):
+    """Matches recycle/recycling-bin wording, including 'empty my/your'."""
+    words = set(normalized.split())
+    wants_empty = bool(words & {"empty", "clear"})
+    refers_to_bin = "bin" in words and any(word.startswith("recycl") for word in words)
+    return wants_empty and refers_to_bin
 
 
 PC_SEARCH_PATTERNS = [
@@ -943,6 +981,10 @@ def _pc_dispatch(normalized):
     phrase isn't a PC command."""
     if normalized in OPEN_FUSION_PHRASES:
         return pc_control.open_fusion()
+    if _is_open_spotify_phrase(normalized):
+        return pc_control.open_spotify()
+    if _is_open_claude_phrase(normalized):
+        return pc_control.open_claude()
     if normalized in PC_APPS_PHRASES:
         return pc_control.active_apps()
     if normalized in PC_SCREENSHOT_PHRASES:
@@ -965,6 +1007,12 @@ def _pc_dispatch(normalized):
         return pc_control.pc_health_report()
     if normalized in PC_CLEANUP_PHRASES:
         return pc_control.run_pc_cleanup()
+    if _is_empty_recycle_bin_phrase(normalized):
+        return pc_control.empty_recycle_bin()
+    if normalized in SHUTDOWN_PC_PHRASES:
+        return pc_control.shutdown_pc()
+    if normalized in CANCEL_PC_SHUTDOWN_PHRASES:
+        return pc_control.cancel_pc_shutdown()
     return None
 
 

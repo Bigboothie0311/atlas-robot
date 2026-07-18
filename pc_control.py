@@ -74,6 +74,31 @@ def open_fusion():
     return "Opening Fusion 360." if ok else data
 
 
+def open_spotify():
+    ok, data = _call("open_spotify")
+    return "Opening Spotify." if ok else data
+
+
+def open_claude():
+    ok, data = _call("open_claude")
+    return "Opening Claude." if ok else data
+
+
+def empty_recycle_bin():
+    ok, data = _call("empty_recycle_bin")
+    return "The Recycle Bin is empty." if ok else data
+
+
+def shutdown_pc():
+    ok, data = _call("shutdown_pc")
+    return "Your PC will shut down in one minute. Say cancel PC shutdown to abort." if ok else data
+
+
+def cancel_pc_shutdown():
+    ok, data = _call("cancel_pc_shutdown")
+    return "PC shutdown cancelled." if ok else data
+
+
 def open_project(name):
     ok, data = _call("open_project", {"project": name})
     return f"Opening {name}." if ok else data
