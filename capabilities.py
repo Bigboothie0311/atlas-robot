@@ -72,6 +72,8 @@ REGISTRY = [
      "aliases": ["what did you hear"], "confirm": False, "requires": "none", "category": "diagnostics"},
     {"id": "capabilities", "name": "capabilities", "description": "lists what it can actually control",
      "aliases": ["what can you control", "what can you do"], "confirm": False, "requires": "none", "category": "diagnostics"},
+    {"id": "simulate", "name": "command simulator", "description": "explains what it would do for a phrase without doing it",
+     "aliases": ["what would happen if I said..."], "confirm": False, "requires": "none", "category": "diagnostics"},
 
     # --- HUD --------------------------------------------------------
     {"id": "screen_dark", "name": "screen dimming", "description": "dims the HUD to near-black or restores it",

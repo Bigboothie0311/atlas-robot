@@ -1850,6 +1850,64 @@ def run_internet_check_command():
     return f"Internet looks {quality}: " + ", ".join(parts) + "."
 
 
+CONNECTION_PHRASES = {
+    "check connections",
+    "check my connections",
+    "is everything connected",
+    "are you connected",
+    "connection status",
+    "connection health",
+    "check the connections",
+    "how are your connections",
+}
+
+
+def run_connection_health_command():
+    import connection_health
+    return connection_health.spoken_report()
+
+
+SIMULATE_PATTERNS = [
+    re.compile(r"^what would happen if i (?:said|say|asked|ask you)\s+(.+)$"),
+    re.compile(r"^simulate\s+(.+)$"),
+    re.compile(r"^what would you do if i said\s+(.+)$"),
+]
+
+
+def parse_simulate_command(text):
+    normalized = _normalize_phrase(text)
+    for pattern in SIMULATE_PATTERNS:
+        match = pattern.match(normalized)
+        if match:
+            return match.group(1).strip().strip('"').strip("'")
+    return None
+
+
+def run_simulate_command(target_phrase):
+    """Command simulator — explains the action ATLAS WOULD take for a
+    phrase, without executing it. Reads from the capability registry."""
+    entry = capabilities.find_by_alias(_normalize_phrase(target_phrase))
+
+    if entry is None:
+        return (
+            f"If you said '{target_phrase}', I wouldn't recognize it as a "
+            "command, so I'd treat it as a general question and answer it."
+        )
+
+    parts = [f"If you said '{target_phrase}', I would: {entry['description']}"]
+
+    if entry["requires"] == "pc":
+        parts.append("This needs your PC")
+    elif entry["requires"] == "phone":
+        parts.append("This works from your phone")
+
+    if entry["confirm"]:
+        parts.append("and I'd ask you to confirm first before doing it")
+
+    parts.append("I wouldn't actually do it just now — you asked me to simulate")
+    return ". ".join(parts) + "."
+
+
 CAPABILITIES_PHRASES = {
     "what can you control",
     "what can you do",
@@ -3116,6 +3174,20 @@ def _handle_turn_body(model):
 
         if normalized_phrase in CAPABILITIES_PHRASES:
             answer = run_capabilities_command()
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        if normalized_phrase in CONNECTION_PHRASES:
+            set_face("thinking")
+            answer = run_connection_health_command()
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        simulate_target = parse_simulate_command(text)
+        if simulate_target is not None:
+            answer = run_simulate_command(simulate_target)
             log_qa(text, answer)
             speak(answer)
             return
