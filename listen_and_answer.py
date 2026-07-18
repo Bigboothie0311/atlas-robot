@@ -1706,6 +1706,52 @@ DIAGNOSTICS_PHRASES = {
 }
 
 # "Get the whole system healthy" — full diagnose + safe repair sweep (P1-D).
+EMERGENCY_SHUTDOWN_PHRASES = {
+    "initiate emergency shutdown",
+    "emergency shutdown",
+    "emergency shut down",
+    "initiate emergency shut down",
+    "shut everything down now",
+    "emergency power down",
+}
+
+PRINTER_EMERGENCY_PHRASES = {
+    "emergency stop the printer",
+    "emergency stop the print",
+    "emergency stop printing",
+    "halt the printer now",
+}
+
+
+def run_emergency_shutdown_command(model):
+    """Predefined emergency shutdown — requires an explicit spoken yes,
+    since it powers down the Pi."""
+    import emergency
+
+    speak(
+        "Emergency shutdown will preserve data, pause any print, and power "
+        "me down in one minute. Say yes to confirm, or no to cancel."
+    )
+    set_face("listening")
+
+    subprocess.run([
+        "arecord", "-D", MIC_DEVICE, "-f", "S16_LE", "-r", "16000",
+        "-c", "1", "-d", "4", AUDIO_PATH,
+    ], check=False)
+
+    set_face("thinking")
+    confirmation = _normalize_phrase(transcribe_audio(model))
+    words = set(confirmation.split())
+
+    if words & {"yes", "yeah", "yep", "confirm", "affirmative", "do"}:
+        steps = emergency.emergency_shutdown(dry_run=False)
+        if steps.get("shutdown_scheduled") is True:
+            return "Confirmed. Powering down in one minute. Say cancel shutdown to abort."
+        return "I preserved data and paused the printer, but couldn't schedule the shutdown."
+
+    return "Emergency shutdown cancelled. Nothing was powered down."
+
+
 CHIEF_OF_STAFF_PHRASES = {
     "what am i forgetting this week",
     "what am i forgetting",
@@ -2838,6 +2884,26 @@ def _handle_turn_body(model):
 
         if normalized_phrase in LOG_QUERY_PHRASES:
             answer = run_log_query_command()
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        if normalized_phrase in EMERGENCY_SHUTDOWN_PHRASES:
+            answer = run_emergency_shutdown_command(model)
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        if normalized_phrase == "cancel shutdown" or normalized_phrase == "abort shutdown":
+            import emergency
+            answer = "Shutdown cancelled." if emergency.cancel_shutdown() else "There's no shutdown to cancel."
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        if normalized_phrase in PRINTER_EMERGENCY_PHRASES:
+            import emergency
+            answer = "Print paused." if emergency.pause_printer() else "I couldn't reach the printer."
             log_qa(text, answer)
             speak(answer)
             return
