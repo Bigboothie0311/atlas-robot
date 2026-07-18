@@ -1850,6 +1850,32 @@ def run_internet_check_command():
     return f"Internet looks {quality}: " + ", ".join(parts) + "."
 
 
+GOODBYE_PHRASES = {
+    "i'm leaving", "im leaving", "i am leaving", "i'm heading out",
+    "im heading out", "i'm going out", "goodbye atlas", "i'm off",
+    "im off", "see you later", "i'm leaving now", "im leaving now",
+}
+
+
+def run_goodbye_routine():
+    """'I'm leaving' — shut down the PC and darken the HUD."""
+    results = []
+
+    # Darken the HUD.
+    if _set_screen_dark(True):
+        results.append("darkening the display")
+
+    # Shut down the PC if reachable.
+    if pc_control.is_configured():
+        pc_result = pc_control.shutdown_pc()
+        if "shut" in pc_result.lower() or "down" in pc_result.lower():
+            results.append("shutting down your PC")
+
+    if results:
+        return "Take care. I'm " + " and ".join(results) + "."
+    return "Take care. See you soon."
+
+
 SKY_WATCH_PHRASES = {
     "sky watch", "what's up in the sky", "whats up in the sky",
     "what's in the sky", "whats in the sky", "sky report",
@@ -3424,6 +3450,13 @@ def _handle_turn_body(model):
         if normalized_phrase in CONNECTION_PHRASES:
             set_face("thinking")
             answer = run_connection_health_command()
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        if normalized_phrase in GOODBYE_PHRASES:
+            set_face("thinking")
+            answer = run_goodbye_routine()
             log_qa(text, answer)
             speak(answer)
             return

@@ -91,7 +91,15 @@ def _update_phone_presence(online_macs, now):
                     missing_since is not None
                     and now - missing_since >= PHONE_AWAY_THRESHOLD_SECONDS
                 ):
-                    announcement = "Welcome home."
+                    # Arrival routine — greeting + pending reminders/notes.
+                    try:
+                        import routines
+                        import robot_config
+                        announcement = routines.arrival_greeting(
+                            robot_config.get("OWNER_NAME", "friend")
+                        )
+                    except Exception:
+                        announcement = "Welcome home."
 
             _phone_state["present"] = True
             _phone_state["last_seen"] = now

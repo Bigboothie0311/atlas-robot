@@ -30,6 +30,8 @@ REGISTRY = [
      "aliases": ["focus mode for 25 minutes", "end focus mode"], "confirm": False, "requires": "none", "category": "everyday"},
     {"id": "notes", "name": "notes", "description": "takes, reads back, or clears notes",
      "aliases": ["take a note...", "read my notes", "clear my notes"], "confirm": False, "requires": "none", "category": "everyday"},
+    {"id": "goodbye", "name": "arrival & goodbye", "description": "greets you when your phone returns; 'I'm leaving' shuts down the PC and darkens the HUD",
+     "aliases": ["I'm leaving", "goodbye atlas"], "confirm": False, "requires": "none", "category": "everyday"},
 
     # --- Memory & planning ------------------------------------------
     {"id": "memory", "name": "memory", "description": "remembers or forgets facts and preferences you tell it to",
