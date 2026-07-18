@@ -961,7 +961,23 @@ def _pc_dispatch(normalized):
         return pc_control.media("next")
     if normalized in MEDIA_PREV_PHRASES:
         return pc_control.media("previous")
+    if normalized in PC_HEALTH_PHRASES:
+        return pc_control.pc_health_report()
+    if normalized in PC_CLEANUP_PHRASES:
+        return pc_control.run_pc_cleanup()
     return None
+
+
+PC_HEALTH_PHRASES = {
+    "how's my pc", "hows my pc", "how is my pc", "is my pc healthy",
+    "check my pc", "check on my pc", "how's my pc doing", "hows my pc doing",
+    "pc health", "how's my computer", "hows my computer",
+}
+
+PC_CLEANUP_PHRASES = {
+    "clean up my pc", "clean up my computer", "clean my pc", "run pc cleanup",
+    "clear my pc temp files", "clean up the pc",
+}
 
 
 WOL_DIAGNOSE_PHRASES = {

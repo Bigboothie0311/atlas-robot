@@ -208,6 +208,26 @@ def act_youtube_search(body):
     return {"ok": True, "query": query}
 
 
+def act_system_info(_body):
+    """Read-only PC health: OS disk free %, CPU load %, RAM used %, and
+    uptime. PowerShell/CIM only — no changes."""
+    script = (
+        "$os=Get-CimInstance Win32_OperatingSystem; "
+        "$disk=Get-CimInstance Win32_LogicalDisk -Filter \"DeviceID='C:'\"; "
+        "$cpu=(Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average; "
+        "$ramUsed=[math]::Round(100*($os.TotalVisibleMemorySize-$os.FreePhysicalMemory)/$os.TotalVisibleMemorySize); "
+        "$diskFree=[math]::Round(100*$disk.FreeSpace/$disk.Size); "
+        "$up=(Get-Date)-$os.LastBootUpTime; "
+        "Write-Output (@{cpu=$cpu;ram_used=$ramUsed;disk_free=$diskFree;uptime_hours=[math]::Round($up.TotalHours)} | ConvertTo-Json -Compress)"
+    )
+    result = subprocess.run(["powershell", "-NoProfile", "-Command", script],
+                            capture_output=True, text=True, timeout=20)
+    try:
+        return {"ok": True, **json.loads(result.stdout.strip())}
+    except (json.JSONDecodeError, ValueError):
+        return {"ok": False, "error": "could not read system info"}
+
+
 def act_slicer_status(_body):
     import urllib.request
     try:
@@ -228,6 +248,7 @@ ACTIONS = {
     "active_apps": act_active_apps,
     "run_script": act_run_script,
     "slicer_status": act_slicer_status,
+    "system_info": act_system_info,
 }
 
 

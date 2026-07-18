@@ -194,3 +194,41 @@ def run_maintenance(script):
 def slicer_status():
     ok, data = _call("slicer_status")
     return data.get("status") if ok else data
+
+
+def pc_health_report():
+    """Read-only PC health via the companion, spoken. Flags anything that
+    crosses a safe threshold and proposes the whitelisted maintenance
+    script, but never runs it without a follow-up confirmation."""
+    ok, data = _call("system_info")
+
+    if not ok:
+        return data
+
+    cpu = data.get("cpu")
+    ram = data.get("ram_used")
+    disk_free = data.get("disk_free")
+    uptime_hours = data.get("uptime_hours")
+
+    parts = [f"Your PC's CPU is at {cpu} percent, RAM {ram} percent used, "
+             f"and {disk_free} percent disk free"]
+
+    concerns = []
+    if disk_free is not None and disk_free < 10:
+        concerns.append("disk is nearly full")
+    if uptime_hours is not None and uptime_hours > 168:
+        concerns.append(f"it's been up {uptime_hours // 24} days — a reboot might help")
+
+    if concerns:
+        parts.append("Worth noting: " + " and ".join(concerns))
+        parts.append("I can run a cleanup if you want — just say clean up my pc")
+    else:
+        parts.append("It looks healthy")
+
+    return ". ".join(parts) + "."
+
+
+def run_pc_cleanup():
+    """Runs the approved 'clear_temp' maintenance script. Only reached via
+    an explicit cleanup command — the health report proposes, this acts."""
+    return run_maintenance("clear_temp")
