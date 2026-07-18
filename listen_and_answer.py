@@ -1850,6 +1850,32 @@ def run_internet_check_command():
     return f"Internet looks {quality}: " + ", ".join(parts) + "."
 
 
+TOOL_STATUS_PHRASES = {
+    "check your tools", "check for tool updates", "what tools can you upgrade",
+    "check your versions", "what version are your tools", "check for updates",
+    "are your tools up to date",
+}
+TOOL_UPGRADE_PATTERN = re.compile(r"^(?:propose|check|upgrade) (?:an? )?(?:upgrade (?:for |to )?)?(whisper|whisper\.cpp|opencv|piper|vosk)(?: upgrade)?$")
+
+
+def run_tool_status_command():
+    import tool_manifest
+    return tool_manifest.spoken_status()
+
+
+def parse_tool_upgrade(text):
+    m = TOOL_UPGRADE_PATTERN.match(_normalize_phrase(text))
+    if not m:
+        return None
+    name = m.group(1)
+    return "whisper.cpp" if name.startswith("whisper") else name
+
+
+def run_tool_upgrade_proposal(tool):
+    import tool_manifest
+    return tool_manifest.propose(tool)
+
+
 PROFILE_PATTERN = re.compile(
     r"^(?:activate |start |switch to |enter )?(work|design|game) mode$"
 )
@@ -3350,6 +3376,21 @@ def _handle_turn_body(model):
         if normalized_phrase in CONNECTION_PHRASES:
             set_face("thinking")
             answer = run_connection_health_command()
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        if normalized_phrase in TOOL_STATUS_PHRASES:
+            set_face("thinking")
+            answer = run_tool_status_command()
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        tool_upgrade = parse_tool_upgrade(text)
+        if tool_upgrade is not None:
+            set_face("thinking")
+            answer = run_tool_upgrade_proposal(tool_upgrade)
             log_qa(text, answer)
             speak(answer)
             return
