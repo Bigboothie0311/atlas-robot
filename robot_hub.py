@@ -1244,6 +1244,20 @@ def _sentinel_should_stay_quiet():
     return _in_quiet_hours() or timers.in_focus()
 
 
+# Secure phone link — token-authed /phone/* routes (see PHONE_LINK.md).
+# Registered unconditionally; the routes themselves refuse service with
+# 503 until PHONE_TOKEN is configured, so this is inert until set up.
+try:
+    import pc_control
+    import phone_api
+
+    phone_api.register(
+        app, _speak_text, _append_qa_log, camera_gate, hud_stats, pc_control
+    )
+except Exception as _phone_error:
+    print("Phone link registration failed:", _phone_error, flush=True)
+
+
 if __name__ == "__main__":
     threading.Thread(target=proactive_watcher_loop, daemon=True).start()
     threading.Thread(

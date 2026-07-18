@@ -2228,6 +2228,65 @@ def _stream_answer_sentences(
     return full_text.strip(), total_input_tokens, total_output_tokens
 
 
+def answer_text_only(question):
+    """Non-streaming, non-spoken answer for the phone link. Same model,
+    instructions, budget guard, and memory as the voice path — just
+    returns text. Costs the same per-question tokens as a voice question
+    (on-demand only, never continuous)."""
+    usage = load_usage()
+
+    if usage["spent_usd"] + NEXT_REQUEST_RESERVE_USD > MONTHLY_LIMIT_USD:
+        raise BudgetExceeded("Monthly API budget reached.")
+
+    client = OpenAI(api_key=load_api_key(), max_retries=0, timeout=25.0)
+    instructions, max_tokens = build_instructions_and_limits()
+
+    response = client.responses.create(
+        model=MODEL_NAME,
+        reasoning={"effort": "none"},
+        instructions=instructions,
+        input=question,
+        tools=ai_tools.TOOLS,
+        max_output_tokens=max_tokens,
+    )
+
+    # Resolve a single tool call if the model made one (weather etc.).
+    function_calls = [
+        item for item in response.output
+        if getattr(item, "type", None) == "function_call"
+    ]
+
+    input_tokens = int(getattr(response.usage, "input_tokens", 0) or 0)
+    output_tokens = int(getattr(response.usage, "output_tokens", 0) or 0)
+
+    if function_calls:
+        call = function_calls[0]
+        result = ai_tools.run_tool_call(call.name, json.loads(call.arguments))
+        response = client.responses.create(
+            model=MODEL_NAME,
+            reasoning={"effort": "none"},
+            instructions=instructions,
+            previous_response_id=response.id,
+            input=[{"type": "function_call_output", "call_id": call.call_id, "output": result}],
+            tools=ai_tools.TOOLS,
+            max_output_tokens=max_tokens,
+        )
+        input_tokens += int(getattr(response.usage, "input_tokens", 0) or 0)
+        output_tokens += int(getattr(response.usage, "output_tokens", 0) or 0)
+
+    cost = input_tokens * INPUT_PRICE_PER_TOKEN + output_tokens * OUTPUT_PRICE_PER_TOKEN
+    usage["spent_usd"] += cost
+    usage["requests"] += 1
+    save_usage(usage)
+
+    answer = strip_spoken_urls(response.output_text.strip())
+
+    if answer:
+        memory_store.record_turn(question, answer)
+
+    return answer or "I couldn't generate an answer."
+
+
 def ask_and_speak_streaming(question, model):
     """Streams the model's answer and speaks each sentence as soon as it's
     ready instead of waiting for the whole answer to finish generating —
