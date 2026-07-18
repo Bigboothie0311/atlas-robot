@@ -1269,21 +1269,35 @@ def _handle_restricted_turn(text):
 
 
 NETWORK_DEVICES_PHRASES = {
-    "what devices are on the network",
-    "what devices are on my network",
     "what's on my network",
     "whats on my network",
     "what is on my network",
-    "list network devices",
-    "list the network devices",
-    "show network devices",
-    "show me the network devices",
     "who's on my network",
     "whos on my network",
     "who is on my network",
     "network devices",
     "scan the network",
 }
+
+_NETWORK_QUERY_WORDS = {"what", "list", "show", "who", "whos", "scan", "which"}
+
+
+def is_network_devices_command(normalized):
+    """Word-based match — live testing produced 'list the devices on my
+    network', a word order no exact set anticipated. A short utterance
+    mentioning the network plus devices plus a query verb is unambiguous."""
+    if normalized in NETWORK_DEVICES_PHRASES:
+        return True
+
+    words = set(normalized.split())
+
+    if "network" not in words and "lan" not in words:
+        return False
+
+    has_devices = bool(words & {"devices", "device"})
+    has_query = bool(words & _NETWORK_QUERY_WORDS)
+
+    return has_devices and has_query and len(normalized.split()) <= 8
 
 
 def run_network_devices_command():
@@ -2372,7 +2386,7 @@ def handle_turn(model):
             speak(answer)
             return
 
-        if normalized_phrase in NETWORK_DEVICES_PHRASES:
+        if is_network_devices_command(normalized_phrase):
             answer = run_network_devices_command()
             log_qa(text, answer)
             speak(answer)
