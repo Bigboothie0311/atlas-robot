@@ -178,6 +178,36 @@ def act_run_script(body):
     return {"ok": True, "script": name, "exit_code": result.returncode}
 
 
+def act_youtube_search(body):
+    """Opens the default browser to a YouTube search, biased toward longer
+    tutorial videos (filters out Shorts), and full-screens it. Only builds
+    a youtube.com search URL from the query — never an arbitrary URL."""
+    import urllib.parse
+
+    query = str(body.get("query", "")).strip()
+
+    if not query:
+        return {"ok": False, "error": "empty query"}
+
+    # sp=EgIYAg%3D%3D = YouTube's "Duration: 20+ minutes" filter, which
+    # excludes Shorts and favors full walkthroughs.
+    encoded = urllib.parse.quote(query)
+    url = f"https://www.youtube.com/results?search_query={encoded}&sp=EgIYAg%3D%3D"
+
+    subprocess.Popen(["cmd", "/c", "start", "", url], shell=False)
+
+    if body.get("fullscreen", True):
+        # Give the browser a moment to open, then send F11.
+        script = (
+            "Start-Sleep -Seconds 3; "
+            "$w = New-Object -ComObject WScript.Shell; "
+            "$w.SendKeys('{F11}')"
+        )
+        subprocess.Popen(["powershell", "-NoProfile", "-Command", script])
+
+    return {"ok": True, "query": query}
+
+
 def act_slicer_status(_body):
     import urllib.request
     try:

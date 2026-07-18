@@ -914,6 +914,30 @@ MEDIA_NEXT_PHRASES = {"next track", "skip this song", "next song", "skip track",
 MEDIA_PREV_PHRASES = {"previous track", "last song", "previous song", "go back a track"}
 
 
+PC_SEARCH_PATTERNS = [
+    re.compile(r"^find me videos? (?:showing |about |on |of )?(?:how to )?(.+)$"),
+    re.compile(r"^(?:search|look) (?:for |up )?(?:videos? |youtube )(?:for |about |on )?(.+)$"),
+    re.compile(r"^search youtube for (.+)$"),
+    re.compile(r"^show me (?:videos?|tutorials?|walkthroughs?) (?:showing |about |on |for |of )?(?:how to )?(.+)$"),
+    re.compile(r"^pull up (?:a )?(?:youtube |video )(?:tutorial |search )?(?:for |about |on )?(.+)$"),
+]
+
+
+def parse_pc_search_command(text):
+    """Returns the search subject for a 'find me videos ...' request that
+    should run on the PC's browser, else None."""
+    normalized = _normalize_phrase(text)
+
+    for pattern in PC_SEARCH_PATTERNS:
+        match = pattern.match(normalized)
+
+        if match:
+            subject = match.group(1).strip()
+            return subject or None
+
+    return None
+
+
 def _pc_dispatch(normalized):
     """Returns a spoken answer for a PC-control phrase, or None if the
     phrase isn't a PC command."""
@@ -2543,6 +2567,15 @@ def _handle_turn_body(model):
             return
 
         normalized_phrase = _normalize_phrase(text)
+
+        pc_search = parse_pc_search_command(text)
+
+        if pc_search is not None:
+            set_face("thinking")
+            answer = pc_control.youtube_search(pc_search)
+            log_qa(text, answer)
+            speak(answer)
+            return
 
         pc_answer = _pc_dispatch(normalized_phrase)
 

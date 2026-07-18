@@ -150,6 +150,38 @@ def _push_image_to_hud(image_b64, caption):
         return "I got the image but couldn't display it."
 
 
+def youtube_search(query):
+    """Opens a YouTube search on the PC (long tutorials, no Shorts) and
+    full-screens it. Wakes the PC first if the companion isn't reachable.
+    Returns spoken text."""
+    import time
+
+    import pc_power
+
+    if not is_configured():
+        return "The PC companion isn't set up yet, so I can't drive the browser."
+
+    if not pc_reachable():
+        # Try to wake it, then wait for the companion to come up.
+        pc_power.send_wake_packet()
+        for _ in range(12):
+            time.sleep(5)
+            if pc_reachable():
+                break
+        else:
+            return (
+                "I couldn't reach your PC to run the search. It may be off, "
+                "and wake-on-LAN isn't working through the current adapter."
+            )
+
+    ok, data = _call("youtube_search", {"query": query, "fullscreen": True})
+
+    if not ok:
+        return data
+
+    return "I found several walkthroughs. Results are ready on your PC."
+
+
 def run_maintenance(script):
     ok, data = _call("run_script", {"script": script}, timeout=130)
 
