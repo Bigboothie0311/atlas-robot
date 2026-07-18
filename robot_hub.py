@@ -503,6 +503,36 @@ def show_image():
     })
 
 
+@app.post("/show_local_image")
+def show_local_image():
+    """Displays an image already on this Pi's filesystem (e.g. a PC
+    screenshot the companion sent, decoded locally). Restricted to /tmp to
+    avoid serving arbitrary paths."""
+    global image_until
+
+    data = request.get_json(silent=True) or {}
+    path = str(data.get("path", "")).strip()
+    caption = str(data.get("caption", "")).strip() or None
+
+    try:
+        duration = float(data.get("duration", IMAGE_DEFAULT_DURATION))
+    except (TypeError, ValueError):
+        duration = IMAGE_DEFAULT_DURATION
+
+    duration = max(IMAGE_MIN_DURATION, min(IMAGE_MAX_DURATION, duration))
+
+    if not path.startswith("/tmp/") or not os.path.exists(path):
+        return jsonify({"ok": False, "error": "path must be an existing /tmp file"}), 400
+
+    with state_lock:
+        clear_gallery_state_locked()
+        robot_state["image_path"] = path
+        robot_state["image_caption"] = caption
+        image_until = time.time() + duration
+
+    return jsonify({"ok": True, "duration": duration})
+
+
 @app.post("/show_images")
 def show_images():
     global gallery_until

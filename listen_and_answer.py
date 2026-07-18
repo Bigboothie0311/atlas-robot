@@ -21,6 +21,7 @@ import camera_gate
 import diagnostics
 import hud_stats
 import logbook
+import pc_control
 import memory_store
 import web_search
 import wake_detection
@@ -875,6 +876,69 @@ def _normalize_phrase(text):
 # Local voice commands: PC power, timers, focus mode, notes, briefings.
 # All zero-token — parsed here, executed via the hub or local files.
 # ---------------------------------------------------------------------
+
+# ---------------------------------------------------------------------
+# PC control via the Windows companion (P2-A). All degrade gracefully
+# when the companion isn't configured/reachable.
+# ---------------------------------------------------------------------
+
+OPEN_FUSION_PHRASES = {
+    "open fusion", "open fusion 360", "launch fusion", "start fusion",
+    "open fusion three sixty",
+}
+
+PC_APPS_PHRASES = {
+    "what's open on my pc", "whats open on my pc", "what is open on my pc",
+    "what's running on my pc", "whats running on my pc",
+    "what apps are open", "what's on my pc", "whats on my pc",
+}
+
+PC_SCREENSHOT_PHRASES = {
+    "show me my pc screen", "show my pc screen", "what's on my pc screen",
+    "whats on my pc screen", "screenshot my pc", "take a screenshot of my pc",
+    "show me what's on my computer", "capture my pc screen",
+}
+
+NEWEST_SCREENSHOT_PHRASES = {
+    "show me the newest screenshot", "show my newest screenshot",
+    "show me the latest screenshot", "show me my last screenshot",
+    "show me the newest reference", "show me my reference",
+    "pull up my newest screenshot",
+}
+
+VOLUME_UP_PHRASES = {"volume up", "turn up the volume", "turn up my pc volume", "louder"}
+VOLUME_DOWN_PHRASES = {"volume down", "turn down the volume", "turn down my pc volume", "quieter"}
+VOLUME_MUTE_PHRASES = {"mute", "mute my pc", "mute the volume", "unmute", "unmute my pc"}
+MEDIA_PLAY_PHRASES = {"play", "pause", "play pause", "pause my music", "play my music", "resume my music"}
+MEDIA_NEXT_PHRASES = {"next track", "skip this song", "next song", "skip track", "skip"}
+MEDIA_PREV_PHRASES = {"previous track", "last song", "previous song", "go back a track"}
+
+
+def _pc_dispatch(normalized):
+    """Returns a spoken answer for a PC-control phrase, or None if the
+    phrase isn't a PC command."""
+    if normalized in OPEN_FUSION_PHRASES:
+        return pc_control.open_fusion()
+    if normalized in PC_APPS_PHRASES:
+        return pc_control.active_apps()
+    if normalized in PC_SCREENSHOT_PHRASES:
+        return pc_control.screenshot_to_hud()
+    if normalized in NEWEST_SCREENSHOT_PHRASES:
+        return pc_control.newest_screenshot_to_hud()
+    if normalized in VOLUME_UP_PHRASES:
+        return pc_control.set_volume("up")
+    if normalized in VOLUME_DOWN_PHRASES:
+        return pc_control.set_volume("down")
+    if normalized in VOLUME_MUTE_PHRASES:
+        return pc_control.set_volume("mute")
+    if normalized in MEDIA_PLAY_PHRASES:
+        return pc_control.media("playpause")
+    if normalized in MEDIA_NEXT_PHRASES:
+        return pc_control.media("next")
+    if normalized in MEDIA_PREV_PHRASES:
+        return pc_control.media("previous")
+    return None
+
 
 WOL_DIAGNOSE_PHRASES = {
     "why won't my pc wake",
@@ -2479,6 +2543,13 @@ def _handle_turn_body(model):
             return
 
         normalized_phrase = _normalize_phrase(text)
+
+        pc_answer = _pc_dispatch(normalized_phrase)
+
+        if pc_answer is not None:
+            log_qa(text, pc_answer)
+            speak(pc_answer)
+            return
 
         if normalized_phrase in WOL_DIAGNOSE_PHRASES:
             answer = run_wol_diagnose_command()
