@@ -3266,6 +3266,29 @@ def _handle_turn_body(model):
 
         normalized_phrase = _normalize_phrase(text)
 
+        # Easter eggs: count the command (achievements) and intercept any
+        # secret phrase. Both are cosmetic and zero-token.
+        try:
+            import easter_eggs
+            _unlock_line = easter_eggs.on_command(normalized_phrase)
+            if _unlock_line:
+                speak(_unlock_line)
+
+            if normalized_phrase in {"list my achievements", "what have i unlocked",
+                                     "my achievements", "what achievements do i have"}:
+                answer = easter_eggs.list_achievements()
+                log_qa(text, answer)
+                speak(answer)
+                return
+
+            _secret = easter_eggs.check_secret(normalized_phrase)
+            if _secret is not None:
+                log_qa(text, _secret)
+                speak(_secret)
+                return
+        except Exception as _egg_error:
+            print("easter egg error:", _egg_error, flush=True)
+
         if normalized_phrase in SPEECH_DIAGNOSTIC_PHRASES:
             answer = speech_repair.previous_report()
             log_qa(text, answer)
