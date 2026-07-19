@@ -16,6 +16,10 @@ spoken version of this list.
 | "remind me in twenty minutes to…" | Spoken reminder | Local |
 | "focus mode" / "focus mode for 45 minutes" / "end focus mode" | Dim HUD, mute nudges | Local |
 | "take a note …" / "read my notes" / "clear my notes" | Notes | Local |
+| "add milk to my shopping list" / "what's on my shopping list" / "remove milk from my shopping list" / "clear my shopping list" | Shopping list | Local |
+| "flip a coin" / "roll a die" / "roll two dice" / "roll a d20" | Coin flip & dice roll | Local |
+| "convert 10 miles to kilometers" / "what's 100 fahrenheit in celsius" | Unit conversion (temperature, distance, weight) | Local |
+| "how many days until christmas" / "how many days until march 5th" | Countdown to a date or holiday | Local |
 | "I'm leaving" / "goodbye atlas" | Darkens HUD, shuts down PC, arms face gate | Local (+PC) |
 
 ## Memory & planning
@@ -52,13 +56,21 @@ spoken version of this list.
 > An unrecognized face re-triggers verification every wake until you clear
 > it.
 
+> **Same capabilities everywhere:** diagnostics, self-heal, system health,
+> connection checks, storage, recent errors, tool status, and "what can you
+> control" are also available as a direct model tool call
+> (`run_atlas_diagnostic_or_repair`), so they work from any surface — voice
+> fallback or the phone link — even when your exact phrasing doesn't match
+> one of the trigger phrases above. You should no longer hear "I don't have
+> access to that" for anything on this list.
+
 ## Diagnostics & self
 | Say | Does | Cost |
 |-----|------|------|
 | "status report" / "sitrep" | Cinematic full system + security readout | Local |
 | "run diagnostics" / "system check" | Service/sensor/budget self-check | Local |
 | "check connections" / "is everything connected" | Wi-Fi, PC link, companion, Tailscale | Local |
-| "heal yourself" / "self heal" | Detect + safely repair failures, report | Local |
+| "heal yourself" / "self heal" | Detect + safely repair failures, report; also rebuilds/redownloads the Whisper binary or model from their own vendored build/download scripts if missing, and flags recent phrases it misrouted to the model | Local |
 | "get the whole system healthy" | Full diagnose → repair → backup → report | Local |
 | "what went wrong" / "any recent errors" | Answers from the persistent log | Local |
 | "how's the internet" | Ping + DNS timing | Local |
@@ -73,6 +85,19 @@ spoken version of this list.
 |-----|------|------|
 | "when I say X I mean Y" | Teach a persistent alias (safe targets only) | Local |
 | (automatic) "Did you mean X?" | One-shot clarify on a mis-hear, before the model | Local |
+
+## Macros — teach your own commands
+| Say | Does | Cost |
+|-----|------|------|
+| "when I say X do Y" · "when I say X you should Y" · "if I say X then Y" · "teach you that X means Y" | Teaches a phrase that replays one or more existing commands | Local |
+| "…do Y and then Z" | Chains up to 5 actions per macro | Local |
+| "list my macros" / "what commands have I taught you" | Lists everything you've taught | Local |
+| "forget the macro X" / "unlearn X" | Removes a taught macro | Local |
+
+> Macros replay real commands — they can't teach brand-new behavior, and
+> teaching over an existing built-in phrase (like "flip a coin") is refused
+> so you can't accidentally shadow it. A macro that loops back on itself
+> (directly or through another macro) is stopped after one hop.
 
 ## HUD & screen
 | Say | Does | Cost |

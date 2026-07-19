@@ -1,8 +1,8 @@
 """Authorized-user camera gate.
 
-The camera runs ONLY on activation — a wake-up whose last successful
-verification is older than the validity window triggers one burst-capture-
-and-verify pass; nothing streams continuously. Recognition is fully local
+The camera runs ONLY on activation — a wake-up after the authorized owner
+has been inactive for the validity window triggers one burst-capture-and-
+verify pass; nothing streams continuously. Recognition is fully local
 (OpenCV LBPH, zero tokens): the owner enrolls via "learn my face", crops
 live in data/faces/authorized/, the trained model in data/face_model.yml.
 
@@ -56,11 +56,11 @@ VERIFIED_CAPTURE_PATH = DATA_DIR / "last_verified.jpg"
 VALIDITY_WINDOW_SECONDS = 60 * 60  # 1 hour (was 10 min)
 
 # LBPH distance — LOWER is more similar. Accept below this.
-LBPH_ACCEPT_THRESHOLD = 70.0
+LBPH_ACCEPT_THRESHOLD = 85.0
 # A handful of much stronger matches can also authorize even when the owner
 # looks away during the latter part of the burst. This is deliberately far
 # stricter than the normal threshold and still requires several frames.
-LBPH_STRONG_THRESHOLD = 55.0
+LBPH_STRONG_THRESHOLD = 70.0
 
 # Enrollment deliberately pauses at several small pose changes. The old
 # implementation captured 20 consecutive frames while the owner held still,
@@ -146,8 +146,25 @@ def set_enabled(enabled):
     _save_state({"enabled": bool(enabled)})
 
 
+def _latest_trusted_at(state):
+    """Most recent successful face check or gated owner interaction."""
+    try:
+        verified_at = float(state.get("last_verified_at", 0.0))
+    except (TypeError, ValueError):
+        verified_at = 0.0
+
+    try:
+        interaction_at = float(
+            state.get("last_authorized_interaction_at", 0.0)
+        )
+    except (TypeError, ValueError):
+        interaction_at = 0.0
+
+    return max(verified_at, interaction_at)
+
+
 def is_verification_current():
-    last = float(_load_state().get("last_verified_at", 0.0))
+    last = _latest_trusted_at(_load_state())
     return time.time() - last < VALIDITY_WINDOW_SECONDS
 
 
@@ -160,29 +177,53 @@ def arm_gate(reason="departure"):
 def should_verify():
     """Decides whether this wake needs a face check. The gate stays quiet
     (trusts the last auth) UNLESS:
-      - a departure armed it ('I'm leaving' / phone left), or
-      - it's been over an hour since the last successful auth, or
+      - a departure armed it ('I'm leaving' / phone gone from the LAN for
+        more than PHONE_GRACE_SECONDS — see network_sentinel.py), or
       - the last face seen was unauthorized and no authorized user has
         cleared it yet — in that case it re-checks EVERY wake until an
-        authorized user appears (or the stranger stops trying)."""
+        authorized user appears (or the stranger stops trying).
+
+    Being home does not expire trust on its own; only a real departure
+    (or a pending unauthorized face) re-arms the check."""
     state = _load_state()
 
     if state.get("pending_unauthorized"):
         return True
-    if state.get("armed"):
-        return True
-    return not is_verification_current()
+    return bool(state.get("armed"))
 
 
 def mark_verified():
-    """An authorized user is present — reset the window and clear both the
-    departure arm and any pending-unauthorized state."""
+    """An authorized user is present — start a fresh trusted session."""
+    now = time.time()
     _save_state({
-        "last_verified_at": time.time(),
+        "last_verified_at": now,
+        "last_authorized_interaction_at": now,
         "armed": False,
         "armed_reason": None,
         "pending_unauthorized": False,
     })
+
+
+def mark_authorized_interaction():
+    """Slides the idle window after a real prompt in a trusted session.
+
+    Returns False without writing if the gate is armed, an unauthorized
+    face is pending, or the prior trusted session has already expired.
+    This prevents disabled/unavailable-gate activity from creating trust.
+    """
+    state = _load_state()
+
+    if state.get("armed") or state.get("pending_unauthorized"):
+        return False
+
+    last = _latest_trusted_at(state)
+    now = time.time()
+
+    if last <= 0 or now - last >= VALIDITY_WINDOW_SECONDS:
+        return False
+
+    _save_state({"last_authorized_interaction_at": now})
+    return True
 
 
 def mark_unauthorized():
@@ -714,6 +755,36 @@ def mark_intruders_reviewed():
         record["reviewed"] = True
 
     _save_intruder_log(records)
+
+
+def dismiss_intruder_alerts():
+    """Clears the pending alert without a visual review: deletes each open
+    record's photo and marks it reviewed. The log entry itself is kept
+    (timestamp and denied commands), so the intruder report survives — only
+    the alert and the photographs go away. Returns the number cleared."""
+    records = _load_intruder_log()
+    cleared = 0
+
+    for record in records:
+        if record.get("reviewed"):
+            continue
+
+        photo = Path(record.get("photo") or "")
+
+        if photo and photo.exists():
+            try:
+                photo.unlink()
+            except OSError:
+                pass
+
+        record["photo"] = None
+        record["reviewed"] = True
+        cleared += 1
+
+    if cleared:
+        _save_intruder_log(records)
+
+    return cleared
 
 
 def hud_status():

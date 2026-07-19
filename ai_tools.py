@@ -73,6 +73,37 @@ TOOLS = [
         "strict": True,
     },
     {"type": "web_search"},
+    {
+        "type": "function",
+        "name": "run_atlas_diagnostic_or_repair",
+        "description": (
+            "Runs one of Atlas's own real local diagnostic, health-check, "
+            "or self-repair capabilities and returns what actually "
+            "happened. Use this whenever the user asks Atlas to check its "
+            "health, run diagnostics, heal or repair itself, check its "
+            "connections, check storage, review recent errors, check its "
+            "tool versions, or list what it can do — these are real "
+            "capabilities available here, in every conversation, so call "
+            "this instead of saying you don't have access to them."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "capability": {
+                    "type": "string",
+                    "enum": [
+                        "diagnostics", "self_heal", "system_health", "connections",
+                        "status_report", "storage", "log_query", "internet_check",
+                        "capabilities", "tool_status",
+                    ],
+                    "description": "Which capability to run.",
+                },
+            },
+            "required": ["capability"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
 ]
 
 
@@ -186,5 +217,11 @@ def get_weather(location, day):
 def run_tool_call(name, arguments):
     if name == "get_weather":
         return get_weather(arguments.get("location"), arguments.get("day"))
+
+    if name == "run_atlas_diagnostic_or_repair":
+        # Lazy import: listen_and_answer imports this module at load time,
+        # so importing it back at module scope here would be circular.
+        import listen_and_answer
+        return listen_and_answer.run_diagnostic_capability(arguments.get("capability"))
 
     return f"Unknown tool: {name}"

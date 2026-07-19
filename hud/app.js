@@ -614,6 +614,156 @@ function applyHeadlines(headlines) {
   renderHeadlinePage();
 }
 
+// --- Full-screen weather + radar survey -----------------------------
+// A dedicated overlay (separate from the always-on weather panel) with
+// current conditions, a live NWS radar loop, and hourly/multi-day rain
+// outlook. Data comes from /hud/weather; the overlay only polls while it
+// is open, and the radar GIF is cache-busted on each refresh so the loop
+// stays current on a long-running kiosk.
+const WEATHER_OVERLAY_REFRESH_MS = 10 * 60 * 1000;
+// Rain probability at/above this tips a bar or day amber — the umbrella cue.
+const WET_THRESHOLD = 50;
+
+let weatherOverlayTimer = null;
+
+async function loadWeatherOverlay() {
+  try {
+    const response = await fetch("/hud/weather");
+    const data = await response.json();
+    renderWeatherOverlay(data);
+  } catch (error) {
+    console.error("weather overlay load failed", error);
+  }
+}
+
+function renderWeatherOverlay(data) {
+  const overlay = document.getElementById("weather-overlay");
+  overlay.classList.toggle("stale", Boolean(data.stale));
+
+  document.getElementById("weather-screen-city").textContent =
+    (data.city || "--").toUpperCase();
+
+  const current = data.current || {};
+  document.getElementById("weather-screen-temp").textContent =
+    current.temp_f !== null && current.temp_f !== undefined ? `${current.temp_f}°` : "--°";
+  document.getElementById("weather-screen-cond").textContent =
+    current.condition || "--";
+  document.getElementById("weather-screen-humidity").textContent =
+    current.humidity !== null && current.humidity !== undefined ? `${current.humidity}%` : "--%";
+  document.getElementById("weather-screen-wind").textContent =
+    current.wind_mph !== null && current.wind_mph !== undefined ? `${current.wind_mph} MPH` : "-- MPH";
+  document.getElementById("weather-screen-precip").textContent =
+    current.precip !== null && current.precip !== undefined ? `${current.precip} IN` : "-- IN";
+
+  renderWeatherHourly(data.hourly || []);
+  renderWeatherDaily(data.daily || []);
+
+  const radar = document.getElementById("weather-radar-img");
+  if (data.radar_loop_url) {
+    const sep = data.radar_loop_url.includes("?") ? "&" : "?";
+    radar.src = `${data.radar_loop_url}${sep}t=${Date.now()}`;
+  }
+}
+
+function renderWeatherHourly(hourly) {
+  const container = document.getElementById("weather-hourly");
+  container.innerHTML = "";
+
+  for (const hour of hourly) {
+    const chance = hour.precip_chance ?? 0;
+    const cell = document.createElement("div");
+    cell.className = chance >= WET_THRESHOLD ? "weather-hour wet" : "weather-hour";
+
+    const precip = document.createElement("div");
+    precip.className = "weather-hour-precip";
+    precip.textContent = `${chance}%`;
+
+    const track = document.createElement("div");
+    track.className = "weather-hour-bar-track";
+    const bar = document.createElement("div");
+    bar.className = "weather-hour-bar";
+    bar.style.height = `${chance}%`;
+    track.appendChild(bar);
+
+    const temp = document.createElement("div");
+    temp.className = "weather-hour-temp";
+    temp.textContent = hour.temp_f !== null && hour.temp_f !== undefined ? `${hour.temp_f}°` : "--";
+
+    const label = document.createElement("div");
+    label.className = "weather-hour-label";
+    label.textContent = hour.label || "";
+
+    cell.append(precip, track, temp, label);
+    container.appendChild(cell);
+  }
+}
+
+function renderWeatherDaily(daily) {
+  const container = document.getElementById("weather-daily");
+  container.innerHTML = "";
+
+  for (const day of daily) {
+    const chance = day.precip_chance ?? 0;
+    const row = document.createElement("div");
+    row.className = chance >= WET_THRESHOLD ? "weather-day wet" : "weather-day";
+
+    const label = document.createElement("div");
+    label.className = "weather-day-label";
+    label.textContent = day.label || "--";
+
+    const cond = document.createElement("div");
+    cond.className = "weather-day-cond";
+    cond.textContent = day.condition || "";
+
+    const precip = document.createElement("div");
+    precip.className = "weather-day-precip";
+    precip.textContent = `${chance}%`;
+
+    const range = document.createElement("div");
+    range.className = "weather-day-range";
+    const hi = day.high_f ?? "--";
+    const lo = day.low_f ?? "--";
+    range.innerHTML = `${hi}° <span class="lo">${lo}°</span>`;
+
+    row.append(label, cond, precip, range);
+    container.appendChild(row);
+  }
+}
+
+function isWeatherOverlayOpen() {
+  return document.getElementById("weather-overlay").classList.contains("visible");
+}
+
+function openWeatherOverlay() {
+  document.getElementById("weather-overlay").classList.add("visible");
+  loadWeatherOverlay();
+  clearInterval(weatherOverlayTimer);
+  weatherOverlayTimer = setInterval(loadWeatherOverlay, WEATHER_OVERLAY_REFRESH_MS);
+}
+
+function closeWeatherOverlay() {
+  document.getElementById("weather-overlay").classList.remove("visible");
+  clearInterval(weatherOverlayTimer);
+  weatherOverlayTimer = null;
+}
+
+function toggleWeatherOverlay() {
+  if (isWeatherOverlayOpen()) {
+    closeWeatherOverlay();
+  } else {
+    openWeatherOverlay();
+  }
+}
+
+window.addEventListener("keydown", (event) => {
+  const key = event.key.toLowerCase();
+  if (key === "w") {
+    toggleWeatherOverlay();
+  } else if (key === "escape" && isWeatherOverlayOpen()) {
+    closeWeatherOverlay();
+  }
+});
+
 updateClock();
 setInterval(updateClock, 1000);
 

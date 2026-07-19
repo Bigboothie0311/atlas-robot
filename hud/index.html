@@ -135,6 +135,49 @@
     <div id="gallery-grid"></div>
   </div>
 
+  <div id="weather-overlay">
+    <div id="weather-screen">
+      <div id="weather-screen-head">
+        <div class="weather-screen-title">METEOROLOGICAL SURVEY</div>
+        <div class="weather-screen-loc">
+          <span id="weather-screen-city">--</span>
+          <span class="weather-screen-code">ENV&middot;RADAR</span>
+        </div>
+      </div>
+
+      <div id="weather-screen-body">
+        <div id="weather-current-col">
+          <div class="weather-current-temp" id="weather-screen-temp">--&deg;</div>
+          <div class="weather-current-cond" id="weather-screen-cond">--</div>
+          <div class="weather-current-meta">
+            <div><span class="wm-label">HUMIDITY</span><span id="weather-screen-humidity">--%</span></div>
+            <div><span class="wm-label">WIND</span><span id="weather-screen-wind">-- MPH</span></div>
+            <div><span class="wm-label">PRECIP NOW</span><span id="weather-screen-precip">-- IN</span></div>
+          </div>
+          <div class="weather-stale-flag" id="weather-screen-stale">DATA STALE &middot; LINK DOWN</div>
+        </div>
+
+        <div id="weather-radar-col">
+          <div class="weather-panel-label">LIVE RADAR<span class="weather-screen-code">RDR&middot;01</span></div>
+          <div id="weather-radar-frame">
+            <img id="weather-radar-img" alt="Live weather radar loop">
+            <div id="weather-radar-scan"></div>
+          </div>
+          <div class="weather-radar-cap">NWS RIDGE COMPOSITE &middot; ANIMATED LOOP</div>
+        </div>
+
+        <div id="weather-forecast-col">
+          <div class="weather-panel-label">RAIN &amp; HOURLY OUTLOOK<span class="weather-screen-code">FCT&middot;02</span></div>
+          <div id="weather-hourly"></div>
+          <div class="weather-panel-label">MULTI-DAY<span class="weather-screen-code">FCT&middot;03</span></div>
+          <div id="weather-daily"></div>
+        </div>
+      </div>
+
+      <div id="weather-screen-foot">ESC / W &middot; RETURN TO CORE</div>
+    </div>
+  </div>
+
   <script src="/hud/static/app.js"></script>
 </body>
 </html>

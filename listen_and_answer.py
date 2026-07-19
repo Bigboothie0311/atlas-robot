@@ -19,13 +19,19 @@ import ai_tools
 import briefing
 import camera_gate
 import capabilities
+import chance
+import countdown
 import diagnostics
 import hud_stats
+import interaction_control
 import logbook
+import macros
 import pc_control
 import pc_power
 import memory_store
 import speech_repair
+import stream_resilience
+import unit_convert
 import web_search
 import wake_detection
 
@@ -151,6 +157,34 @@ def speak(text):
         timeout=45
     )
     response.raise_for_status()
+
+
+def cue_listening():
+    """Plays the short system-ready earcon, with speech as a fallback."""
+    try:
+        response = requests.post(f"{HUB}/listening_earcon", timeout=3)
+        response.raise_for_status()
+    except requests.RequestException as error:
+        print("Listening earcon failed; using voice cue:", error, flush=True)
+        speak("Go ahead.")
+
+
+def dismiss_current_interaction():
+    """Silently stops harmless output and restores the idle HUD.
+
+    This deliberately does not cancel timers, disarm security, clear
+    intruder evidence, stop services, or change configuration.
+    """
+    for endpoint in ("/interrupt", "/dismiss"):
+        try:
+            response = requests.post(f"{HUB}{endpoint}", timeout=3)
+            response.raise_for_status()
+        except requests.RequestException as error:
+            print(
+                f"Interaction dismissal failed at {endpoint}:",
+                error,
+                flush=True,
+            )
 
 
 def listen_for_barge_in(model, stop_event):
@@ -289,7 +323,20 @@ RECORD_SILENCE_TIMEOUT = 2.0
 # Matches wake_listener.py's MIN_UTTERANCE_RMS — same mic, same room, already
 # tuned to separate real speech from ambient noise on this hardware.
 RECORD_MIN_SPEECH_RMS = 220
+# The room can sit above that fixed floor, which previously made every turn
+# hit the full eight-second cap. After real speech creates a much higher peak,
+# treat audio below this fraction of that peak as trailing silence. The cap
+# prevents a single loud click from making normal speech look silent.
+RECORD_SILENCE_PEAK_RATIO = 0.25
+RECORD_MAX_SILENCE_RMS = 900
 RECORD_CHUNK_BYTES = 4000
+
+
+def _recording_speech_threshold(peak_rms):
+    return min(
+        RECORD_MAX_SILENCE_RMS,
+        max(RECORD_MIN_SPEECH_RMS, peak_rms * RECORD_SILENCE_PEAK_RATIO),
+    )
 
 
 def record_audio():
@@ -331,8 +378,9 @@ def record_audio():
             )
             peak_rms = max(peak_rms, rms)
             chunk_seconds = len(chunk) / 2 / 16000
+            speech_threshold = _recording_speech_threshold(peak_rms)
 
-            if rms >= RECORD_MIN_SPEECH_RMS:
+            if rms >= speech_threshold:
                 speech_started = True
                 silence_since_speech = 0.0
             elif speech_started:
@@ -360,6 +408,14 @@ def record_audio():
 
     global _last_audio_rms
     _last_audio_rms = round(peak_rms)
+
+    captured_seconds = sum(len(chunk) for chunk in chunks) / 2 / 16000
+    print(
+        f"Captured {captured_seconds:.2f}s of command audio; "
+        f"peak_rms={peak_rms:.0f}; "
+        f"silence_threshold={_recording_speech_threshold(peak_rms):.0f}",
+        flush=True,
+    )
 
 
 # Set by record_audio each turn so the logbook can capture the mic level
@@ -409,18 +465,8 @@ def _transcribe_with_whisper():
         return ""
 
 
-def transcribe_audio(model):
-    global _last_transcription_alternatives
-
-    whisper_text = _transcribe_with_whisper()
-
-    if whisper_text:
-        _last_transcription_alternatives = [whisper_text]
-        print("Whisper heard:", whisper_text, flush=True)
-        return whisper_text
-
-    print("Whisper unavailable; falling back to Vosk.", flush=True)
-
+def _transcribe_with_vosk(model):
+    """Fast in-memory transcription used before spawning Whisper."""
     with wave.open(AUDIO_PATH, "rb") as audio:
         recognizer = KaldiRecognizer(model, audio.getframerate())
         recognizer.SetMaxAlternatives(5)
@@ -438,15 +484,61 @@ def transcribe_audio(model):
 
     for alternative in result.get("alternatives", []):
         candidate = str(alternative.get("text", "")).strip()
+
         if candidate and candidate not in alternatives:
             alternatives.append(candidate)
 
     primary = str(result.get("text", "")).strip()
+
     if primary and primary not in alternatives:
         alternatives.insert(0, primary)
 
-    _last_transcription_alternatives = alternatives
-    return alternatives[0] if alternatives else ""
+    return alternatives
+
+
+VOSK_FAST_PATH_INTENTS = frozenset({
+    "instant",
+    "storage",
+    "diagnostics",
+})
+
+
+def _is_safe_vosk_fast_path(text):
+    """Only bypasses Whisper for harmless deterministic local actions."""
+    normalized = _normalize_phrase(text)
+    return (
+        interaction_control.is_safe_cancel_phrase(normalized)
+        or _classify_intent(normalized) in VOSK_FAST_PATH_INTENTS
+    )
+
+
+def transcribe_audio(model):
+    global _last_transcription_alternatives
+
+    vosk_alternatives = _transcribe_with_vosk(model)
+    vosk_text = vosk_alternatives[0] if vosk_alternatives else ""
+
+    if vosk_text and _is_safe_vosk_fast_path(vosk_text):
+        _last_transcription_alternatives = vosk_alternatives
+        print("Vosk fast path heard:", vosk_text, flush=True)
+        return vosk_text
+
+    whisper_text = _transcribe_with_whisper()
+
+    if whisper_text:
+        _last_transcription_alternatives = [
+            whisper_text,
+            *(
+                candidate for candidate in vosk_alternatives
+                if candidate != whisper_text
+            ),
+        ]
+        print("Whisper heard:", whisper_text, flush=True)
+        return whisper_text
+
+    print("Whisper unavailable; falling back to Vosk.", flush=True)
+    _last_transcription_alternatives = vosk_alternatives
+    return vosk_text
 
 
 
@@ -1468,6 +1560,29 @@ def is_intruder_query(normalized):
     return False
 
 
+_CLEAR_INTRUDER_VERBS = {"clear", "dismiss", "scrub", "wipe", "reset", "clean"}
+
+
+def is_clear_intruder_alerts_command(normalized):
+    """Owner shortcut to clear the pending intruder alert without sitting
+    through the photo-by-photo review: 'clear intruder alerts', 'dismiss
+    the intruder alert', 'clear security alerts'. Deletes the photographs
+    and marks the records reviewed, but keeps the log entries so the
+    intruder report is still available on request.
+
+    Must be checked before is_intruder_query(), which also matches the
+    word 'intruder' and would otherwise trigger the full review."""
+    words = set(normalized.split())
+
+    if not (words & _CLEAR_INTRUDER_VERBS):
+        return False
+
+    if len(normalized.split()) > 6:
+        return False
+
+    return bool(words & {"intruder", "intruders", "alert", "alerts"})
+
+
 def run_enroll_face_command():
     """Guided seven-pose enrollment with a transactional model update.
     Re-enrollment on an existing model remains owner-only in the voice
@@ -1561,10 +1676,42 @@ def run_intruder_query_command():
     return "That's everyone. The alert is cleared."
 
 
+def run_clear_intruder_alerts_command():
+    """Clears the pending intruder alert without the visual review: deletes
+    the unreviewed photos and marks those records reviewed. The log entries
+    survive, so 'were there any intruders' can still recap them later."""
+    cleared = camera_gate.dismiss_intruder_alerts()
+
+    if not cleared:
+        return "There are no intruder alerts to clear."
+
+    # Drop any photo the HUD is still holding and close the review layout.
+    try:
+        requests.post(f"{HUB}/security_review/close", timeout=5)
+    except requests.RequestException:
+        pass
+
+    word = "alert" if cleared == 1 else "alerts"
+    return (
+        f"Cleared {cleared} intruder {word} without the review. The report "
+        "is still on file if you want it later."
+    )
+
+
 # What a non-verified person may still do: strictly local, zero-token,
 # no personal data, no web, no physical actuation beyond timers.
 def _handle_restricted_turn(text):
-    """Dispatch for unverified users. Returns the spoken answer."""
+    """Dispatch for unverified users.
+
+    Returns ``None`` for a silent, harmless cancel; otherwise returns the
+    spoken answer. Cancel is intentionally available before authorization.
+    """
+    normalized = _normalize_phrase(text)
+
+    if interaction_control.is_safe_cancel_phrase(normalized):
+        dismiss_current_interaction()
+        return None
+
     instant = parse_instant_answer(text)
 
     if instant is not None:
@@ -1574,8 +1721,6 @@ def _handle_restricted_turn(text):
 
     if timer_seconds is not None:
         return run_timer_set_command(timer_seconds)
-
-    normalized = _normalize_phrase(text)
 
     if normalized in TIMER_CANCEL_PHRASES:
         return run_timer_cancel_command()
@@ -2145,6 +2290,14 @@ DIAGNOSTICS_PHRASES = {
     "run diagnostics",
     "run a diagnostic",
     "run your diagnostics",
+    "health check",
+    "run a health check",
+    "do a health check",
+    "system health check",
+    "run a system health check",
+    "do a system health check",
+    "check system health",
+    "check your health",
     "run a system check",
     "system check",
     "self test",
@@ -2155,6 +2308,85 @@ DIAGNOSTICS_PHRASES = {
     "how are your systems",
     "diagnostics",
 }
+
+
+STORAGE_QUERY_PHRASES = {
+    "how much storage do you have free on your drive",
+    "how much storage do you have free",
+    "how much free storage do you have",
+    "how much storage is free",
+    "how much storage is left",
+    "how much disk space is free",
+    "how much free disk space do you have",
+    "how much disk space do you have",
+    "how much space is left",
+    "how full is your drive",
+    "how full is your disk",
+    "check storage",
+    "check disk space",
+    "storage status",
+    "disk space",
+    "drive space",
+}
+
+
+def is_storage_query(text):
+    """Recognizes read-only questions about this Pi's system drive."""
+    normalized = _normalize_phrase(text)
+
+    if normalized in STORAGE_QUERY_PHRASES:
+        return True
+
+    has_storage_subject = (
+        "storage" in normalized
+        or "disk space" in normalized
+        or ("drive" in normalized and "space" in normalized)
+        or (
+            "disk" in normalized
+            and any(term in normalized for term in (
+                "free",
+                "available",
+                "left",
+                "used",
+                "usage",
+                "full",
+            ))
+        )
+    )
+    asks_for_status = any(term in normalized for term in (
+        "how much",
+        "free",
+        "available",
+        "left",
+        "used",
+        "usage",
+        "full",
+        "status",
+        "check",
+    ))
+    return has_storage_subject and asks_for_status
+
+
+def run_storage_status_command():
+    """Returns local root-drive usage without an API request."""
+    try:
+        stats = hud_stats.get_disk_stats()
+        used_gb = float(stats["used_gb"])
+        total_gb = float(stats["total_gb"])
+        percent = float(stats["percent"])
+
+        if total_gb <= 0:
+            raise ValueError("disk total must be positive")
+    except (KeyError, OSError, TypeError, ValueError) as error:
+        print("Local storage check failed:", error, flush=True)
+        return "I couldn't read my local drive storage just now."
+
+    free_gb = max(0.0, total_gb - used_gb)
+    return (
+        f"I have {free_gb:.1f} gigabytes free out of {total_gb:.1f}. "
+        f"{used_gb:.1f} gigabytes are used, so the drive is "
+        f"{percent:.1f} percent full."
+    )
 
 # "Get the whole system healthy" — full diagnose + safe repair sweep (P1-D).
 EMERGENCY_SHUTDOWN_PHRASES = {
@@ -2339,6 +2571,15 @@ def run_read_notes_command():
     )
 
     return f"You have {count} {word}. {spoken_notes}."
+
+
+def run_read_shopping_list_command():
+    items = memory_store.get_shopping_list_summary()
+
+    if not items:
+        return "Your shopping list is empty."
+
+    return "Your shopping list: " + ", ".join(items) + "."
 
 
 REMINDER_PATTERN = re.compile(
@@ -2583,6 +2824,21 @@ def build_instructions_and_limits():
         + capabilities.instruction_summary()
     )
 
+    instructions += (
+        "\n\nYou are already running inside the A.T.L.A.S. application on "
+        "the Raspberry Pi described above. Never claim that this is an "
+        "external chat lacking access to the Pi, and never tell the owner "
+        "to build a companion service for capabilities listed above. This "
+        "is true no matter which surface the owner is talking to you from "
+        "— voice at the desk or the phone link — the same real Pi, the "
+        "same real capabilities, every time. For diagnostics, health "
+        "checks, self-healing/repair, connection checks, storage, recent "
+        "errors, tool versions, or listing capabilities, call the "
+        "run_atlas_diagnostic_or_repair tool and report exactly what it "
+        "returns — do not say you lack access or that the command wasn't "
+        "recognized when that tool can just run it."
+    )
+
     weather = hud_stats.get_weather_stats()
 
     if weather.get("temp_f") is not None:
@@ -2675,6 +2931,58 @@ def _set_activity_label(label):
         print("Activity label update failed:", error, flush=True)
 
 
+def _consume_openai_stream(stream, text_state, sentence_queue, stop_event):
+    """Consumes one Responses stream and returns its completed response.
+
+    The SDK's ``get_final_response()`` only accepts ``response.completed``.
+    Capture failed/incomplete/error events first so logs contain the real
+    cause and the caller can apply a safe one-retry policy.
+    """
+    terminal_error = None
+
+    try:
+        for event in stream:
+            if stop_event.is_set():
+                return None
+
+            if event.type == "response.output_text.delta":
+                text_state["buffer"] += event.delta
+                text_state["full_text"] += event.delta
+                sentences, text_state["buffer"] = _pop_complete_sentences(
+                    text_state["buffer"]
+                )
+
+                for sentence in sentences:
+                    sentence_queue.put(sentence)
+            elif event.type in {
+                "response.failed",
+                "response.incomplete",
+                "error",
+            }:
+                terminal_error = stream_resilience.from_terminal_event(
+                    event,
+                    text_state["full_text"],
+                )
+
+        if terminal_error is not None:
+            raise terminal_error
+
+        try:
+            return stream.get_final_response()
+        except Exception as error:
+            raise stream_resilience.from_exception(
+                error,
+                text_state["full_text"],
+            ) from error
+    except stream_resilience.StreamResponseError:
+        raise
+    except Exception as error:
+        raise stream_resilience.from_exception(
+            error,
+            text_state["full_text"],
+        ) from error
+
+
 def _stream_answer_sentences(
     question, instructions, max_tokens, client, sentence_queue, stop_event
 ):
@@ -2683,8 +2991,7 @@ def _stream_answer_sentences(
     one before the rest has even finished generating. Falls back to a real
     tool-call round trip when needed, streaming that continuation the same
     way. Returns (full_text, total_input_tokens, total_output_tokens)."""
-    full_text = ""
-    buffer = ""
+    text_state = {"full_text": "", "buffer": ""}
     total_input_tokens = 0
     total_output_tokens = 0
 
@@ -2696,19 +3003,16 @@ def _stream_answer_sentences(
         tools=ai_tools.TOOLS,
         max_output_tokens=max_tokens
     ) as stream:
-        for event in stream:
-            if stop_event.is_set():
-                break
+        response = _consume_openai_stream(
+            stream,
+            text_state,
+            sentence_queue,
+            stop_event,
+        )
 
-            if event.type == "response.output_text.delta":
-                buffer += event.delta
-                full_text += event.delta
-                sentences, buffer = _pop_complete_sentences(buffer)
-
-                for sentence in sentences:
-                    sentence_queue.put(sentence)
-
-        response = stream.get_final_response()
+    if response is None:
+        sentence_queue.put(None)
+        return text_state["full_text"].strip(), 0, 0
 
     total_input_tokens += int(getattr(response.usage, "input_tokens", 0) or 0)
     total_output_tokens += int(getattr(response.usage, "output_tokens", 0) or 0)
@@ -2741,19 +3045,20 @@ def _stream_answer_sentences(
             tools=ai_tools.TOOLS,
             max_output_tokens=max_tokens
         ) as stream2:
-            for event in stream2:
-                if stop_event.is_set():
-                    break
+            response2 = _consume_openai_stream(
+                stream2,
+                text_state,
+                sentence_queue,
+                stop_event,
+            )
 
-                if event.type == "response.output_text.delta":
-                    buffer += event.delta
-                    full_text += event.delta
-                    sentences, buffer = _pop_complete_sentences(buffer)
-
-                    for sentence in sentences:
-                        sentence_queue.put(sentence)
-
-            response2 = stream2.get_final_response()
+        if response2 is None:
+            sentence_queue.put(None)
+            return (
+                text_state["full_text"].strip(),
+                total_input_tokens,
+                total_output_tokens,
+            )
 
         total_input_tokens += int(
             getattr(response2.usage, "input_tokens", 0) or 0
@@ -2762,14 +3067,14 @@ def _stream_answer_sentences(
             getattr(response2.usage, "output_tokens", 0) or 0
         )
 
-    remainder = buffer.strip()
+    remainder = text_state["buffer"].strip()
 
     if remainder:
         sentence_queue.put(remainder)
 
     sentence_queue.put(None)
 
-    return full_text.strip(), total_input_tokens, total_output_tokens
+    return text_state["full_text"].strip(), total_input_tokens, total_output_tokens
 
 
 def answer_text_only(question):
@@ -2831,7 +3136,7 @@ def answer_text_only(question):
     return answer or "I couldn't generate an answer."
 
 
-def ask_and_speak_streaming(question, model):
+def ask_and_speak_streaming(question, model, retry_attempted=False):
     """Streams the model's answer and speaks each sentence as soon as it's
     ready instead of waiting for the whole answer to finish generating —
     same total tokens as the non-streaming path, just delivered (and
@@ -2872,7 +3177,13 @@ def ask_and_speak_streaming(question, model):
             result["total_input_tokens"] = input_tokens
             result["total_output_tokens"] = output_tokens
         except Exception as error:
+            error = stream_resilience.from_exception(error)
             result["error"] = error
+
+            result["full_text"] = error.partial_text
+            result["total_input_tokens"] = error.input_tokens
+            result["total_output_tokens"] = error.output_tokens
+
             sentence_queue.put(None)
 
     producer_thread = threading.Thread(target=produce, daemon=True)
@@ -2912,6 +3223,7 @@ def ask_and_speak_streaming(question, model):
 
     watcher_thread = threading.Thread(target=watch_for_barge_in, daemon=True)
     watcher_thread.start()
+    spoken_any = False
 
     try:
         while True:
@@ -2935,6 +3247,7 @@ def ask_and_speak_streaming(question, model):
 
             if sentence:
                 speak(sentence)
+                spoken_any = True
     finally:
         barge_stop_event.set()
         watcher_thread.join(timeout=2)
@@ -2942,7 +3255,51 @@ def ask_and_speak_streaming(question, model):
     producer_thread.join(timeout=5)
 
     if result["error"] is not None:
-        raise result["error"]
+        error = result["error"]
+        print(
+            "Online response stream failed:",
+            type(error).__name__,
+            str(error),
+            flush=True,
+        )
+
+        # Failed/incomplete terminal events can still include usage. Keep the
+        # local budget honest before a possible retry.
+        failed_cost = (
+            result["total_input_tokens"] * INPUT_PRICE_PER_TOKEN
+            + result["total_output_tokens"] * OUTPUT_PRICE_PER_TOKEN
+        )
+        usage["spent_usd"] += failed_cost
+        usage["requests"] += 1
+        save_usage(usage)
+
+        if stream_resilience.should_retry(
+            error,
+            spoken_any=spoken_any,
+            interrupted=barge_result["interrupted"],
+            retry_attempted=retry_attempted,
+        ):
+            print(
+                "Retrying online response once before any speech was played.",
+                flush=True,
+            )
+            return ask_and_speak_streaming(
+                question,
+                model,
+                retry_attempted=True,
+            )
+
+        if spoken_any:
+            notice = "The connection dropped before I could finish."
+            speak(notice)
+            partial = result["full_text"].strip()
+            return (partial + " " + notice).strip(), False
+
+        failure_answer = (
+            "My online answer connection failed. Try that again in a moment."
+        )
+        speak(failure_answer)
+        return failure_answer, False
 
     answer = result["full_text"]
 
@@ -2982,6 +3339,38 @@ def _answer_and_speak(text, model):
     return answer, interrupted
 
 
+# Non-destructive, non-confirm-gated capabilities the AI model can invoke
+# directly as a tool call (ai_tools.run_atlas_diagnostic_or_repair) — the
+# same ones already voice-callable without spoken confirmation. Exposing
+# these as real tools means the model can run them wherever it's asked
+# (voice fallback, phone link) instead of claiming it has no access when a
+# phrasing doesn't match one of the fixed trigger phrases below.
+DIAGNOSTIC_CAPABILITY_HANDLERS = {
+    "diagnostics": lambda: diagnostics.build_diagnostics_report(),
+    "self_heal": run_self_heal_command,
+    "system_health": run_system_health_command,
+    "connections": run_connection_health_command,
+    "status_report": run_status_report_command,
+    "storage": run_storage_status_command,
+    "log_query": run_log_query_command,
+    "internet_check": run_internet_check_command,
+    "capabilities": run_capabilities_command,
+    "tool_status": run_tool_status_command,
+}
+
+
+def run_diagnostic_capability(capability):
+    handler = DIAGNOSTIC_CAPABILITY_HANDLERS.get(capability)
+
+    if handler is None:
+        return f"'{capability}' isn't one of my real capabilities."
+
+    try:
+        return handler()
+    except Exception as error:
+        return f"That capability hit an error: {type(error).__name__}: {error}"
+
+
 def _classify_intent(text):
     """Coarse deterministic intent label for the log — mirrors the
     dispatch priority in _handle_turn_body. Zero tokens."""
@@ -2991,6 +3380,14 @@ def _classify_intent(text):
         return "vision"
     if parse_gallery_search_query(text) or parse_image_search_query(text):
         return "image_search"
+    # Checked ahead of every other category below: a taught trigger or
+    # "when I say X do Y" phrase can otherwise contain a builtin phrase as
+    # a substring (e.g. teaching an action of "storage status") and get
+    # misclassified by one of those checks first.
+    if macros.parse_teach_command(text) is not None:
+        return "macro_teach"
+    if macros.match_macro(normalized) is not None:
+        return "macro"
     if parse_timer_set_command(text) or normalized in TIMER_CANCEL_PHRASES \
             or normalized in TIMER_CHECK_PHRASES:
         return "timer"
@@ -2998,6 +3395,8 @@ def _classify_intent(text):
         return "focus"
     if normalized in WAKE_PC_PHRASES:
         return "wake_pc"
+    if is_storage_query(normalized):
+        return "storage"
     if normalized in DIAGNOSTICS_PHRASES:
         return "diagnostics"
     if normalized in SYSTEM_HEALTH_PHRASES:
@@ -3014,6 +3413,19 @@ def _classify_intent(text):
         return "reminder"
     if memory_store.parse_remember_command(text):
         return "memory"
+    if (
+        memory_store.parse_add_shopping_item_command(text)
+        or memory_store.parse_remove_shopping_item_command(text)
+        or memory_store.is_read_shopping_list_command(text)
+        or memory_store.is_clear_shopping_list_command(text)
+    ):
+        return "shopping_list"
+    if chance.is_coin_flip_command(normalized) or chance.parse_dice_roll_command(normalized):
+        return "chance"
+    if unit_convert.parse_conversion_command(normalized) is not None:
+        return "unit_convert"
+    if countdown.parse_countdown_target(normalized) is not None:
+        return "countdown"
     if parse_instant_answer(text) is not None:
         return "instant"
     return "ai_question"
@@ -3085,6 +3497,11 @@ import difflib
 
 # Set when a confirmed suggestion should be re-run without re-recording.
 _injected_command = None
+
+# Triggers of macros currently being expanded, on this call stack — guards
+# against a macro whose actions (directly or via another macro) loop back
+# to itself.
+_active_macro_triggers = set()
 
 # Canonical short command phrases the clarifier can suggest. Built from
 # the capability registry aliases plus a few high-frequency exact phrases.
@@ -3177,12 +3594,9 @@ def _handle_turn_body(model):
         # activation — the camera never runs continuously. Unverified
         # turns still proceed, but restricted to local basics.
         restricted = False
+        gate_active = camera_gate.is_available() and camera_gate.is_enabled()
 
-        if (
-            camera_gate.is_available()
-            and camera_gate.is_enabled()
-            and camera_gate.should_verify()
-        ):
+        if gate_active and camera_gate.should_verify():
             set_face("thinking")
             speak("One moment — verifying.")
             outcome = camera_gate.verify()
@@ -3213,6 +3627,11 @@ def _handle_turn_body(model):
                 return
 
             answer = _handle_restricted_turn(text)
+
+            if answer is None:
+                log_qa(f"[unverified] {text}", "[cancelled silently]")
+                return
+
             log_qa(f"[unverified] {text}", answer)
             speak(answer)
             return
@@ -3228,7 +3647,7 @@ def _handle_turn_body(model):
             _injected_command = None
             corrections = []
         else:
-            speak("Go ahead.")
+            cue_listening()
             set_face("listening")
             record_audio()
 
@@ -3246,6 +3665,12 @@ def _handle_turn_body(model):
             )
             speak("I didn't catch that.")
             return
+
+        # Only a real, non-empty prompt inside an active trusted camera
+        # session slides the one-hour idle window. Armed/pending states can
+        # never be cleared or extended here.
+        if gate_active:
+            camera_gate.mark_authorized_interaction()
 
         if is_vision_command(text):
             run_vision_command()
@@ -3291,6 +3716,11 @@ def _handle_turn_body(model):
 
         normalized_phrase = _normalize_phrase(text)
 
+        if interaction_control.is_safe_cancel_phrase(normalized_phrase):
+            dismiss_current_interaction()
+            log_qa(text, "[cancelled silently]")
+            return
+
         # Easter eggs: count the command (achievements) and intercept any
         # secret phrase. Both are cosmetic and zero-token.
         try:
@@ -3325,6 +3755,39 @@ def _handle_turn_body(model):
             alias, target = teach_request
             speech_repair.teach(alias, target)
             answer = f"Okay. I'll treat {alias} as {target}."
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        macro_teach = macros.parse_teach_command(text)
+        if macro_teach is not None:
+            trigger, actions = macro_teach
+            existing_intent = _classify_intent(trigger)
+
+            if existing_intent not in ("ai_question", "macro"):
+                answer = "I already know how to do that, so I'll leave it as is."
+            else:
+                macros.teach_macro(trigger, actions)
+                answer = f"Got it. When you say '{trigger}', I'll {' then '.join(actions)}."
+
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        if macros.is_list_macros_command(normalized_phrase):
+            answer = macros.list_macros_summary()
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        forget_macro_trigger = macros.parse_forget_macro_command(text)
+        if forget_macro_trigger is not None:
+            removed = macros.forget_macro(forget_macro_trigger)
+            answer = (
+                f"Okay, I've forgotten the macro for {forget_macro_trigger}."
+                if removed else
+                f"I didn't have a macro for {forget_macro_trigger}."
+            )
             log_qa(text, answer)
             speak(answer)
             return
@@ -3481,6 +3944,12 @@ def _handle_turn_body(model):
             speak(answer)
             return
 
+        if is_clear_intruder_alerts_command(normalized_phrase):
+            answer = run_clear_intruder_alerts_command()
+            log_qa(text, answer)
+            speak(answer)
+            return
+
         if is_intruder_query(normalized_phrase):
             answer = run_intruder_query_command()
             log_qa(text, answer)
@@ -3618,6 +4087,12 @@ def _handle_turn_body(model):
             speak(answer)
             return
 
+        if is_storage_query(normalized_phrase):
+            answer = run_storage_status_command()
+            log_qa(text, answer)
+            speak(answer)
+            return
+
         if normalized_phrase in LOG_QUERY_PHRASES:
             answer = run_log_query_command()
             log_qa(text, answer)
@@ -3672,6 +4147,90 @@ def _handle_turn_body(model):
             briefing.mark_briefed_today()
             log_qa(text, answer)
             speak(answer)
+            return
+
+        shopping_item = memory_store.parse_add_shopping_item_command(text)
+
+        if shopping_item is not None:
+            memory_store.add_shopping_item(shopping_item)
+            answer = f"Added {shopping_item} to your shopping list."
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        remove_shopping_item = memory_store.parse_remove_shopping_item_command(text)
+
+        if remove_shopping_item is not None:
+            removed = memory_store.remove_shopping_item(remove_shopping_item)
+            answer = (
+                f"Removed {remove_shopping_item} from your shopping list."
+                if removed else
+                f"{remove_shopping_item} wasn't on your shopping list."
+            )
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        if memory_store.is_read_shopping_list_command(text):
+            answer = run_read_shopping_list_command()
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        if memory_store.is_clear_shopping_list_command(text):
+            memory_store.clear_shopping_list()
+            answer = "Okay, your shopping list is cleared."
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        if chance.is_coin_flip_command(normalized_phrase):
+            answer = chance.run_coin_flip_command()
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        dice_roll = chance.parse_dice_roll_command(normalized_phrase)
+
+        if dice_roll is not None:
+            answer = chance.run_dice_roll_command(*dice_roll)
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        conversion = unit_convert.parse_conversion_command(normalized_phrase)
+
+        if conversion is not None:
+            answer = unit_convert.run_conversion_command(*conversion)
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        countdown_target = countdown.parse_countdown_target(normalized_phrase)
+
+        if countdown_target is not None:
+            countdown_answer = countdown.build_countdown_answer(countdown_target)
+
+            if countdown_answer is not None:
+                log_qa(text, countdown_answer)
+                speak(countdown_answer)
+                return
+
+        macro_actions = macros.match_macro(normalized_phrase)
+        if macro_actions is not None:
+            if normalized_phrase in _active_macro_triggers:
+                answer = "That macro loops back on itself, so I'm stopping there."
+                log_qa(text, answer)
+                speak(answer)
+                return
+
+            _active_macro_triggers.add(normalized_phrase)
+            try:
+                for action in macro_actions:
+                    _injected_command = action
+                    _handle_turn_body(model)
+            finally:
+                _active_macro_triggers.discard(normalized_phrase)
             return
 
         instant_answer = parse_instant_answer(text)

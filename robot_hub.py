@@ -19,6 +19,7 @@ import network_sentinel
 import pc_power
 import pc_stats
 import timers
+import weather_hud
 
 ROBOT_ENV_PATH = Path("/home/atlas/atlas-robot/config/robot.env")
 
@@ -212,6 +213,14 @@ def hud_stats_route():
         for headline in hud_stats.get_headlines(allow_fetch=False)
     ]
     return jsonify(stats)
+
+
+@app.get("/hud/weather")
+def hud_weather_route():
+    """Extended forecast + radar loop for the full-screen weather screen.
+    Offline-tolerant by design (weather_hud returns a stale-flagged payload
+    rather than erroring), so the overlay never has to handle a 5xx."""
+    return jsonify(weather_hud.get_weather_forecast())
 
 
 @app.get("/hud/display_image")
@@ -710,6 +719,25 @@ def clear_image():
     return jsonify({"ok": True})
 
 
+@app.post("/dismiss")
+def dismiss():
+    """Restores the idle HUD without changing security or saved evidence."""
+    with state_lock:
+        clear_image_state_locked()
+        clear_gallery_state_locked()
+        robot_state["hud_layout"] = "idle"
+        robot_state["intruder_records"] = []
+        robot_state["active_intruder_photo"] = None
+        robot_state["activity_label"] = None
+        robot_state["expression"] = "happy"
+
+    return jsonify({
+        "ok": True,
+        "layout": "idle",
+        "security_preserved": True,
+    })
+
+
 @app.post("/timer")
 def set_timer():
     data = request.get_json(silent=True) or {}
@@ -917,6 +945,102 @@ def _speak_text(text):
 
 
 CHIME_PATH = "/home/atlas/atlas-robot/data/chime.wav"
+LISTENING_EARCON_PATH = "/home/atlas/atlas-robot/data/listening_earcon_v3.wav"
+
+
+def _ensure_listening_earcon_exists():
+    """Creates a bright, HUD-style "system engaged" earcon.
+
+    An upward electronic chirp (with a detuned overtone for a metallic,
+    digital edge) resolves into a crisp high confirm-tick, evoking a
+    sci-fi interface activating rather than a plain notification beep.
+    Still short and clean so it doesn't add perceptible delay before
+    the mic opens.
+    """
+    if os.path.exists(LISTENING_EARCON_PATH):
+        return
+
+    import math
+    import struct
+
+    sample_rate = 44100
+    duration = 0.32
+    sweep_duration = 0.14
+    tick_start = 0.15
+    frame_count = int(sample_rate * duration)
+    samples = []
+
+    for frame in range(frame_count):
+        t = frame / sample_rate
+
+        # Chirp: exponential rise from 650 Hz to 1900 Hz reads as a
+        # system "spinning up," reinforced by a detuned 1.5x overtone
+        # for a metallic, bell-like digital edge.
+        chirp_pulse = 0.0
+
+        if t <= sweep_duration:
+            sweep_progress = t / sweep_duration
+
+            # Phase integral of an exponential (650 -> 1900 Hz) chirp.
+            phase = (
+                2 * math.pi * 650.0 * sweep_duration
+                / math.log(1900.0 / 650.0)
+                * ((1900.0 / 650.0) ** sweep_progress - 1.0)
+            )
+            chirp_envelope = (
+                min(1.0, t / 0.006)
+                * min(1.0, (sweep_duration - t) / 0.03 + 0.15)
+            )
+            chirp_pulse = chirp_envelope * (
+                0.22 * math.sin(phase)
+                + 0.07 * math.sin(1.5 * phase + 0.4)
+            )
+
+        # Confirm tick: short, bright, and percussive — the "engaged"
+        # punctuation mark at the end of the sweep.
+        tick_t = t - tick_start
+        tick_pulse = 0.0
+
+        if tick_t >= 0.0:
+            tick_envelope = (
+                min(1.0, tick_t / 0.003)
+                * math.exp(-40.0 * tick_t)
+            )
+            tick_phase = 2 * math.pi * 2400.0 * tick_t
+            tick_pulse = tick_envelope * (
+                0.20 * math.sin(tick_phase)
+                + 0.08 * math.sin(1.5 * tick_phase)
+            )
+
+        master_fade = min(1.0, (duration - t) / 0.02)
+        value = chirp_pulse + tick_pulse
+        samples.append(int(max(-1.0, min(1.0, value)) * master_fade * 32767))
+
+    os.makedirs(os.path.dirname(LISTENING_EARCON_PATH), exist_ok=True)
+
+    with wave.open(LISTENING_EARCON_PATH, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(struct.pack(f"<{len(samples)}h", *samples))
+
+
+def _play_listening_earcon():
+    """Synchronously plays the listening cue through Atlas's HDMI audio."""
+    _ensure_listening_earcon_exists()
+
+    with piper_lock:
+        result = subprocess.run(
+            ["aplay", "-D", AUDIO_DEVICE, LISTENING_EARCON_PATH],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+        )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"listening earcon playback exited with code {result.returncode}"
+        )
 
 
 def _ensure_chime_exists():
@@ -1015,6 +1139,15 @@ def speak():
             "ok": False,
             "error": str(error)
         }), 500
+
+
+@app.post("/listening_earcon")
+def listening_earcon():
+    try:
+        _play_listening_earcon()
+        return jsonify({"ok": True, "duration_seconds": 0.32})
+    except Exception as error:
+        return jsonify({"ok": False, "error": str(error)}), 500
 
 
 # Proactive nudges: unprompted speech triggered by notable state, not by a

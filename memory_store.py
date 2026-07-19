@@ -357,6 +357,160 @@ def pop_due_reminders():
     return due
 
 
+SHOPPING_LIST_PATH = Path("/home/atlas/atlas-robot/data/shopping_list.json")
+MAX_SHOPPING_ITEMS = 100
+
+ADD_SHOPPING_ITEM_PREFIXES = [
+    "add ", "put ",
+]
+ADD_SHOPPING_ITEM_SUFFIXES = [
+    " to my shopping list", " to the shopping list", " to my grocery list",
+    " to the grocery list", " on my shopping list", " on the shopping list",
+    " on my grocery list", " on the grocery list",
+]
+
+REMOVE_SHOPPING_ITEM_PREFIXES = [
+    "remove ", "take ", "delete ",
+]
+REMOVE_SHOPPING_ITEM_SUFFIXES = [
+    " from my shopping list", " from the shopping list", " from my grocery list",
+    " from the grocery list", " off my shopping list", " off the shopping list",
+    " off my grocery list", " off the grocery list",
+]
+
+READ_SHOPPING_LIST_PHRASES = {
+    "what's on my shopping list", "whats on my shopping list",
+    "read my shopping list", "read back my shopping list",
+    "what's on my grocery list", "whats on my grocery list",
+    "read my grocery list", "what do i need to buy",
+    "what's on the shopping list", "what's on the grocery list",
+}
+
+CLEAR_SHOPPING_LIST_PHRASES = {
+    "clear my shopping list", "delete my shopping list", "erase my shopping list",
+    "clear my grocery list", "delete my grocery list", "erase my grocery list",
+    "clear the shopping list", "clear the grocery list",
+}
+
+
+def load_shopping_list():
+    if not SHOPPING_LIST_PATH.exists():
+        return []
+
+    try:
+        data = json.loads(SHOPPING_LIST_PATH.read_text())
+    except (json.JSONDecodeError, OSError):
+        return []
+
+    if not isinstance(data, list):
+        return []
+
+    return [item for item in data if isinstance(item, dict) and item.get("text")]
+
+
+def save_shopping_list(items):
+    SHOPPING_LIST_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    temporary_path = SHOPPING_LIST_PATH.with_suffix(".tmp")
+    temporary_path.write_text(json.dumps(items, indent=2))
+    temporary_path.replace(SHOPPING_LIST_PATH)
+
+
+def add_shopping_item(text):
+    text = text.strip()
+
+    if not text:
+        return
+
+    items = load_shopping_list()
+
+    # Skip an exact re-add — asking to add something already on the list
+    # should be a no-op, not a duplicate line.
+    if any(item["text"].lower() == text.lower() for item in items):
+        return
+
+    items.append({"text": text, "added": time.time()})
+    save_shopping_list(items[-MAX_SHOPPING_ITEMS:])
+
+
+def remove_shopping_item(text):
+    """Removes the first item matching text (case-insensitive). Returns
+    True if something was removed."""
+    text = text.strip().lower()
+
+    if not text:
+        return False
+
+    items = load_shopping_list()
+    kept = [item for item in items if item["text"].lower() != text]
+    removed = len(kept) != len(items)
+
+    if removed:
+        save_shopping_list(kept)
+
+    return removed
+
+
+def clear_shopping_list():
+    save_shopping_list([])
+
+
+def get_shopping_list_summary():
+    return [item["text"] for item in load_shopping_list()]
+
+
+def parse_add_shopping_item_command(text):
+    """Returns the item text for an 'add X to my shopping list' request,
+    otherwise None."""
+    normalized = _normalize_phrase(text)
+
+    if not normalized:
+        return None
+
+    for suffix in sorted(ADD_SHOPPING_ITEM_SUFFIXES, key=len, reverse=True):
+        if normalized.endswith(suffix):
+            remainder = normalized[: -len(suffix)].strip()
+
+            for prefix in sorted(ADD_SHOPPING_ITEM_PREFIXES, key=len, reverse=True):
+                if remainder.startswith(prefix):
+                    item = remainder[len(prefix):].strip()
+                    return item or None
+
+            return remainder or None
+
+    return None
+
+
+def parse_remove_shopping_item_command(text):
+    """Returns the item text for a 'remove X from my shopping list'
+    request, otherwise None."""
+    normalized = _normalize_phrase(text)
+
+    if not normalized:
+        return None
+
+    for suffix in sorted(REMOVE_SHOPPING_ITEM_SUFFIXES, key=len, reverse=True):
+        if normalized.endswith(suffix):
+            remainder = normalized[: -len(suffix)].strip()
+
+            for prefix in sorted(REMOVE_SHOPPING_ITEM_PREFIXES, key=len, reverse=True):
+                if remainder.startswith(prefix):
+                    item = remainder[len(prefix):].strip()
+                    return item or None
+
+            return remainder or None
+
+    return None
+
+
+def is_read_shopping_list_command(text):
+    return _normalize_phrase(text) in READ_SHOPPING_LIST_PHRASES
+
+
+def is_clear_shopping_list_command(text):
+    return _normalize_phrase(text) in CLEAR_SHOPPING_LIST_PHRASES
+
+
 def build_memory_context_block():
     """Returns a prompt-ready string summarizing recent conversation and
     remembered facts, or an empty string if there's nothing to add."""

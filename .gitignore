@@ -30,5 +30,8 @@ docs/superpowers/
 # Claude Code local settings — not part of the project
 .claude/
 
+# Generated knowledge graph — regenerate with `graphify update .`
+graphify-out/
+
 # Whisper.cpp third-party checkout + models — 200MB+, build locally, never commit
 tools/

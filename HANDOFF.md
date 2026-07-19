@@ -1,356 +1,138 @@
-# Handoff — 2026-07-17 session (cursor, finally, for real)
+# A.T.L.A.S. — Session Handoff
 
-The cursor saga did not actually end at the bottom of this file. One
-more round happened the next day:
+> **Read this first, then `COMMANDS.md` and `SETUP_GUIDE.md`.**
+> Canonical codebase: `/home/atlas/atlas-robot` on the Pi (`atlas@192.168.0.183`).
+> A directive for the next working session is at the bottom of this file — execute it.
 
-- User reported the cursor was STILL back after the "delete all uinput
-  plumbing" fix below. Stopped trusting reports and installed `grim`
-  (`sudo apt install -y grim`) to screenshot the REAL compositor output
-  directly (`WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/run/user/1000
-  grim -c out.png`) instead of relying on secondhand descriptions —
-  this should be the go-to verification method for any future HUD
-  visual issue, it doesn't lie the way a screenshot of just the browser
-  DOM would.
-- Confirmed via grim: cursor genuinely visible, even with zero pointer
-  devices on the system (checked `/proc/bus/input/devices` — none).
-  Ruled out the "needs a pointer device" theory entirely.
-- **Root cause finally nailed via `strings` on the actual library
-  doing the work**: `libwlroots-0.18.so` contains `XCURSOR_PATH` but
-  NEVER `XCURSOR_THEME` or `XCURSOR_SIZE`. Every fix earlier in this
-  file that set `XCURSOR_THEME` was a complete no-op for this cage/
-  wlroots version — it never did anything, on either attempt. (The
-  "yes thank you" confirmation from the user earlier likely coincided
-  with something else, or a restart timing fluke — not the env var.)
-- The actual bitmap being rendered: `/usr/share/icons/Adwaita/cursors/
-  default` (a real 78KB file; `left_ptr`, `arrow`, `top_left_arrow`,
-  `move` are all symlinks to it). Backed it up to `default.orig-backup`
-  in the same directory, then overwrote it with a fully transparent,
-  multi-size (16-128px) Xcursor file. **Verified gone via grim
-  screenshot** — genuine compositor-level proof, not a claim.
-  Also tried `update-alternatives --set x-cursor-theme` to repoint the
-  system default theme first — did NOT work on its own (still showed
-  the cursor), confirming the fix had to be the actual bitmap file, not
-  theme-name indirection.
-- **This fix is system-level, not in the repo** — README.md's cage
-  setup section and `systemd/atlas-hud.service`'s comments were
-  rewritten with the real explanation and the exact commands to redo
-  this on a fresh install. If this kiosk is ever rebuilt on new
-  hardware/OS, `/usr/share/icons/Adwaita/cursors/default` needs to be
-  replaced again from scratch — nothing currently automates it.
+## Current state (as of 2026-07-18)
+
+- **All 38 formal tasks complete** — Phases 1–4, P1-A→G, P2-A→F, F2→F13, plus the smarter auth-trigger and phone-presence fixes.
+- Nothing mid-flight or broken: **all 4 services active**, regression suite **23/23**, working tree clean at last check.
+- ~19 commits are **local-only and unpushed** since the last force-push. The Pi working tree is the source of truth; it is ahead of GitHub and also contains face-auth work not on GitHub.
+- Graphify analysis is current in `graphify-out/` (771 nodes, 1,466 edges, 30 communities, no import cycles). Refresh with `graphify update .` (zero API cost).
+
+## Pending — requires the owner, not code work
+
+1. **Push to GitHub** — only with the owner's explicit go-ahead. Never push otherwise.
+2. **Install the Windows companion** on the PC (`windows-companion/README.md`) — unlocks PC/YouTube/profiles/admin commands. Cannot be done from the Pi.
+3. **Tailscale + `PHONE_TOKEN`** — activates the phone link (currently inert). See `PHONE_LINK.md`.
+4. **Confirm "Private Wi-Fi Address" stays off** on the owner's phone. The phone MAC used for presence detection is stored in gitignored config; if presence misfires, that iOS setting likely rotated the MAC.
+
+## Optional / deferred (hardware or a decision needed)
+
+- ReSpeaker 4-mic array for true direction-finding (`ROOM_AWARE_HEARING.md`)
+- Live calendar/email sources for chief-of-staff (adds on-demand token cost — needs approval)
+- Planet visibility in Sky Watch (needs an ephemeris lib)
+- Emergency-protocol hardware: UPS, smoke/water sensors, smart plugs (`emergency.py` stubs document each)
+
+## Standing rules
+
+- **Never `git push`** without the owner asking.
+- **Always confirm before restarting services** (canary restarts as part of an approved autonomous run are the exception — restart one service, verify, proceed).
+- Live-action code (PC shutdown, goodbye routine) is tested **only through mocked/unconfigured paths**.
+- Never commit secrets/PII; private values live in gitignored config/data.
+
+## Architecture quick-orientation
+
+- `_handle_turn_body()` in the turn-dispatch module is the mega-hub (97 edges, links 13 of 30 communities) — refactor with extreme care; graphify flags it as a split candidate.
+- Other cross-community bridges: `record_incident()` (logbook) and `_run_proactive_checks()` (hub watcher).
+- Deterministic/local command handling always runs before any paid model call.
 
 ---
 
-# Handoff — 2026-07-16 session
+# DIRECTIVE FOR THE NEXT WORKING SESSION
 
-Everything below was built/fixed in one long session tonight, on top of
-the HUD v1/v2 work from the previous session (see git log before
-`6218c2c` for that). All of it is committed to `main` and pushed to
-`origin/main`. Nothing is stashed or uncommitted.
+Work autonomously in `/home/atlas/atlas-robot`. I will not be available for questions. Use best judgment, complete everything safely, test it, and give one final report. Do not pause for approval unless a truly destructive/external action cannot be avoided.
 
-## LATE-SESSION ADDENDUM (same night, second wave)
+Important current state:
 
-A second work wave happened after the handoff below was written. In
-order:
+* Treat the Pi working tree as the source of truth; it contains newer local-only commits and uncommitted face-auth fixes not on GitHub.
+* Preserve the new multi-angle enrollment, 18-frame verification, strong-match voting, one-hour/departure arming, and persistent unauthorized rechecks.
+* Preserve `.gitattributes`, `.graphifyignore`, `graphify-out/`, and unrelated work.
+* Never reset/discard changes or push to GitHub.
+* Create a local rollback backup/checkpoint before editing.
 
-1. **Cursor mystery actually solved — in two layers.** Layer one: the
-   boot-visible arrow was cage's own default cursor (not Chromium's),
-   fixed via transparent `XCURSOR_THEME=atlas-invisible` (theme
-   generated at `/usr/share/icons/atlas-invisible`, system-side only,
-   not in the repo). Layer two, found when the cursor CAME BACK after a
-   later restart: `hud_cursor_fix.py`'s own virtual-mouse nudges were
-   re-summoning it — any pointer enter event makes Chromium set its own
-   client-drawn cursor bitmap (which ignores XCURSOR_THEME), and cage
-   never honors the later hide request, so it sticks until the next
-   restart's window expires. **Final fix: the nudge script and all its
-   uinput plumbing are DELETED** (`hud_cursor_fix.py`,
-   `systemd/uinput.conf`, `systemd/99-uinput.rules`, plus the installed
-   `/etc/modules-load.d/uinput.conf` and `/etc/udev/rules.d/99-uinput.
-   rules`, and the ExecStartPost line). The kiosk must NEVER have any
-   pointer device, real or virtual — with zero pointers Chromium never
-   draws a cursor at all and the theme covers cage's. Don't recreate
-   uinput test mice while the HUD is up; that re-shows the cursor until
-   the next service restart.
-2. **HUD v3 cinematic redesign** — A.T.L.A.S. masthead with animated
-   wordmark + state-reactive status line, tactical grid + vignette,
-   corner brackets + panel ID codes, reactor radar sweep/orbit
-   dot/core glow, mem/disk/CPU gauges, new CORE (Pi CPU) panel,
-   timestamped SYS.LOG with blinking cursor, YOU/ATLAS transcript
-   labels, staggered boot-in. Gotcha discovered: `animation-fill-mode:
-   both` on one-shot animations pins opacity and beats later class
-   rules (broke focus-mode dimming) — use `backwards`.
-3. **Eight new features, all user-approved (batch 1-8), all built and
-   endpoint-tested live tonight:**
-   - **Wake-on-LAN** ("boot my pc" etc.) — `pc_power.py`, MAC
-     auto-learned from ARP while PC online → `data/pc_mac.json`
-     (confirmed learned: 80:3f:5d:13:77:a3). Hub `POST /wake_pc`.
-     NOT yet tested with the PC actually off.
-   - **Timers** — `timers.py` + hub `POST /timer`, `/timer/cancel`,
-     `GET /timer`; 1s watcher thread speaks on expiry; amber countdown
-     in the reactor center (via /state).
-   - **Focus mode** — "focus mode (for N minutes)", default 25; mutes
-     all proactive nudges (reminders still fire), dims entire HUD
-     except reactor, cyan FOCUS countdown, masthead shows "FOCUS
-     PROTOCOL ACTIVE", spoken wrap-up.
-   - **Voice notes** — "take a note ...", "read my notes (back)",
-     "clear my notes" → `data/notes.json`, zero-token.
-   - **Morning briefing** — "morning briefing"/"brief me" on demand +
-     automatic once/day replacing the first morning greeting
-     (`briefing.py`, `data/last_briefing.json`): weather, reminder count,
-     note count, PC status, top-3 headlines.
-   - **Network sentinel** — `network_sentinel.py` in hub: /24 ping
-     sweep + `ip neigh` every 5 min, baseline in
-     `data/known_devices.json`, announces unknown joins (muted in quiet
-     hours/focus), device count on the NETWORK panel. FIRED FOR REAL
-     during testing (device .59 joined, spoken + logged).
-   - **News ticker** — `web_search.search_news` (ddgs, free, flaky
-     per-call but cached 30 min, hub refresher thread every 15 min so
-     /hud/stats never blocks); slim scrolling NEWS bar above SYS.LOG;
-     "what's in the news" speaks top 3.
-   - **Printer HUD panel + finish/fail alerts** — `hud_stats.
-     get_printer_stats()` polls atlas-hub (15s cache, offline-tolerant);
-     PRINT JOB panel under the transcript only while online; proactive
-     announce on active→done/failed transitions. **The AD5X reports
-     "building" as its active state** (confirmed against a real live
-     print at 13%, layer 6/724) — it's in PRINTER_ACTIVE_STATES.
-     Finish/fail announcement not yet observed end-to-end (print still
-     running at session end).
-4. **Self-diagnostics built (idea 12, approved)** — `diagnostics.py`,
-   voice: "run diagnostics" / "system check" / "self test" etc. Checks
-   all four services, disk/memory/CPU temp, internet, mic presence,
-   gaming PC, printer, and OpenAI budget spend; speaks a one-breath
-   verdict listing problems first if any. Verified live against real
-   state. **Idea 11 (internet radio) was declined** — don't build.
-   Ideas 9/10 (camera) were declined — camera hardware is disconnected.
+Required upgrades:
 
-Voice command list for the user: "boot my PC", "set a timer for 10
-minutes", "cancel the timer", "how long on the timer", "focus mode
-(for 45 minutes)", "end focus mode", "take a note ...", "read my
-notes", "clear my notes", "morning briefing" / "brief me", "what's in
-the news", "run diagnostics".
+1. Intruder clearing
 
-## Current verified state (as of this handoff)
+* Add local voice intent: "clear intruder alerts" plus close natural variants.
+* The spoken phrase itself is authorization to clear them: remove unreviewed alert state and associated stored intruder photos/records without another confirmation.
+* Return a fast count-based result.
+* Keep "were there any unauthorized users while I was gone?" review behavior working.
 
-All four services active and healthy: `atlas-robot.service`,
-`atlas-wake.service`, `atlas-hud.service`, `atlas-hub.service` (the last
-one is a separate, unrelated pre-existing service — printer control hub,
-not part of tonight's work).
+2. Conflict cleanup + privacy audit
 
-**The boot-stall bug is fixed and confirmed via a real cold reboot** —
-`atlas-hud.service` started clean on the first attempt, zero restarts,
-no SSH login needed. Full root-cause chain below.
+* Trace the current architecture and fix conflicting/duplicate routes, intents, constants, state handling, dead code, or newer features overriding older ones.
+* Avoid a broad rewrite; preserve working features.
+* Audit the working tree and all reachable Git history for secrets/PII: credentials, tokens, passwords, precise location/address, phone/email, SSID, usernames, LAN IP/MAC/hostnames, screenshots, photos, and logs.
+* Remove current tracked leaks, move private configuration to gitignored config/data, and update examples with neutral placeholders.
+* Do not rewrite history or push. If history contains anything requiring history rewriting or credential rotation, report the exact finding and remediation without exposing the sensitive value.
 
-OpenAI spend this month: **$0.54 of $8.00 budget.** Voice: Piper,
-`en_US-joe-medium`, chosen via on-device listening comparison earlier
-this session.
+3. Expanded PC control
 
-## What was built, roughly in order
+* Harmless app/window actions must not request confirmation.
+* Support natural commands such as "open Steam," "launch Discord," "open [installed app]," "start my gaming profile," etc.
+* Dynamically resolve installed Windows apps, Start Menu shortcuts, approved executables, and Steam games instead of requiring every app to be manually hardcoded.
+* Gaming profile must at least open Steam and Discord; retain/extend existing profiles.
+* Keep the Windows companion token-authenticated. Do not turn this into arbitrary remote shell execution.
+* Destructive/sensitive actions—delete, purchases, messages, shutdown, credential changes—must retain existing safety gates.
 
-1. **HUD cosmetic fixes** — darker-but-visible navy background, hidden
-   `qa-log` scrollbar, hidden mouse cursor via CSS (later found to need
-   much more than CSS — see the boot-stall section).
-2. **Voice switch** — compared 10 Piper voices live through the robot's
-   own speakers, landed on `en_US-joe-medium`.
-3. **Memory subsystem** (`memory_store.py`) — session memory (~5 min
-   rolling window, survives across wake-ups since `wake_listener.py` is
-   one long-lived process), cross-session facts via "remember
-   that..."/"forget everything", and timed reminders ("remind me in 20
-   minutes to..."), all fully local/zero-token.
-4. **Proactive engine** (`robot_hub.py`'s `proactive_watcher_loop`, 120s
-   poll) — unprompted speech on: gaming-PC temp >85°C (30 min cooldown),
-   rain ≥50% (once/day), **this Pi's own CPU >75% sustained 3+ minutes**
-   (not brief spikes), and delivering due reminders. Muted 11pm–6am
-   except reminders, which fire regardless since they're user-scheduled.
-5. **Ambient quiet-hours mode** — 11pm–6am: HUD dims via a `body.quiet-
-   hours` CSS class, TTS volume drops 30%, answers shorten to 1-2
-   sentences/120 tokens.
-6. **Barge-in** — say "hey atlas" mid-answer to cut it off and start a
-   new turn. Shares `wake_detection.py` (extracted from
-   `wake_listener.py`'s proven verification logic) so both listeners stay
-   in sync. **Two real bugs found and fixed here, not assumed:**
-   - `/interrupt` only killed an *already-playing* process — if the wake
-     phrase landed while Piper was still synthesizing (0.3–1.3s window),
-     there was nothing to kill and that sentence played out in full.
-     Fixed with a 2.5s retry loop in `watch_for_barge_in`.
-   - `listen_for_barge_in` only logged on a *successful* match, so a
-     rejected/garbled attempt left zero trace. Now logs every candidate
-     (`wake_detection.check_wake_phrase` returns the finalized
-     text/confidence for this). **Last known state: barge-in still
-     needs a fresh real test with this logging active** — haven't seen
-     a live failure with the new diagnostics yet to know if it's fully
-     fixed or still has an acoustic-masking issue (robot's own voice
-     drowning out the mic, no echo cancellation implemented).
-7. **Push notifications** — `POST /notify` (speak+log) and `POST
-   /remember` (save as a fact), both authenticated via `X-Notify-Token`
-   in `config/robot.env` (gitignored). Wesley has an iOS Shortcut wired
-   to `/notify` already; declined the "delivery alert via email trigger"
-   idea as too much setup.
-8. **Streaming TTS** — `ask_and_speak_streaming` in `listen_and_answer.py`
-   replaced the old `ask_atlas`/`speak_with_barge_in` (both deleted, no
-   longer called anywhere). Speaks each sentence as it's generated
-   instead of waiting for the full answer. Measured finding: ~80% of
-   latency is "time to first token" (fixed, unavoidable), so the real
-   win is skipping the wait to synthesize everything after sentence one
-   — a genuine ~1-2s improvement, not dramatic. Same token cost as
-   before, just different delivery timing.
-9. **Zero-token instant answers** — time/date/uptime/"are you there"
-   answered locally, no API call.
-10. **Weather optimization** — `get_weather` tool now defaults to home
-    location (was requiring the model to ask for a zip code) and
-    properly supports "tomorrow" via a 2-day forecast fetch. Current-
-    weather questions about home now skip the tool call entirely
-    (cached data injected directly into the prompt), cutting ~4s to
-    ~1-1.3s for that query shape. Tool call is still used for "tomorrow"
-    or other cities — confirmed both paths work and the HUD's activity
-    label ("CHECKING WEATHER" instead of generic "THINKING") only shows
-    for the actual tool-call path, which is correct, not a bug.
-11. **Follow-up questions** — if Atlas asks a clarifying question, the
-    mic stays open for the reply instead of returning to idle (capped
-    at 3 rounds). Also told the model explicitly that only a literal
-    "?" keeps the mic open, since it was phrasing invitations as
-    statements ("if you want, I can...") which never triggered it.
-12. **Rule book personality rewrite** — the system instructions
-    (`build_instructions_and_limits()` in `listen_and_answer.py`) had no
-    character, just generic "be friendly, useful, direct" boilerplate.
-    Rewrote with real wit, zero corporate-assistant filler phrases, and
-    an explicit instruction to give real opinions instead of hedging.
-    User confirmed this landed well.
-13. **HUD voice-activity equalizer** — replaced a flat "SYSTEM STATUS:
-    NOMINAL" text panel (which missed the point of freeing up that
-    space) with a 7-bar animated equalizer reusing the existing
-    `body.state-*` classes — idle breathing animation, amber/faster
-    while listening, green/energetic while speaking. CPU-warning
-    indicator and memory% folded into one sub-line underneath.
-14. **The boot-stall saga** — this took several real iterations, each
-    verified against actual reboots, not assumed:
-    - First hypothesis (wrong-ish but real): `atlas-hud.service` had no
-      ordering dependency on `seatd.service`, so systemd could start
-      cage before seatd was ready. Fixed with `After=`/`Requires=
-      seatd.service`. Real improvement, kept, but not the actual cause
-      of the "waits for SSH" symptom.
-    - Second bug (real, and one I introduced): `hud_cursor_fix.py`
-      crashing (`/dev/uinput` permission race between the module
-      loading and udev applying its rule) failed the *entire*
-      `ExecStartPost`, which fails the whole service start under
-      `Type=simple`, so `Restart=on-failure` killed already-working
-      cage/Chromium and retried — turning a cosmetic cursor issue into
-      no HUD rendering at all. Fixed: force `uinput` to load early via
-      `/etc/modules-load.d/uinput.conf` (`systemd/uinput.conf` in repo),
-      and made the script catch every exception and always exit 0 —
-      a failed cursor nudge must never be able to take down the kiosk.
-    - Third bug (real): even non-crashing, the nudge schedule (5 tries
-      over 20s) was still too short — a real cold boot showed cage/
-      Chromium not reporting "Started" until 22s in, so every nudge
-      missed. Extended to nudge every 5s for up to 90s.
-    - Fourth bug (real, self-inflicted by fix #3): 90s exceeds
-      systemd's default start-job timeout, so `systemctl restart`
-      itself started hanging/timing out. Fixed by backgrounding the
-      nudge script via `setsid ... &` in `ExecStartPost` (piped through
-      `systemd-cat -t hud_cursor_fix` to keep it in the journal) so its
-      long runtime no longer blocks the start job.
-    - **Actual root cause, found via exact timestamp correlation on a
-      real cold boot**: `atlas-hud.service` hardcodes
-      `XDG_RUNTIME_DIR=/run/user/1000`, which systemd only creates once
-      an actual login session starts (`pam_systemd`). On a cold boot
-      with no interactive login, cage failed repeatedly with "Unable to
-      open Wayland socket: Invalid argument" — confirmed the first two
-      failed attempts happened *before* `/run/user/1000`'s birth
-      timestamp, and the third attempt (right after that directory
-      appeared) succeeded. That's exactly why SSH login "unblocked" it
-      every time — logging in is what created the directory. Fixed
-      with `sudo loginctl enable-linger atlas`, which makes systemd
-      create that directory at boot regardless of any login. **This is
-      the fix that was actually verified working on a real reboot** —
-      first-try clean start, zero restarts, confirmed in journalctl.
+4. Fast intruder review
 
-## Still open / needs your input or a live test
+* The first intruder result/photo should appear almost immediately; local data must not incur a ~15-second startup delay or model call.
+* Load records once, send them to the HUD in one operation, display the first photo immediately, and handle speech/display timing asynchronously.
+* Preserve the intended 10-second full-screen viewing period per photo, but do not block the command pipeline with unnecessary sleeps or sequential network overhead.
+* Delete each photo only after its display period completes.
 
-- **Barge-in**: needs a fresh real "hey atlas" mid-answer test now that
-  `listen_for_barge_in` logs every candidate (not just successful
-  ones). If it still doesn't cut off, check
-  `journalctl -u atlas-wake.service` for "Barge-in candidate: ..."
-  lines — that'll show whether it heard something and rejected it
-  (confidence/RMS too low) or heard nothing at all (likely the robot's
-  own voice masking the mic — no echo cancellation exists).
-- **Cursor**: FIXED and user-confirmed on screen (2026-07-16 late
-  session). The nudge-based theory was wrong all along — the visible
-  arrow was **cage's own default cursor**, not Chromium's, which is why
-  it appeared from cold boot before any pointer device existed and why
-  the HUD's `cursor: none` never touched it. Proven live: with
-  WAYLAND_DEBUG protocol tracing, Chromium's `set_cursor(nil)` hide
-  request was sent and received yet the sprite stayed; holding a
-  virtual pointer device open changed nothing; WLR_NO_HARDWARE_CURSORS=1
-  was tried and ruled out. Real fix: a fully transparent Xcursor theme
-  at `/usr/share/icons/atlas-invisible` (generated 24x24 all-alpha-0
-  `left_ptr` + symlinks for common names) selected via
-  `Environment=XCURSOR_THEME=atlas-invisible` in atlas-hud.service —
-  cage documents XCURSOR_THEME in its man page and Chromium's Wayland
-  backend honors it too. The theme is installed system-side only (not
-  in the repo); `hud_cursor_fix.py` and its uinput plumbing are now
-  redundant but harmless, left in place for the moment — safe to remove
-  in a future cleanup pass.
-- **Camera feature** — the camera is NOT physically set up anymore
-  (user confirmed 2026-07-16 when declining camera-based feature
-  pitches — guard mode and face recognition were both rejected purely
-  for this reason). Do not pitch camera features until the user says
-  the camera is connected again. The old ideas (OCR etc.) are moot
-  until then; `vision_test.py` and `is_vision_command` still exist in
-  code but will fail without hardware.
-- **Face/gaze tracking** ("follow me") — mentioned early on, not
-  designed or built.
-- **Voice macros** (item 9 from the original feature-batch pitch) — user
-  was iffy on this, explicitly skipped, don't build without re-asking.
-- **Cloud TTS voice upgrade** — considered as a fallback if a model
-  upgrade wasn't worth it (it wasn't — see below). Pricing for
-  `tts-1`/`gpt-4o-mini-tts` wasn't cleanly available via the pricing
-  page fetch, and swapping the TTS engine is a real architecture change,
-  not a quick tweak. Not started. Revisit only if explicitly asked.
+5. Weather-map HUD
 
-## Decisions made, for context if this comes up again
+* Add commands such as "show weather map," "show weather radar," and "show my state's weather."
+* Provide a polished full-screen state/regional map with current conditions, animated rain/radar forecast, precipitation timing, temperature, alerts, and short forecast.
+* Read location/region from gitignored configuration—never hardcode personal location.
+* Prefer free authoritative/keyless sources when practical, cache locally, load quickly, and degrade cleanly offline.
+* Add an exit/close weather HUD command.
 
-- **Not switching the LLM model.** Checked live: `gpt-5.6-luna`
-  (current) is already the *cheapest* of the three 5.6-generation
-  models available on the account — `sol` is 5x the cost, `terra` 2.5x,
-  likely trading speed for more capability, not offering "faster."
-  Per the user's own rule about not chasing drastic cost increases,
-  left it alone.
-- **Voice macros declined** by the user when originally pitched — don't
-  build without re-confirming.
+6. PC Screen Copilot
 
-## Known gotchas (in case they resurface)
+* Expand the companion so Atlas can answer "what's on my screen?", explain visible errors, identify active applications/windows, focus/minimize/close requested windows, and dismiss clearly safe popups.
+* Use screenshots/vision only on demand and reuse the existing secure companion transport.
+* Harmless screen/window control needs no repeated confirmation; destructive or ambiguous high-risk actions remain gated.
 
-- **`pgrep -f <pattern>` self-matches** if the pattern is textually
-  embedded in the invoking shell command (e.g. checking for a running
-  script by grepping for its own filename inside a wrapper script whose
-  full command line contains that filename elsewhere). Use the
-  `ps aux | grep "[x]yz"` bracket trick, or grep a narrower field like
-  `python3.*` and exclude the wrapper explicitly, or just check for the
-  specific interpreter process rather than the whole command line.
-- **`/etc/systemd/system/*.service` is the live copy** — the repo's
-  `systemd/*.service` files are templates with `YOUR_USERNAME`
-  placeholders. Every fix tonight required copying the repo version
-  over the installed one and running `sed -i 's/User=YOUR_USERNAME/
-  User=atlas/'` before `daemon-reload`, or the live unit silently keeps
-  running the old config.
-- **This project has zero automated test infrastructure** — everything
-  is verified via direct script execution against real hardware/network
-  and headless Chromium screenshots, same as previous sessions. See
-  older handoff content (now only in git history, not carried forward
-  here) for the exact screenshot command pattern if needed.
-- **Always confirm before rebooting or restarting
-  `atlas-robot`/`atlas-wake`/`atlas-hud`** — standing rule, followed all
-  session. Two real reboots happened tonight, both explicitly requested.
-- **Never `git push` without asking first** — standing rule, followed
-  all session (every commit tonight was pushed only after an explicit
-  yes).
+7. Teachable commands/macros
 
-## Where to pick up next
+* Support: "When I say [phrase], [actions]."
+* Store taught commands locally in gitignored data.
+* Compile actions through the existing safe action registry/companion controls—never arbitrary shell text.
+* Add commands to list, run, update, and delete taught commands.
+* Validate before saving, prevent recursion/collisions with protected commands, and provide concise success/failure speech.
 
-Given everything above is fixed and verified, the natural next things
-(none started, no obligation to do any of them without asking first):
-1. Get a real "hey atlas" barge-in test with the new logging, to close
-   out whether that's actually fully fixed or has a deeper acoustic
-   issue.
-2. The camera feature — still just ideas, needs a real decision and
-   design pass.
-3. Anything else that comes up from actually living with tonight's
-   changes for a few days.
+8. Passive face + voice authentication
+
+* Add fully local speaker recognition using the owner's voice enrollment and normal wake/command audio.
+* Voice may strengthen a borderline face match but must never override a strong face rejection.
+* Preserve face-only authorization when the voice component is unavailable.
+* Store voice embeddings locally in gitignored data; no cloud/model tokens.
+* Add guided owner voice enrollment and status/re-enrollment commands.
+* Avoid making authentication slower; reuse audio already captured whenever possible.
+
+9. Additional upgrades
+
+* After the required work, independently choose and implement 2–4 genuinely useful, high-tech, software-only A.T.L.A.S. features.
+* Avoid duplicates, extra hardware/accounts, high recurring token use, gimmicks, or fake functionality.
+* Integrate them into the existing architecture and command system.
+
+Execution rules:
+
+* Deterministic/local commands must run before any paid model call.
+* Keep services responsive; optimize repeated file/API/camera operations.
+* If Windows-side installation or credentials are unavailable, finish the Pi/companion code and exact setup documentation rather than waiting.
+* Run syntax checks, unit/regression tests, parser tests, endpoint tests, and a canary service restart. Roll back any failing change.
+* Do not delete user data, rewrite Git history, expose secrets, push, purchase, message anyone, or open public network access.
+
+Before finishing:
+
+* Update `COMMANDS.md` with every supported spoken command, variants, behavior, safety/confirmation rules, and whether it is local or uses model tokens.
+* Update setup/config examples for every new option.
+* Provide one final report covering: root conflicts found/fixed, privacy audit results, every feature added, files changed, tests and live checks, performance improvements, any incomplete PC-side steps, rollback location, and the updated command list.
+* Do not ask me questions; complete all safely possible work and report only when finished.
