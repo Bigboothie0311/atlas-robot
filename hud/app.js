@@ -290,6 +290,47 @@ const AUTH_LABELS = {
   UNTRAINED: "",
 };
 
+// --- JARVIS boot self-test overlay (runs once on load) --------------
+(function runBootSequence() {
+  const container = document.getElementById("boot-lines");
+  const seq = document.getElementById("boot-sequence");
+  if (!container || !seq) return;
+
+  const subsystems = [
+    "REACTOR CORE", "NEURAL LATTICE", "VOICE SYNTH", "OPTICAL SENSOR",
+    "NETWORK MESH", "SECURITY GATE", "TELEMETRY LINK", "ALL SYSTEMS",
+  ];
+  subsystems.forEach((name, i) => {
+    const row = document.createElement("div");
+    row.className = "boot-line";
+    row.style.animationDelay = `${0.4 + i * 0.35}s`;
+    row.innerHTML = `<span>${name}</span><span class="boot-ok">ONLINE</span>`;
+    container.appendChild(row);
+  });
+
+  // Remove from the DOM after the fade so it never blocks interaction.
+  setTimeout(() => seq.classList.add("done"), 4600);
+})();
+
+function applyGreetingAndThreat(state) {
+  const hour = new Date().getHours();
+  const greetingEl = document.getElementById("masthead-greeting");
+  if (greetingEl) {
+    const g = hour < 5 ? "BURNING THE MIDNIGHT OIL"
+      : hour < 12 ? "GOOD MORNING"
+      : hour < 17 ? "GOOD AFTERNOON"
+      : hour < 22 ? "GOOD EVENING" : "WORKING LATE";
+    greetingEl.textContent = g;
+  }
+
+  const threat = state.threat || { level: "green" };
+  const tEl = document.getElementById("threat-level");
+  if (tEl) {
+    tEl.textContent = threat.level.toUpperCase();
+    tEl.className = threat.level;
+  }
+}
+
 function applyAlertAndScreen(state) {
   const redAlert = state.red_alert || {};
   document.body.classList.toggle("red-alert", Boolean(redAlert.active));
@@ -390,6 +431,7 @@ async function pollState() {
     applyTimers(state);
     applyAuth(state);
     applyAlertAndScreen(state);
+    applyGreetingAndThreat(state);
     applyLayout(state);
     applyImage(state);
     applyGallery(state);
@@ -420,6 +462,11 @@ async function pollStats() {
 
     document.getElementById("core-cpu").textContent = `${stats.cpu.percent}%`;
     document.getElementById("core-gauge").style.width = `${stats.cpu.percent}%`;
+
+    // JARVIS upgrade: the reactor breathes faster under real CPU load —
+    // an ambient "the machine is working" cue. 40s idle -> ~12s busy.
+    const spin = Math.max(12, 40 - (stats.cpu.percent / 100) * 28);
+    document.documentElement.style.setProperty("--reactor-spin", `${spin}s`);
     document.querySelector(".panel-core").classList.toggle("warning", isHot);
 
     document.getElementById("disk-percent").textContent = `${stats.disk.percent}%`;

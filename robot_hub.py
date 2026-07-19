@@ -241,6 +241,12 @@ def get_state():
     state["auth"] = camera_gate.hud_status()
     state["red_alert"] = alerts.red_alert_state()
 
+    try:
+        import jarvis
+        state["threat"] = jarvis.threat_level()
+    except Exception:
+        state["threat"] = {"level": "green", "reasons": ["all clear"]}
+
     # Expire a finished full-screen intruder photo so the HUD returns to
     # the security list on its own even if the caller never clears it.
     active_photo = state.get("active_intruder_photo")

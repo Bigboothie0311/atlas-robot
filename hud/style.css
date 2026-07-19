@@ -578,7 +578,8 @@ body.state-speaking #ring-orbit-dot { background: var(--green); box-shadow: 0 0 
   stroke-dasharray: 44 28;
   opacity: 0.3;
   transform-origin: 200px 200px;
-  animation: spin 60s linear infinite;
+  /* Spin duration is driven live by CPU load (app.js sets --reactor-spin). */
+  animation: spin var(--reactor-spin, 60s) linear infinite;
 }
 
 .ring-outer {
@@ -1040,6 +1041,79 @@ body.layout-diagnostics #cosmetic-terminal {
 
 body.layout-diagnostics #cosmetic-terminal .panel-label {
   color: var(--green);
+}
+
+/* ------------------------------------------------------------------ */
+/* JARVIS upgrades: boot self-test, threat readout, greeting           */
+/* ------------------------------------------------------------------ */
+
+#boot-sequence {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: radial-gradient(ellipse at center, #06131f, #02060b 80%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 24px;
+  animation: boot-seq-out 0.8s ease-out 3.6s forwards;
+}
+
+#boot-sequence.done {
+  display: none;
+}
+
+#boot-title {
+  font-size: 64px;
+  font-weight: 600;
+  letter-spacing: 22px;
+  color: var(--cyan);
+  text-shadow: 0 0 30px rgba(52, 226, 255, 0.7);
+  animation: wordmark-in 1s ease-out both;
+}
+
+#boot-lines {
+  font-size: 18px;
+  line-height: 1.9;
+  color: var(--cyan);
+  min-width: 460px;
+}
+
+#boot-lines .boot-line {
+  opacity: 0;
+  animation: boot-line-in 0.3s ease-out forwards;
+  display: flex;
+  justify-content: space-between;
+}
+
+#boot-lines .boot-ok { color: var(--green); }
+
+@keyframes boot-line-in { to { opacity: 0.9; } }
+@keyframes boot-seq-out { to { opacity: 0; visibility: hidden; } }
+
+#masthead-greeting {
+  font-size: 13px;
+  letter-spacing: 2px;
+  color: var(--amber);
+  opacity: 0.7;
+  margin-top: 4px;
+}
+
+#threat-readout {
+  font-size: 12px;
+  letter-spacing: 3px;
+  color: var(--cyan);
+  opacity: 0.6;
+  margin-top: 4px;
+}
+
+#threat-level { font-weight: 600; }
+#threat-level.green { color: var(--green); }
+#threat-level.amber { color: var(--amber); }
+#threat-level.red {
+  color: var(--red);
+  animation: live-pulse 0.8s ease-in-out infinite;
 }
 
 /* Quality floor: honor reduced-motion preferences by parking every

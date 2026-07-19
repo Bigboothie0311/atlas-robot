@@ -1850,6 +1850,17 @@ def run_internet_check_command():
     return f"Internet looks {quality}: " + ", ".join(parts) + "."
 
 
+STATUS_REPORT_PHRASES = {
+    "status report", "sitrep", "give me a status report", "system status",
+    "full status", "report status", "situation report", "status",
+}
+
+
+def run_status_report_command():
+    import jarvis
+    return jarvis.status_report()
+
+
 SELF_HEAL_PHRASES = {
     "heal yourself", "self heal", "fix yourself", "repair yourself",
     "run self healing", "check and heal", "heal", "recover yourself",
@@ -3488,6 +3499,13 @@ def _handle_turn_body(model):
         if normalized_phrase in CONNECTION_PHRASES:
             set_face("thinking")
             answer = run_connection_health_command()
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        if normalized_phrase in STATUS_REPORT_PHRASES:
+            set_face("thinking")
+            answer = run_status_report_command()
             log_qa(text, answer)
             speak(answer)
             return

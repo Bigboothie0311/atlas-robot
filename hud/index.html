@@ -6,6 +6,11 @@
 <link rel="stylesheet" href="/hud/static/style.css">
 </head>
 <body class="state-idle">
+  <div id="boot-sequence">
+    <div id="boot-title">A.T.L.A.S.</div>
+    <div id="boot-lines"></div>
+  </div>
+
   <div id="dashboard">
 
     <header id="masthead">
@@ -15,6 +20,8 @@
       </div>
       <div id="masthead-right">
         <div id="masthead-state"><span class="live-dot"></span><span id="masthead-state-text">ALL SYSTEMS NOMINAL</span></div>
+        <div id="masthead-greeting"></div>
+        <div id="threat-readout">THREAT LEVEL <span id="threat-level">GREEN</span></div>
         <div id="masthead-uplink"><span id="auth-indicator"></span><span id="device-count-mast"></span>UPLINK SECURE &middot; LOCAL CORE ACTIVE</div>
       </div>
     </header>
