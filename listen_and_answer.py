@@ -1469,28 +1469,31 @@ def is_intruder_query(normalized):
 
 
 def run_enroll_face_command():
-    """Guided enrollment: one burst capture (spoken cue to hold still),
-    quality-controlled crops, fresh LBPH model. Owner-only in practice —
-    re-enrollment on an existing model only happens inside a verified
-    (full-access) turn."""
+    """Guided seven-pose enrollment with a transactional model update.
+    Re-enrollment on an existing model remains owner-only in the voice
+    path; shell recovery is available through ``camera_gate.py enroll``.
+    """
     if camera_gate.cv2 is None:
         return "My face recognition libraries aren't installed."
 
     def progress(step):
-        if step == "start":
-            speak("Look at the camera and hold still for a moment.")
+        pose = step.split(":", 1)[1] if step.startswith("pose:") else None
+        prompt = camera_gate.ENROLL_POSE_PROMPTS.get(pose)
+
+        if prompt:
+            speak(prompt + " Hold that position.")
 
     count = camera_gate.enroll(progress=progress)
 
     if count == 0:
         return (
-            "I couldn't see your face clearly enough to learn it. "
-            "Check the lighting, face me directly, and try again."
+            "I couldn't collect enough clear angles to replace your "
+            "enrollment. Your previous face model is still intact."
         )
 
     camera_gate.mark_verified()
     return (
-        f"Done — your face is enrolled from {count} captures. "
+        f"Done — your face is enrolled from {count} multi-angle captures. "
         "You're my authorized user now."
     )
 
