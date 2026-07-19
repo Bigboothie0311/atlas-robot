@@ -107,6 +107,13 @@ def _update_phone_presence(online_macs, now):
         else:
             if was_present:
                 _phone_state["last_missing_since"] = now
+                # Phone just left the LAN — arm the camera gate so the
+                # next person to use ATLAS is re-verified.
+                try:
+                    import camera_gate
+                    camera_gate.arm_gate(reason="phone_left")
+                except Exception:
+                    pass
 
             _phone_state["present"] = False
 

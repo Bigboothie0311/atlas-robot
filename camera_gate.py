@@ -46,7 +46,7 @@ INTRUDER_LOG_PATH = DATA_DIR / "intruder_log.json"
 # never touched by rotation.
 VERIFIED_CAPTURE_PATH = DATA_DIR / "last_verified.jpg"
 
-VALIDITY_WINDOW_SECONDS = 10 * 60
+VALIDITY_WINDOW_SECONDS = 60 * 60  # 1 hour (was 10 min)
 
 # LBPH distance — LOWER is more similar. Accept below this.
 LBPH_ACCEPT_THRESHOLD = 70.0
@@ -114,8 +114,44 @@ def is_verification_current():
     return time.time() - last < VALIDITY_WINDOW_SECONDS
 
 
+def arm_gate(reason="departure"):
+    """Forces the NEXT interaction to re-verify — used when the owner says
+    'I'm leaving' or the phone leaves the LAN. Idempotent."""
+    _save_state({"armed": True, "armed_reason": reason})
+
+
+def should_verify():
+    """Decides whether this wake needs a face check. The gate stays quiet
+    (trusts the last auth) UNLESS:
+      - a departure armed it ('I'm leaving' / phone left), or
+      - it's been over an hour since the last successful auth, or
+      - the last face seen was unauthorized and no authorized user has
+        cleared it yet — in that case it re-checks EVERY wake until an
+        authorized user appears (or the stranger stops trying)."""
+    state = _load_state()
+
+    if state.get("pending_unauthorized"):
+        return True
+    if state.get("armed"):
+        return True
+    return not is_verification_current()
+
+
 def mark_verified():
-    _save_state({"last_verified_at": time.time()})
+    """An authorized user is present — reset the window and clear both the
+    departure arm and any pending-unauthorized state."""
+    _save_state({
+        "last_verified_at": time.time(),
+        "armed": False,
+        "armed_reason": None,
+        "pending_unauthorized": False,
+    })
+
+
+def mark_unauthorized():
+    """A stranger was seen — keep re-verifying every wake until an
+    authorized user clears it."""
+    _save_state({"pending_unauthorized": True})
 
 
 # ---------------------------------------------------------------------
@@ -332,6 +368,7 @@ def verify():
             _rotate_verified_capture(best_accept_frame or first_face_frame)
             return "authorized"
 
+        mark_unauthorized()
         _last_intruder_id = _record_intruder(first_face_frame)
         return "unauthorized"
 

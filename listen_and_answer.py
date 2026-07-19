@@ -1858,8 +1858,12 @@ GOODBYE_PHRASES = {
 
 
 def run_goodbye_routine():
-    """'I'm leaving' — shut down the PC and darken the HUD."""
+    """'I'm leaving' — shut down the PC, darken the HUD, and arm the
+    camera gate so the next person to use ATLAS gets verified."""
     results = []
+
+    # Arm face verification for whoever's next (you'll re-auth on return).
+    camera_gate.arm_gate(reason="owner_left")
 
     # Darken the HUD.
     if _set_screen_dark(True):
@@ -3152,7 +3156,7 @@ def _handle_turn_body(model):
         if (
             camera_gate.is_available()
             and camera_gate.is_enabled()
-            and not camera_gate.is_verification_current()
+            and camera_gate.should_verify()
         ):
             set_face("thinking")
             speak("One moment — verifying.")
