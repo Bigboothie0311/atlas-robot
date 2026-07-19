@@ -271,6 +271,12 @@ def get_state():
     with _screen_lock:
         state["screen_dark"] = _screen_dark
 
+    with _weather_overlay_lock:
+        state["weather_overlay"] = _weather_overlay_open
+
+    with _brightness_boost_lock:
+        state["brightness_boost"] = _brightness_boost
+
     return jsonify(state)
 
 
@@ -798,6 +804,12 @@ def end_focus():
 _screen_lock = threading.Lock()
 _screen_dark = False
 
+_weather_overlay_lock = threading.Lock()
+_weather_overlay_open = False
+
+_brightness_boost_lock = threading.Lock()
+_brightness_boost = False
+
 
 @app.post("/screen")
 def set_screen():
@@ -813,6 +825,39 @@ def set_screen():
         dark = _screen_dark
 
     return jsonify({"ok": True, "dark": dark})
+
+
+@app.post("/hud/weather_overlay")
+def set_weather_overlay():
+    """'Pull up the weather radar' — opens/closes the full-screen weather
+    + radar overlay (see hud/app.js openWeatherOverlay). Flag-based, same
+    pattern as /screen, so a local 'w' keypress on the kiosk and a voice
+    command both converge on the same state."""
+    global _weather_overlay_open
+
+    data = request.get_json(silent=True) or {}
+
+    with _weather_overlay_lock:
+        _weather_overlay_open = bool(data.get("open", False))
+        open_ = _weather_overlay_open
+
+    return jsonify({"ok": True, "open": open_})
+
+
+@app.post("/hud/brightness_boost")
+def set_brightness_boost():
+    """'Brighten the screen' — overrides the quiet-hours HUD dimming back
+    to full brightness (e.g. for a demo at night) without leaving quiet
+    hours mode entirely."""
+    global _brightness_boost
+
+    data = request.get_json(silent=True) or {}
+
+    with _brightness_boost_lock:
+        _brightness_boost = bool(data.get("boost", False))
+        boost = _brightness_boost
+
+    return jsonify({"ok": True, "boost": boost})
 
 
 @app.post("/stand_down")

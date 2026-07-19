@@ -94,6 +94,10 @@ REGISTRY = [
     # --- HUD --------------------------------------------------------
     {"id": "screen_dark", "name": "screen dimming", "description": "dims the HUD to near-black or restores it",
      "aliases": ["go dark", "lights out", "lights up"], "confirm": False, "requires": "none", "category": "hud"},
+    {"id": "weather_hud", "name": "weather radar screen", "description": "pulls up the full-screen weather HUD: current conditions, hourly rain, multi-day outlook, and a live NWS radar loop",
+     "aliases": ["show me the weather radar", "pull up the weather", "weather hud", "close the weather screen"], "confirm": False, "requires": "none", "category": "hud"},
+    {"id": "brightness_boost", "name": "brightness boost", "description": "overrides quiet-hours dimming back to full brightness (or restores normal)",
+     "aliases": ["brighten the screen", "raise the brightness", "normal brightness"], "confirm": False, "requires": "none", "category": "hud"},
     {"id": "stand_down", "name": "alert acknowledge", "description": "clears a red alert",
      "aliases": ["stand down", "all clear"], "confirm": False, "requires": "none", "category": "hud"},
 

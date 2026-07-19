@@ -78,6 +78,7 @@ spoken version of this list.
 | "what can you control" | Lists real capabilities | Local |
 | "what would happen if I said …" | Command simulator (no execution) | Local |
 | "check your tools" / "upgrade whisper" | Tool versions / gated upgrade proposal | Local |
+| _asking for something that needs a missing tool_ (e.g. "make a QR code", "translate this") | Offers to acquire the tool: spoken yes/no → PyPI due-diligence → install → reports location → refreshes graph | Local + PyPI |
 | "list my achievements" | Easter-egg progress | Local |
 
 ## Speech tuning
@@ -103,6 +104,10 @@ spoken version of this list.
 | Say | Does | Cost |
 |-----|------|------|
 | "go dark" / "lights out" / "lights up" | Dim/restore the HUD | Local |
+| "weather radar" / "pull up the weather" / "show me the weather radar" / "weather hud" | Opens the full-screen weather + live NWS radar loop overlay | Local |
+| "close the weather" / "close the radar" / "hide the weather" | Closes the weather/radar overlay | Local |
+| "brighten the screen" / "raise the brightness" | Overrides quiet-hours dimming back to full brightness | Local |
+| "normal brightness" / "lower the brightness" | Restores normal quiet-hours dimming | Local |
 | "stand down" / "all clear" | Clear a red alert | Local |
 
 ## PC (needs the Windows companion)

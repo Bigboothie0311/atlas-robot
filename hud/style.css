@@ -68,6 +68,19 @@ body.quiet-hours {
   filter: brightness(calc(var(--hud-brightness) * 0.45)) saturate(0.75);
 }
 
+/* Voice-commanded override ("brighten the screen" / "raise the brightness").
+   Works any time so a daytime demo still shows a clear jump, and at night it
+   overrides the quiet-hours dimming without leaving quiet-hours mode (voice
+   stays quiet/short, only the screen brightens). The two-class quiet-hours
+   rule below wins on specificity when both apply. */
+body.brightness-boost {
+  filter: brightness(calc(var(--hud-brightness) * 1.35)) saturate(1.1);
+}
+
+body.quiet-hours.brightness-boost {
+  filter: brightness(calc(var(--hud-brightness) * 1.1)) saturate(1);
+}
+
 /* Fixed 1920x1080 design canvas — app.js scales the whole page to fit
    whatever the actual screen resolution is (e.g. an 800x480 kiosk panel),
    via document.documentElement.style.zoom, rather than reflowing at each

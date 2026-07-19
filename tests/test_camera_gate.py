@@ -55,6 +55,58 @@ class VerificationWindowTests(unittest.TestCase):
             ):
                 self.assertTrue(camera_gate.should_verify())
 
+    def test_owner_left_command_arm_always_verifies(self):
+        """An explicit 'I'm leaving' arm re-verifies the next interaction
+        regardless of phone presence."""
+        state = {"armed": True, "armed_reason": "owner_left"}
+        with mock.patch.object(camera_gate, "_load_state", return_value=state):
+            self.assertTrue(camera_gate.should_verify())
+
+    def test_phone_left_arm_verifies_only_while_phone_still_away(self):
+        """A 'phone_left' arm only demands a face check while the phone is
+        STILL gone from the LAN. Once it's back, walking past the camera
+        does not trigger verification."""
+        import network_sentinel
+
+        state = {"armed": True, "armed_reason": "phone_left"}
+
+        with mock.patch.object(camera_gate, "_load_state", return_value=state):
+            with mock.patch.object(
+                network_sentinel, "phone_currently_away", return_value=True
+            ):
+                self.assertTrue(camera_gate.should_verify())
+
+            with mock.patch.object(
+                network_sentinel, "phone_currently_away", return_value=False
+            ):
+                self.assertFalse(camera_gate.should_verify())
+
+    def test_phone_left_arm_still_verifies_if_presence_unknown(self):
+        """If presence can't be determined, fail safe to verifying."""
+        import network_sentinel
+
+        state = {"armed": True, "armed_reason": "phone_left"}
+        with mock.patch.object(camera_gate, "_load_state", return_value=state), \
+                mock.patch.object(
+                    network_sentinel, "phone_currently_away",
+                    side_effect=RuntimeError("boom"),
+                ):
+            self.assertTrue(camera_gate.should_verify())
+
+    def test_disarm_if_reason_clears_matching_phone_left_arm(self):
+        state = {"armed": True, "armed_reason": "phone_left"}
+        with mock.patch.object(camera_gate, "_load_state", return_value=state), \
+                mock.patch.object(camera_gate, "_save_state") as save:
+            camera_gate.disarm_if_reason("phone_left")
+        save.assert_called_once_with({"armed": False, "armed_reason": None})
+
+    def test_disarm_if_reason_leaves_owner_left_command_arm_intact(self):
+        state = {"armed": True, "armed_reason": "owner_left"}
+        with mock.patch.object(camera_gate, "_load_state", return_value=state), \
+                mock.patch.object(camera_gate, "_save_state") as save:
+            camera_gate.disarm_if_reason("phone_left")
+        save.assert_not_called()
+
     def test_trusted_prompt_slides_window_without_clearing_security_flags(self):
         state = {
             "last_verified_at": 4_000.0,

@@ -27,6 +27,12 @@ WHISPER_DOWNLOAD_TIMEOUT_SECONDS = 300
 MONITOR_INTERVAL_SECONDS = 5 * 60
 RECENT_FAILURE_WINDOW = 15
 
+# The companion/PC being offline is an EXPECTED state (the PC is simply
+# off), not a repairable fault. We report it once when it first goes
+# offline and stay silent until it comes back — otherwise a PC that's off
+# overnight logs and announces an "issue" every sweep.
+_companion_offline = False
+
 
 def _service_active(unit):
     try:
@@ -183,15 +189,34 @@ def check_and_heal():
         incidents.append(_heal_speech_engine())
 
     # 4. Companion — report only (never restart the PC from here); and
-    #    only flag it as a problem when the PC is truly offline.
+    #    only flag it as a problem when the PC is truly offline. Report it
+    #    ONCE per offline episode (on the transition to offline), not every
+    #    sweep — a deliberately-off PC is not a recurring fault to log and
+    #    announce every 5 minutes.
+    global _companion_offline
     if connection_health.pc_is_truly_offline():
-        incidents.append(recovery._incident(
-            "companion", "PC companion and direct link both unreachable",
-            "none (start the companion on the PC)",
-            "PC is genuinely offline", False,
-        ))
+        if not _companion_offline:
+            _companion_offline = True
+            incidents.append(recovery._incident(
+                "companion", "PC companion and direct link both unreachable",
+                "none (start the companion on the PC)",
+                "PC is genuinely offline", False,
+            ))
+    else:
+        _companion_offline = False
 
     return incidents
+
+
+def _actionable(incidents):
+    """Incidents worth announcing — ones we actually acted on. Anything
+    whose action is a no-op ("none…") or was deferred ("skipped…") — e.g.
+    a genuinely-offline PC — is filtered out so it never gets spoken."""
+    return [
+        i for i in incidents
+        if not i["action"].startswith("none")
+        and not i["action"].startswith("skipped")
+    ]
 
 
 def spoken_report(incidents):
@@ -241,7 +266,7 @@ def monitor_loop(speak, log, should_stay_quiet):
     while True:
         try:
             incidents = check_and_heal()
-            acted = [i for i in incidents if i["action"] not in ("none", "skipped (cooldown)")]
+            acted = _actionable(incidents)
             if acted and not should_stay_quiet():
                 report = spoken_report(incidents)
                 log(report)

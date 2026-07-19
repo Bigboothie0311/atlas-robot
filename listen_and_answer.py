@@ -1895,6 +1895,60 @@ SCREEN_WAKE_PHRASES = {
     "wake the screen",
 }
 
+# Spoken input almost never matches a phrase verbatim, so these two intents
+# are detected by keyword rather than exact-set membership. That's the whole
+# reason the earlier exact-match version fell through to the LLM ("I can't
+# pull up the radar") — a live transcription of "hey can you pull the radar
+# up" never equals any fixed string.
+
+def _wants_weather_hud(normalized):
+    """Full-screen weather + radar HUD intent. Returns 'open', 'close', or
+    None. 'radar' unambiguously means this screen. A bare weather *question*
+    ('what's the weather', 'will it rain') must still reach the get_weather
+    tool, so plain 'weather' only opens the HUD alongside a show/surface verb."""
+    has_radar = "radar" in normalized
+    has_weather = "weather" in normalized
+
+    if not (has_radar or has_weather):
+        return None
+
+    if any(word in normalized for word in ("close", "hide", "dismiss", "get rid", "take down")):
+        return "close"
+
+    if has_radar:
+        return "open"
+
+    surface_words = (
+        "pull up", "pull the", "bring up", "show", "open", "display",
+        "put up", "hud", "screen", "full", "overlay", "map", "forecast screen",
+        "let me see", "let's see", "can i see", "give me",
+    )
+    if any(word in normalized for word in surface_words):
+        return "open"
+    return None
+
+
+def _wants_brightness_change(normalized):
+    """Quiet-hours brightness override. Returns 'boost', 'normal', or None.
+    Gated on a brightness word so unrelated 'up/down' never trip it."""
+    if "bright" not in normalized and "dim" not in normalized:
+        return None
+
+    # 'dim'/'dimmer' or an explicit down word -> back to normal dimming.
+    if "dim" in normalized:
+        return "normal"
+    down_words = ("lower", " down", "normal", "decrease", "reduce", "back to normal", "restore")
+    if any(word in normalized for word in down_words):
+        return "normal"
+
+    up_words = ("brighten", "brighter", "raise", " up", "increase", "boost", "full", "max", "brightest")
+    if any(word in normalized for word in up_words):
+        return "boost"
+
+    # Bare 'brightness' with no direction — the showcase ask is "brightness"
+    # meaning "make it brighter", so default to boosting.
+    return "boost"
+
 
 def _set_screen_dark(dark):
     try:
@@ -1902,6 +1956,24 @@ def _set_screen_dark(dark):
         return True
     except requests.RequestException as error:
         print("screen request failed:", error, flush=True)
+        return False
+
+
+def _set_weather_overlay(open_):
+    try:
+        requests.post(f"{HUB}/hud/weather_overlay", json={"open": open_}, timeout=5)
+        return True
+    except requests.RequestException as error:
+        print("weather overlay request failed:", error, flush=True)
+        return False
+
+
+def _set_brightness_boost(boost):
+    try:
+        requests.post(f"{HUB}/hud/brightness_boost", json={"boost": boost}, timeout=5)
+        return True
+    except requests.RequestException as error:
+        print("brightness boost request failed:", error, flush=True)
         return False
 
 
@@ -3572,6 +3644,77 @@ def _maybe_clarify_command(text, model):
     return True
 
 
+_AFFIRMATIVE_WORDS = {
+    "yes", "yeah", "yep", "yup", "sure", "ok", "okay", "correct", "right",
+    "please", "do", "go", "download", "install", "get",
+}
+
+
+def _reply_is_affirmative(reply):
+    """A short spoken confirmation counts as yes if any of its words is an
+    affirmative — covers 'yes', 'do it', 'go ahead', 'download it'."""
+    return any(word in _AFFIRMATIVE_WORDS for word in _normalize_phrase(reply).split())
+
+
+def _record_short_reply(model):
+    """Record and transcribe a brief yes/no answer, same pattern as the
+    'did you mean' clarifier."""
+    set_face("listening")
+    subprocess.run([
+        "arecord", "-D", MIC_DEVICE, "-f", "S16_LE", "-r", "16000",
+        "-c", "1", "-d", "3", AUDIO_PATH,
+    ], check=False)
+    set_face("thinking")
+    return transcribe_audio(model)
+
+
+def _maybe_offer_tool_install(text, model):
+    """If the request needs a catalog tool A.T.L.A.S. doesn't have yet,
+    offer to acquire it. On a spoken yes: vet it against PyPI, install it,
+    say where it landed, and refresh the knowledge graph. Returns True if
+    it handled the turn, False to let the normal answer path run."""
+    import tool_installer
+
+    tool = tool_installer.find_missing_tool_for_request(text)
+    if tool is None:
+        return False
+
+    desc = tool_installer.describe(tool)
+    speak(f"I don't have the {tool} tool installed, but I can get it — "
+          f"it would let me {desc}. Should I download it? Say yes or no.")
+
+    if not _reply_is_affirmative(_record_short_reply(model)):
+        answer = f"Okay, I'll leave {tool} alone for now."
+        log_qa(text, answer)
+        speak(answer)
+        return True
+
+    speak("On it — let me do my due diligence first.")
+    check = tool_installer.due_diligence(tool)
+    if not check["ok"]:
+        log_qa(text, check["reason"])
+        speak(check["reason"])
+        return True
+
+    speak(f"{check['reason']} Installing now.")
+    result = tool_installer.install(tool)
+    if not result["ok"]:
+        log_qa(text, result["message"])
+        speak(result["message"])
+        return True
+
+    location = tool_installer.where_is(tool)
+    graph_ok = tool_installer.update_graph()
+
+    where = f" It lives at {location}." if location else ""
+    graph_note = (" I've refreshed my knowledge graph so it's on the map."
+                  if graph_ok else "")
+    answer = f"Done — {tool} is installed and ready.{where}{graph_note}"
+    log_qa(text, answer)
+    speak(answer)
+    return True
+
+
 def handle_turn(model):
     """Logging wrapper: every turn is recorded to the persistent logbook
     (wake confidence, mic, RMS, transcript, intent, latency, errors,
@@ -3921,6 +4064,30 @@ def _handle_turn_body(model):
             speak(answer)
             return
 
+        weather_hud_intent = _wants_weather_hud(normalized_phrase)
+        if weather_hud_intent == "open":
+            answer = "Pulling up the weather radar." if _set_weather_overlay(True) else "I couldn't reach the screen."
+            log_qa(text, answer)
+            speak(answer)
+            return
+        if weather_hud_intent == "close":
+            answer = "Closing the weather screen." if _set_weather_overlay(False) else "I couldn't reach the screen."
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        brightness_intent = _wants_brightness_change(normalized_phrase)
+        if brightness_intent == "boost":
+            answer = "Brightening the screen." if _set_brightness_boost(True) else "I couldn't reach the screen."
+            log_qa(text, answer)
+            speak(answer)
+            return
+        if brightness_intent == "normal":
+            answer = "Back to normal brightness." if _set_brightness_boost(False) else "I couldn't reach the screen."
+            log_qa(text, answer)
+            speak(answer)
+            return
+
         if normalized_phrase in PHONE_PHRASES:
             answer = run_phone_command()
             log_qa(text, answer)
@@ -4259,9 +4426,15 @@ def _handle_turn_body(model):
             speak(local_answer)
             return
 
-        # Nothing matched a command. Before spending a paid model call,
-        # see if the transcript is CLOSE to a real command (mis-heard) and
-        # offer a one-shot "did you mean X?" — a yes re-runs that command.
+        # Nothing matched a command. If the request needs a tool A.T.L.A.S.
+        # doesn't have yet, offer to acquire it (gated on a spoken yes and a
+        # PyPI due-diligence check) before falling through to a paid answer.
+        if _maybe_offer_tool_install(text, model):
+            return
+
+        # Before spending a paid model call, see if the transcript is CLOSE
+        # to a real command (mis-heard) and offer a one-shot "did you mean
+        # X?" — a yes re-runs that command.
         if _maybe_clarify_command(text, model):
             return
 

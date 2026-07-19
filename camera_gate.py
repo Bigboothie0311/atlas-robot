@@ -174,22 +174,57 @@ def arm_gate(reason="departure"):
     _save_state({"armed": True, "armed_reason": reason})
 
 
+def disarm_if_reason(reason):
+    """Clears an armed gate ONLY if it was armed for this specific reason.
+
+    Used when the phone returns to the LAN: a 'phone_left' arm no longer
+    applies once the owner is clearly home. Deliberately leaves an
+    'owner_left' (explicit command) arm and any pending-unauthorized
+    state untouched — a stranger caught while you were away still needs
+    an authorized face to clear it."""
+    state = _load_state()
+    if state.get("armed") and state.get("armed_reason") == reason:
+        _save_state({"armed": False, "armed_reason": None})
+
+
 def should_verify():
     """Decides whether this wake needs a face check. The gate stays quiet
     (trusts the last auth) UNLESS:
-      - a departure armed it ('I'm leaving' / phone gone from the LAN for
-        more than PHONE_GRACE_SECONDS — see network_sentinel.py), or
+      - the owner explicitly armed it with a command ('I'm leaving' ->
+        armed_reason 'owner_left'), or
+      - the phone/MAC has been gone from the LAN past the grace window
+        (armed_reason 'phone_left') AND is STILL gone right now — once it
+        rejoins wifi the owner is clearly home, so merely walking past the
+        camera never triggers a check, or
       - the last face seen was unauthorized and no authorized user has
         cleared it yet — in that case it re-checks EVERY wake until an
         authorized user appears (or the stranger stops trying).
 
-    Being home does not expire trust on its own; only a real departure
-    (or a pending unauthorized face) re-arms the check."""
+    Being home does not expire trust on its own, and a phone that dropped
+    off wifi overnight but is back on the LAN does not either — only a
+    live departure, an explicit command, or a pending unauthorized face
+    re-arms the check."""
     state = _load_state()
 
     if state.get("pending_unauthorized"):
         return True
-    return bool(state.get("armed"))
+
+    if not state.get("armed"):
+        return False
+
+    # A 'phone_left' arm only counts while the phone is CURRENTLY still
+    # away. If it's back on the LAN, the owner is home — don't re-verify
+    # them for walking in front of the camera.
+    if state.get("armed_reason") == "phone_left":
+        try:
+            import network_sentinel
+            return network_sentinel.phone_currently_away()
+        except Exception:
+            # Can't tell -> fail safe to verifying, as before.
+            return True
+
+    # Explicit command arm ('owner_left') or any other armed reason.
+    return True
 
 
 def mark_verified():

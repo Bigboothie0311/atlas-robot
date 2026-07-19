@@ -129,5 +129,83 @@ class HealNowReportTests(unittest.TestCase):
         self.assertNotIn("Also,", report)
 
 
+class ActionableFilterTests(unittest.TestCase):
+    def test_no_op_and_deferred_actions_are_not_announced(self):
+        incidents = [
+            {"action": "none (start the companion on the PC)"},
+            {"action": "none"},
+            {"action": "skipped (cooldown)"},
+            {"action": "restarted atlas-hud.service"},
+        ]
+        acted = self_healing._actionable(incidents)
+        self.assertEqual([i["action"] for i in acted], ["restarted atlas-hud.service"])
+
+
+class CompanionOfflineDedupeTests(unittest.TestCase):
+    def setUp(self):
+        self_healing._companion_offline = False
+        # Everything else healthy so only the companion branch can fire.
+        self._patches = [
+            mock.patch.object(self_healing, "_service_active", return_value=True),
+            mock.patch.object(
+                self_healing.connection_health, "check_direct_link",
+                return_value={"ok": True, "detail": ""},
+            ),
+            mock.patch.object(
+                self_healing, "WHISPER_CLI",
+                mock.Mock(**{"exists.return_value": True}),
+            ),
+            mock.patch.object(
+                self_healing, "WHISPER_MODEL",
+                mock.Mock(**{"exists.return_value": True}),
+            ),
+        ]
+        for patch in self._patches:
+            patch.start()
+
+    def tearDown(self):
+        for patch in self._patches:
+            patch.stop()
+        self_healing._companion_offline = False
+
+    def test_offline_pc_is_reported_once_then_stays_silent(self):
+        with mock.patch.object(
+            self_healing.connection_health, "pc_is_truly_offline", return_value=True
+        ), mock.patch.object(
+            self_healing.recovery, "_incident",
+            side_effect=lambda *a, **k: {"component": "companion", "action": a[2]},
+        ) as incident:
+            first = self_healing.check_and_heal()
+            second = self_healing.check_and_heal()
+
+        self.assertEqual(len(first), 1)
+        self.assertEqual(first[0]["component"], "companion")
+        self.assertEqual(second, [])
+        self.assertEqual(incident.call_count, 1)
+
+    def test_offline_reports_again_after_pc_recovers(self):
+        with mock.patch.object(
+            self_healing.recovery, "_incident",
+            side_effect=lambda *a, **k: {"component": "companion", "action": a[2]},
+        ) as incident:
+            with mock.patch.object(
+                self_healing.connection_health, "pc_is_truly_offline",
+                return_value=True,
+            ):
+                self_healing.check_and_heal()
+            with mock.patch.object(
+                self_healing.connection_health, "pc_is_truly_offline",
+                return_value=False,
+            ):
+                self_healing.check_and_heal()  # PC back -> resets latch
+            with mock.patch.object(
+                self_healing.connection_health, "pc_is_truly_offline",
+                return_value=True,
+            ):
+                self_healing.check_and_heal()  # offline again -> reports again
+
+        self.assertEqual(incident.call_count, 2)
+
+
 if __name__ == "__main__":
     unittest.main()

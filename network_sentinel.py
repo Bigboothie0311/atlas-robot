@@ -69,6 +69,23 @@ def phone_presence():
         }
 
 
+def phone_currently_away():
+    """True only when a configured phone has been continuously absent from
+    the LAN past the grace window RIGHT NOW.
+
+    Returns False when no phone is configured or it hasn't been seen yet
+    this session, so a cold start never reads as 'away'. Used by the
+    camera gate so a 'phone_left' arm is only honored while the phone is
+    still actually gone — not after it has rejoined wifi."""
+    if load_phone_mac() is None:
+        return False
+
+    with _lock:
+        if _phone_state["last_seen"] <= 0:
+            return False
+        return not _phone_state["present"]
+
+
 # Phones power down their Wi-Fi radio when the screen is off and drop off
 # the ARP table for minutes at a time even while sitting at home. So
 # presence is judged by a GRACE window, not a single scan: the phone
@@ -112,6 +129,16 @@ def _update_phone_presence(online_macs, now):
 
                 _phone_state["present"] = True
                 _phone_state["last_missing_since"] = None
+
+                # The phone is back on the LAN — the owner is clearly home,
+                # so a 'phone_left' re-auth arm no longer applies. (An
+                # explicit 'owner_left' arm or a pending stranger is left
+                # in place.)
+                try:
+                    import camera_gate
+                    camera_gate.disarm_if_reason("phone_left")
+                except Exception:
+                    pass
         else:
             # Not seen this scan — but only treat as DEPARTED after the
             # grace window of continuous absence.

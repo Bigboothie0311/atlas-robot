@@ -335,6 +335,7 @@ function applyAlertAndScreen(state) {
   const redAlert = state.red_alert || {};
   document.body.classList.toggle("red-alert", Boolean(redAlert.active));
   document.body.classList.toggle("screen-dark", Boolean(state.screen_dark));
+  document.body.classList.toggle("brightness-boost", Boolean(state.brightness_boost));
 
   if (redAlert.active && document.body.classList.contains("state-idle")) {
     document.getElementById("masthead-state-text").textContent = "RED ALERT";
@@ -436,6 +437,7 @@ async function pollState() {
     applyImage(state);
     applyGallery(state);
     applyQaLog(state);
+    applyWeatherOverlay(state);
   } catch (error) {
     console.error("state poll failed", error);
   }
@@ -747,12 +749,43 @@ function closeWeatherOverlay() {
   weatherOverlayTimer = null;
 }
 
-function toggleWeatherOverlay() {
-  if (isWeatherOverlayOpen()) {
-    closeWeatherOverlay();
-  } else {
-    openWeatherOverlay();
+// Server-driven open/close (voice command -> /hud/weather_overlay -> here)
+// converges with the local 'w' keypress below via pushWeatherOverlayState,
+// so either trigger keeps both sides in sync. lastKnownWeatherOverlayState
+// starts null so the first poll always applies the server's initial value.
+let lastKnownWeatherOverlayState = null;
+
+function applyWeatherOverlay(state) {
+  const shouldBeOpen = Boolean(state.weather_overlay);
+  if (lastKnownWeatherOverlayState === shouldBeOpen) {
+    return;
   }
+  lastKnownWeatherOverlayState = shouldBeOpen;
+
+  if (shouldBeOpen) {
+    openWeatherOverlay();
+  } else {
+    closeWeatherOverlay();
+  }
+}
+
+function pushWeatherOverlayState(open) {
+  lastKnownWeatherOverlayState = open;
+  fetch("/hud/weather_overlay", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ open }),
+  }).catch((error) => console.error("weather overlay push failed", error));
+}
+
+function toggleWeatherOverlay() {
+  const next = !isWeatherOverlayOpen();
+  if (next) {
+    openWeatherOverlay();
+  } else {
+    closeWeatherOverlay();
+  }
+  pushWeatherOverlayState(next);
 }
 
 window.addEventListener("keydown", (event) => {
@@ -761,6 +794,7 @@ window.addEventListener("keydown", (event) => {
     toggleWeatherOverlay();
   } else if (key === "escape" && isWeatherOverlayOpen()) {
     closeWeatherOverlay();
+    pushWeatherOverlayState(false);
   }
 });
 
