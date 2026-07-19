@@ -160,13 +160,23 @@ def speak(text):
 
 
 def cue_listening():
-    """Plays the short system-ready earcon, with speech as a fallback."""
+    """Plays the short system-ready earcon, with speech as a fallback.
+
+    Best-effort end to end: if the earcon fails AND the voice fallback
+    also fails (e.g. the hub is briefly overloaded right after a spoken
+    verification message), the turn must still proceed to record_audio()
+    rather than dying silently before the mic ever opens.
+    """
     try:
         response = requests.post(f"{HUB}/listening_earcon", timeout=3)
         response.raise_for_status()
     except requests.RequestException as error:
         print("Listening earcon failed; using voice cue:", error, flush=True)
-        speak("Go ahead.")
+
+        try:
+            speak("Go ahead.")
+        except requests.RequestException as speak_error:
+            print("Voice cue fallback also failed:", speak_error, flush=True)
 
 
 def dismiss_current_interaction():

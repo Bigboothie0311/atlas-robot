@@ -48,6 +48,28 @@ class CommandRoutingTests(unittest.TestCase):
         post.assert_called_once()
         speak.assert_called_once_with("Go ahead.")
 
+    @mock.patch.object(
+        listen_and_answer,
+        "speak",
+        side_effect=listen_and_answer.requests.RequestException("hub overloaded"),
+    )
+    @mock.patch.object(
+        listen_and_answer.requests,
+        "post",
+        side_effect=listen_and_answer.requests.RequestException("offline"),
+    )
+    def test_listening_earcon_and_voice_fallback_both_failing_does_not_raise(
+        self, post, speak
+    ):
+        # If both the earcon and its voice fallback fail (e.g. the hub is
+        # briefly overloaded right after a spoken verification message),
+        # the turn must still be able to proceed to record_audio() instead
+        # of dying silently before the mic ever opens.
+        listen_and_answer.cue_listening()
+
+        post.assert_called_once()
+        speak.assert_called_once_with("Go ahead.")
+
     def test_adaptive_silence_threshold_separates_room_noise_after_speech(self):
         self.assertEqual(
             220,
@@ -232,6 +254,9 @@ class ClearIntruderAlertsTests(unittest.TestCase):
             "dismiss intruder alerts",
             "clear security alerts",
             "scrub the intruder alerts",
+            "clear the intruders",
+            "clear any intruders",
+            "clear intruders",
         ):
             self.assertTrue(
                 listen_and_answer.is_clear_intruder_alerts_command(phrase),
