@@ -68,6 +68,8 @@ REGISTRY = [
      "aliases": ["check connections", "is everything connected"], "confirm": False, "requires": "none", "category": "diagnostics"},
     {"id": "log_query", "name": "history", "description": "answers what went wrong or recent errors from its logs",
      "aliases": ["what went wrong", "any recent errors"], "confirm": False, "requires": "none", "category": "diagnostics"},
+    {"id": "self_heal", "name": "self-healing", "description": "detects failed services/links and runs safe repairs, reporting what it fixed",
+     "aliases": ["heal yourself", "self heal"], "confirm": False, "requires": "none", "category": "diagnostics"},
     {"id": "system_health", "name": "system healing", "description": "diagnoses and safely repairs the Pi, then reports",
      "aliases": ["get the whole system healthy"], "confirm": False, "requires": "none", "category": "diagnostics"},
     {"id": "internet_check", "name": "internet check", "description": "measures internet latency and packet loss",

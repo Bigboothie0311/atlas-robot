@@ -1850,6 +1850,17 @@ def run_internet_check_command():
     return f"Internet looks {quality}: " + ", ".join(parts) + "."
 
 
+SELF_HEAL_PHRASES = {
+    "heal yourself", "self heal", "fix yourself", "repair yourself",
+    "run self healing", "check and heal", "heal", "recover yourself",
+}
+
+
+def run_self_heal_command():
+    import self_healing
+    return self_healing.heal_now()
+
+
 GOODBYE_PHRASES = {
     "i'm leaving", "im leaving", "i am leaving", "i'm heading out",
     "im heading out", "i'm going out", "goodbye atlas", "i'm off",
@@ -3477,6 +3488,14 @@ def _handle_turn_body(model):
         if normalized_phrase in CONNECTION_PHRASES:
             set_face("thinking")
             answer = run_connection_health_command()
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        if normalized_phrase in SELF_HEAL_PHRASES:
+            set_face("thinking")
+            speak("Running a self-heal. One moment.")
+            answer = run_self_heal_command()
             log_qa(text, answer)
             speak(answer)
             return

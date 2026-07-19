@@ -1271,4 +1271,16 @@ if __name__ == "__main__":
         daemon=True,
     ).start()
     threading.Thread(target=headlines_refresher_loop, daemon=True).start()
+
+    # Self-healing core — silent unless it actually repairs something.
+    try:
+        import self_healing
+        threading.Thread(
+            target=self_healing.monitor_loop,
+            args=(_speak_text, _log_proactive_qa, _sentinel_should_stay_quiet),
+            daemon=True,
+        ).start()
+    except Exception as _heal_error:
+        print("Self-healing thread failed to start:", _heal_error, flush=True)
+
     app.run(host="0.0.0.0", port=5051, threaded=True)
