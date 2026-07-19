@@ -69,53 +69,63 @@ def phone_presence():
         }
 
 
+# Phones power down their Wi-Fi radio when the screen is off and drop off
+# the ARP table for minutes at a time even while sitting at home. So
+# presence is judged by a GRACE window, not a single scan: the phone
+# counts as home as long as it's been seen within PHONE_GRACE_SECONDS.
+# Only continuous absence beyond that is treated as actually leaving.
+PHONE_GRACE_SECONDS = 20 * 60
+
+
 def _update_phone_presence(online_macs, now):
-    """Tracks the phone across scans. Returns 'welcome home' text when it
-    reappears after a real absence, else None."""
+    """Tracks the phone across scans with a grace window so screen-off
+    power-naps don't look like leaving. Returns 'welcome home' text when
+    it truly returns after a real absence, else None."""
     phone_mac = load_phone_mac()
 
     if phone_mac is None:
         return None
 
-    is_online = phone_mac in online_macs
+    seen_now = phone_mac in online_macs
     announcement = None
 
     with _lock:
         was_present = _phone_state["present"]
 
-        if is_online:
-            if not was_present:
-                missing_since = _phone_state["last_missing_since"]
+        if seen_now:
+            _phone_state["last_seen"] = now
 
-                if (
-                    missing_since is not None
-                    and now - missing_since >= PHONE_AWAY_THRESHOLD_SECONDS
-                ):
-                    # Arrival routine — greeting + pending reminders/notes.
+            if not was_present:
+                # Coming back. Announce only if it was gone long enough to
+                # count as a real departure (not a brief radio nap).
+                missing_since = _phone_state.get("last_missing_since")
+                if (missing_since is not None
+                        and now - missing_since >= PHONE_AWAY_THRESHOLD_SECONDS):
                     try:
-                        import routines
                         import robot_config
+                        import routines
                         announcement = routines.arrival_greeting(
                             robot_config.get("OWNER_NAME", "friend")
                         )
                     except Exception:
                         announcement = "Welcome home."
 
-            _phone_state["present"] = True
-            _phone_state["last_seen"] = now
-            _phone_state["last_missing_since"] = None
+                _phone_state["present"] = True
+                _phone_state["last_missing_since"] = None
         else:
-            if was_present:
-                _phone_state["last_missing_since"] = now
-                # Phone just left the LAN — arm the camera gate so the
-                # next person to use ATLAS is re-verified.
+            # Not seen this scan — but only treat as DEPARTED after the
+            # grace window of continuous absence.
+            last_seen = _phone_state.get("last_seen", 0)
+            gone_for = now - last_seen if last_seen else PHONE_GRACE_SECONDS + 1
+
+            if was_present and gone_for >= PHONE_GRACE_SECONDS:
+                _phone_state["present"] = False
+                _phone_state["last_missing_since"] = last_seen
                 try:
                     import camera_gate
                     camera_gate.arm_gate(reason="phone_left")
                 except Exception:
                     pass
-
-            _phone_state["present"] = False
 
     return announcement
 
