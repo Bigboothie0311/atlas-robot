@@ -1,120 +1,116 @@
 # A.T.L.A.S. — Command Reference
 
-Every command below is triggered by saying **"Hey Atlas"** then the phrase.
-Phrases are flexible — several wordings map to each action; a representative
-one is shown. "Local" = zero API/token cost. Items needing the PC companion
-or phone link are marked.
+Say **"Hey Atlas"** then the phrase. Wordings are flexible — several map to
+each action. "Local" = zero API/token cost. Items needing the PC companion
+or phone link are marked. Ask **"what can you control?"** anytime for a live
+spoken version of this list.
 
 ---
 
-## PC power & Wake-on-LAN
+## Everyday
 | Say | Does | Cost |
 |-----|------|------|
-| "boot my PC" / "wake my PC" / "power on my PC" | Sends Wake-on-LAN magic packets, then tells you if it actually came up | Local |
-| "why won't my PC wake?" | Diagnoses WoL (finds the USB-adapter root cause, WiFi egress, next steps) | Local |
+| "what time is it" / "what's the date" | Time, date, uptime | Local |
+| "set a timer for five minutes" | Countdown + chime; survives restart | Local |
+| "cancel the timer" / "how long left on the timer" | Manage the timer | Local |
+| "remind me in twenty minutes to…" | Spoken reminder | Local |
+| "focus mode" / "focus mode for 45 minutes" / "end focus mode" | Dim HUD, mute nudges | Local |
+| "take a note …" / "read my notes" / "clear my notes" | Notes | Local |
+| "I'm leaving" / "goodbye atlas" | Darkens HUD, shuts down PC, arms face gate | Local (+PC) |
 
-## Timers, reminders & focus
+## Memory & planning
 | Say | Does | Cost |
 |-----|------|------|
-| "set a timer for five minutes" (words or numbers) | Countdown on the reactor; chime + "time's up" + amber flash at zero; survives a restart | Local |
-| "cancel the timer" / "how long left on the timer?" | Cancel / check remaining | Local |
-| "remind me in twenty minutes to check the oven" | Schedules a spoken reminder (fires even in quiet hours) | Local |
-| "focus mode" / "focus mode for 45 minutes" | Dims HUD to the reactor, mutes proactive nudges, spoken wrap-up | Local |
-| "end focus mode" | Ends it early | Local |
+| "remember that …" | Saves a fact/preference (explicit only) | Local |
+| "what do you remember about X" | Recalls facts on a topic | Local |
+| "forget about X" / "forget everything" | Targeted or full forget | Local |
+| "prioritize X" / "make X a priority" | Adds a priority | Local |
+| "what are my priorities" | Lists priorities | Local |
+| "what's my day" / "today" | Weather + reminders + priorities + notes | Local |
+| "what am I forgetting this week" | Weekly rundown | Local |
 
-## Notes
+## Information
 | Say | Does | Cost |
 |-----|------|------|
-| "take a note buy more filament" | Saves a note | Local |
-| "read my notes" / "clear my notes" | Read back / wipe | Local |
+| "morning briefing" / "brief me" | Full rundown (auto once each morning) | Local |
+| "what's in the news" | Top headlines | Local |
+| "sky watch" / "what's up in the sky" | Meteor showers, launches, moon, stargazing | Local |
+| "any meteor showers" · "next rocket launch" · "is it good for stargazing" · "what's the moon phase" | Individual sky reports | Local |
+| "what's the weather" / "will it rain tomorrow" | Weather | Local |
 
-## Briefings & news
+## Network & security
 | Say | Does | Cost |
 |-----|------|------|
-| "morning briefing" / "brief me" | Weather, reminders, notes, PC, printer, Pi health, headlines (also auto once each morning) | Local (free news) |
-| "what's in the news?" | Top 3 spoken headlines | Local (free news) |
-
-## Network & devices
-| Say | Does | Cost |
-|-----|------|------|
-| "what's on my network?" / "list the devices on my network" | Speaks the device roster (count + identified names) | Local |
-| "secure my network" | Audit: unknown devices, exposed LAN services, repeated failed SSH — proposes isolation, never blocks | Local |
-
-## Camera security gate
-| Say | Does | Cost |
-|-----|------|------|
-| "learn my face" | Enrolls you (burst capture, ~15 quality crops) as the authorized user | Local |
-| "were there any unauthorized users while I was gone?" | Yes/no + count; opens security HUD, shows each photo 10s with what they tried, then clears the alert | Local |
+| "what's on my network" / "list the devices on my network" | Device roster | Local |
+| "secure my network" | Unknown-device / exposed-service / SSH audit | Local |
+| "learn my face" | Enroll as authorized user | Local |
+| "do I have any intruder alerts" / "were there any unauthorized users" | Review captures + what they tried | Local |
 | "camera gate on" / "camera gate off" | Toggle face verification | Local |
 
-> When active, a wake-up after 10+ idle minutes does a quick face check.
-> Strangers get restricted mode (time/timers/reminders only) and a saved
-> photo + a record of what they attempted.
+> **Face gate is now self-managing:** it trusts you for 1 hour and only
+> re-verifies on "I'm leaving", when your phone leaves the LAN, or hourly.
+> An unrecognized face re-triggers verification every wake until you clear
+> it.
 
-## Diagnostics, logs & self-repair
+## Diagnostics & self
 | Say | Does | Cost |
 |-----|------|------|
-| "run diagnostics" / "system check" | Services, disk/mem/temp, internet, mic, PC, printer, budget — one spoken verdict | Local |
-| "what went wrong?" / "any recent errors?" | Answers from the persistent interaction log (error rate, latency, wake confidence) | Local |
-| "get the whole system healthy" | Full sweep: diagnose → safe-repair only what's broken → verify → backup snapshot → update check → report | Local |
-| "how's the internet?" | Real ping + DNS timing, honest verdict | Local |
+| "status report" / "sitrep" | Cinematic full system + security readout | Local |
+| "run diagnostics" / "system check" | Service/sensor/budget self-check | Local |
+| "check connections" / "is everything connected" | Wi-Fi, PC link, companion, Tailscale | Local |
+| "heal yourself" / "self heal" | Detect + safely repair failures, report | Local |
+| "get the whole system healthy" | Full diagnose → repair → backup → report | Local |
+| "what went wrong" / "any recent errors" | Answers from the persistent log | Local |
+| "how's the internet" | Ping + DNS timing | Local |
+| "what did you hear" | Last transcript | Local |
+| "what can you control" | Lists real capabilities | Local |
+| "what would happen if I said …" | Command simulator (no execution) | Local |
+| "check your tools" / "upgrade whisper" | Tool versions / gated upgrade proposal | Local |
+| "list my achievements" | Easter-egg progress | Local |
 
-## Printer (3D)
+## Speech tuning
 | Say | Does | Cost |
 |-----|------|------|
-| "how long left on the print?" | Print ETA (extrapolated from progress) | Local |
-| "emergency stop the printer" | Pauses the print immediately | Local |
-
-*(Existing printer status/pause/resume/cancel commands still work.)*
+| "when I say X I mean Y" | Teach a persistent alias (safe targets only) | Local |
+| (automatic) "Did you mean X?" | One-shot clarify on a mis-hear, before the model | Local |
 
 ## HUD & screen
 | Say | Does | Cost |
 |-----|------|------|
-| "lights out" / "go dark" | Fades the HUD to near-black | Local |
-| "lights up" | Restores it (any wake-up also restores) | Local |
-| "stand down" / "all clear" | Acknowledges/clears a red alert | Local |
+| "go dark" / "lights out" / "lights up" | Dim/restore the HUD | Local |
+| "stand down" / "all clear" | Clear a red alert | Local |
 
-## Self-upgrade (gated)
+## PC (needs the Windows companion)
 | Say | Does | Cost |
 |-----|------|------|
-| "add calendar support to yourself" | Creates a rollback point and reports readiness — the actual build waits for your explicit approval (agent run costs tokens) | Local |
-
-## Chief of staff
-| Say | Does | Cost |
-|-----|------|------|
-| "what am I forgetting this week?" / "what's on my plate?" | Deadline-sorted rundown of reminders, task-notes, and a local calendar file | Local |
+| "boot my PC" / "wake my PC" | Wake over the direct Ethernet link | Local |
+| "why won't my PC wake" | WoL diagnosis | Local |
+| "shut down my PC" / "cancel PC shutdown" | Shutdown (confirm) | Local |
+| "open Fusion" · "open Spotify" · "open Claude" | Launch approved apps | Local |
+| "work mode" / "design mode" / "game mode" | App profile: apps + volume + focus | Local |
+| "what's open on my PC" | Window list | Local |
+| "show me my PC screen" / "show me the newest screenshot" | To the HUD | Local |
+| "volume up / down / mute" · "play / pause / next track" | Media control | Local |
+| "find me videos showing how to …" | YouTube search, fullscreen, no Shorts | Local |
+| "how's my PC" / "clean up my PC" | Health report / temp cleanup | Local |
 
 ## Emergency
 | Say | Does | Cost |
 |-----|------|------|
-| "initiate emergency shutdown" | Confirm-gated: preserve data → pause print → log → shutdown in 1 min | Local |
-| "cancel shutdown" | Aborts the pending shutdown | Local |
+| "initiate emergency shutdown" | Confirm-gated safe shutdown sequence | Local |
+| "emergency stop the printer" | Pauses the print | Local |
 
-## PC control — needs the Windows companion (Setup Guide Part 1)
+## Printer (status only)
 | Say | Does | Cost |
 |-----|------|------|
-| "open Fusion" | Launches Fusion 360 | Local |
-| "what's open on my PC?" | Lists open window titles | Local |
-| "show me my PC screen" | Screenshots the PC onto the HUD | Local |
-| "show me the newest screenshot" | Opens/returns your latest screenshot | Local |
-| "volume up / down / mute" | PC volume (media keys) | Local |
-| "play / pause / next track / previous track" | PC media control | Local |
-| "find me videos showing how to replace an AD5X nozzle" | YouTube search on the PC, fullscreen, Shorts filtered | Local |
-| "how's my PC?" | PC CPU/RAM/disk/uptime, flags issues | Local |
-| "clean up my PC" | Runs the whitelisted temp-file cleanup | Local |
+| "how long left on the print" | Print ETA | Local |
 
-## Phone link — needs PHONE_TOKEN + Tailscale (Setup Guide Part 5)
-Called from your phone over HTTP, not by voice:
-| Endpoint | Does | Cost |
-|----------|------|------|
-| `POST /phone/ask` | Ask a question (continues the desk conversation) | Model (on-demand) |
-| `GET /phone/status` | Weather, PC/printer, device count, intruder count | Local |
-| `GET /phone/events` + `/phone/event_photo/<id>` | Review away-mode intruders | Local |
-| `POST /phone/camera` | "What does the camera see?" (described at the desk) | Model (on-demand) |
-| `POST /phone/pc/<action>` | open_fusion / screenshot / youtube / apps | Local |
+## Phone link (HTTP over Tailscale, not voice)
+`POST /phone/ask` · `GET /phone/status` · `GET /phone/events` · `POST /phone/camera` · `POST /phone/pc/<action>` — see PHONE_LINK.md.
 
 ---
 
-**Token cost summary:** everything is local/zero-token except general
-knowledge questions (the normal voice Q&A), `/phone/ask`, and
-`/phone/camera` — and those only when you invoke them, never continuously.
+**Token cost:** everything is local except general knowledge questions,
+`/phone/ask`, and `/phone/camera` — and only when you invoke them.
+
+There are also hidden easter-egg phrases to discover. 🙂

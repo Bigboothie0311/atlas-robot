@@ -191,6 +191,36 @@ Ask-for-input. Add "Show Result." Name it "Ask Atlas." Add to home screen.
 
 ---
 
+## Part 6 — Phone presence (arrival, goodbye & auto face-gate arming)
+
+So A.T.L.A.S. can greet you when you get home, and arm face verification
+when you leave, it needs your phone's Wi-Fi MAC address.
+
+### 6.1 Turn OFF MAC randomization for your home Wi-Fi (important)
+Phones fake a random MAC per network by default, which breaks presence
+detection. Disable it for your home network only:
+- **iOS:** Settings → Wi-Fi → tap the (i) by your network → turn off
+  "Private Wi-Fi Address" → rejoin.
+- **Android:** Settings → Wi-Fi → your network → Privacy → choose
+  "Use device MAC" → reconnect.
+
+### 6.2 Find the MAC
+Either read it from the phone (iOS: Settings → General → About → Wi-Fi
+Address; Android: Settings → About phone → Status → Wi-Fi MAC), or ask
+A.T.L.A.S. "what's on my network" while the phone is connected and pick
+it out by maker (Apple / Samsung / etc.).
+
+### 6.3 Set it (on the Pi)
+Add to `config/robot.env` (gitignored):
+```
+PHONE_MAC=AA:BB:CC:DD:EE:FF
+```
+Restart: `sudo systemctl restart atlas-robot`. Now:
+- Phone rejoins after 30+ min away → spoken **arrival greeting** with
+  pending reminders and priorities.
+- Phone leaves the LAN → **face gate arms** (next user is verified).
+- "is my phone home" answers from presence.
+
 ## Quick reference — files
 - Companion: `windows-companion/atlas_companion.py` + `README.md`
 - Phone link: `PHONE_LINK.md`
