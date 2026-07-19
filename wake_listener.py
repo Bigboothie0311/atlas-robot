@@ -6,6 +6,7 @@ from pathlib import Path
 import requests
 from vosk import Model
 
+import hearing
 import listen_and_answer
 import logbook
 from wake_detection import (
@@ -163,6 +164,14 @@ def listen_for_wake_word(model):
                 current_rms
             )
 
+            # Room-aware hearing: quiet chunks train the ambient noise
+            # floor so the SNR gate below can reject accidental wakes.
+            if current_rms < MIN_UTTERANCE_RMS:
+                try:
+                    hearing.observe_ambient(current_rms)
+                except Exception:
+                    pass
+
             finalized = recognizer.AcceptWaveform(audio_data)
 
             if not finalized:
@@ -215,6 +224,15 @@ def listen_for_wake_word(model):
                     flush=True
                 )
 
+            # Additional SNR gate (room-aware hearing) — rejects wake
+            # candidates that barely clear the fixed floor in a noisy room.
+            # Fails OPEN: if it errors, the fixed thresholds alone decide,
+            # so real detection is never weakened.
+            try:
+                snr_ok = hearing.passes_snr_gate(utterance_peak_rms)
+            except Exception:
+                snr_ok = True
+
             accepted = (
                 text == WAKE_PHRASE
                 and minimum_confidence
@@ -223,7 +241,17 @@ def listen_for_wake_word(model):
                     >= MIN_UTTERANCE_RMS
                 and partial_hits
                     >= MIN_PARTIAL_HITS
+                and snr_ok
             )
+
+            if text == WAKE_PHRASE and not snr_ok:
+                print(
+                    "Wake rejected by SNR gate:",
+                    f"peak_rms={utterance_peak_rms}",
+                    f"required={hearing.required_rms():.0f}",
+                    f"ambient={hearing.ambient_floor():.0f}",
+                    flush=True,
+                )
 
             utterance_peak_rms = 0
             partial_hits = 0
