@@ -1,3 +1,8 @@
+import atexit
+import threading
+from collections.abc import Callable
+from typing import Any
+
 import requests
 
 
@@ -75,6 +80,34 @@ TOOLS = [
     {"type": "web_search"},
     {
         "type": "function",
+        "name": "run_atlas_agent",
+        "description": (
+            "Use Atlas's autonomous runtime for a concrete owner-requested "
+            "action that requires real tools, multi-step execution, and "
+            "verification, such as finding or copying a file on the PC, "
+            "checking visible PC apps, or opening an approved app. Do not "
+            "use this for ordinary questions, explanations, weather, or "
+            "Atlas diagnostics."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "goal": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "The owner's complete concrete goal, preserving "
+                        "important filenames, locations, and constraints."
+                    ),
+                },
+            },
+            "required": ["goal"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+    {
+        "type": "function",
         "name": "run_atlas_diagnostic_or_repair",
         "description": (
             "Runs one of Atlas's own real local diagnostic, health-check, "
@@ -105,6 +138,98 @@ TOOLS = [
         "strict": True,
     },
 ]
+
+
+_AGENT_RUNTIME_OWNER_FACTORY: Callable[[], Any] | None = None
+_AGENT_RUNTIME_OWNER: Any | None = None
+_AGENT_RUNTIME_LOCK = threading.RLock()
+_AGENT_USAGE_LOCAL = threading.local()
+
+
+def configure_agent_runtime_owner_factory(
+    factory: Callable[[], Any],
+) -> None:
+    """Configure lazy owner construction without creating the runtime."""
+    if not callable(factory):
+        raise TypeError("factory must be callable")
+
+    global _AGENT_RUNTIME_OWNER_FACTORY
+    global _AGENT_RUNTIME_OWNER
+
+    with _AGENT_RUNTIME_LOCK:
+        previous_owner = _AGENT_RUNTIME_OWNER
+        _AGENT_RUNTIME_OWNER = None
+        _AGENT_RUNTIME_OWNER_FACTORY = factory
+
+    if previous_owner is not None:
+        previous_owner.close()
+
+
+def _get_agent_runtime_owner():
+    global _AGENT_RUNTIME_OWNER
+
+    with _AGENT_RUNTIME_LOCK:
+        if _AGENT_RUNTIME_OWNER_FACTORY is None:
+            raise RuntimeError(
+                "Atlas agent runtime has not been configured."
+            )
+
+        if _AGENT_RUNTIME_OWNER is None:
+            _AGENT_RUNTIME_OWNER = (
+                _AGENT_RUNTIME_OWNER_FACTORY()
+            )
+
+        return _AGENT_RUNTIME_OWNER
+
+
+def close_agent_runtime_owner() -> None:
+    """Close an initialized owner without creating one during shutdown."""
+    global _AGENT_RUNTIME_OWNER
+
+    with _AGENT_RUNTIME_LOCK:
+        owner = _AGENT_RUNTIME_OWNER
+        _AGENT_RUNTIME_OWNER = None
+
+    if owner is not None:
+        owner.close()
+
+
+def clear_agent_usage() -> None:
+    _AGENT_USAGE_LOCAL.input_tokens = 0
+    _AGENT_USAGE_LOCAL.output_tokens = 0
+
+
+def _record_agent_usage(
+    input_tokens: int,
+    output_tokens: int,
+) -> None:
+    current_input = int(
+        getattr(_AGENT_USAGE_LOCAL, "input_tokens", 0) or 0
+    )
+    current_output = int(
+        getattr(_AGENT_USAGE_LOCAL, "output_tokens", 0) or 0
+    )
+
+    _AGENT_USAGE_LOCAL.input_tokens = (
+        current_input + max(0, int(input_tokens or 0))
+    )
+    _AGENT_USAGE_LOCAL.output_tokens = (
+        current_output + max(0, int(output_tokens or 0))
+    )
+
+
+def consume_agent_usage() -> tuple[int, int]:
+    input_tokens = int(
+        getattr(_AGENT_USAGE_LOCAL, "input_tokens", 0) or 0
+    )
+    output_tokens = int(
+        getattr(_AGENT_USAGE_LOCAL, "output_tokens", 0) or 0
+    )
+    clear_agent_usage()
+    return input_tokens, output_tokens
+
+
+atexit.register(close_agent_runtime_owner)
 
 
 def geocode(location):
@@ -214,14 +339,44 @@ def get_weather(location, day):
     )
 
 
-def run_tool_call(name, arguments):
+def run_tool_call(
+    name,
+    arguments,
+    *,
+    source="voice",
+):
     if name == "get_weather":
-        return get_weather(arguments.get("location"), arguments.get("day"))
+        return get_weather(
+            arguments.get("location"),
+            arguments.get("day"),
+        )
+
+    if name == "run_atlas_agent":
+        goal = arguments.get("goal")
+
+        if not isinstance(goal, str) or not goal.strip():
+            return (
+                "I need a specific concrete goal before I can "
+                "start an agent mission."
+            )
+
+        owner = _get_agent_runtime_owner()
+        response = owner.handle_goal(
+            goal.strip(),
+            source=source,
+        )
+        _record_agent_usage(
+            response.input_tokens,
+            response.output_tokens,
+        )
+        return response.text
 
     if name == "run_atlas_diagnostic_or_repair":
         # Lazy import: listen_and_answer imports this module at load time,
         # so importing it back at module scope here would be circular.
         import listen_and_answer
-        return listen_and_answer.run_diagnostic_capability(arguments.get("capability"))
+        return listen_and_answer.run_diagnostic_capability(
+            arguments.get("capability")
+        )
 
     return f"Unknown tool: {name}"

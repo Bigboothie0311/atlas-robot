@@ -87,6 +87,43 @@ def load_api_key():
     raise RuntimeError("OPENAI_API_KEY was not found.")
 
 
+def _build_agent_voice_runtime_owner():
+    """Build the lightweight owner; its real runtime remains lazy."""
+    from atlas_agent.runtime_factory import build_pc_agent_runtime
+    from atlas_agent.voice_runtime_owner import VoiceRuntimeOwner
+
+    def build_bundle():
+        return build_pc_agent_runtime(
+            openai_client=OpenAI(
+                api_key=load_api_key(),
+                max_retries=0,
+                timeout=25.0,
+            ),
+            model=MODEL_NAME,
+            host="192.168.50.2",
+            username="wesle",
+            identity_file=(
+                "/home/atlas/.ssh/atlas_pc_ed25519"
+            ),
+            approved_remote_roots=(
+                r"C:\Users\wesle",
+            ),
+            staging_directory=(
+                "/home/atlas/atlas-staging/incoming"
+            ),
+            mission_store_path=(
+                USAGE_PATH.parent / "agent_missions.json"
+            ),
+        )
+
+    return VoiceRuntimeOwner(build_bundle)
+
+
+ai_tools.configure_agent_runtime_owner_factory(
+    _build_agent_voice_runtime_owner
+)
+
+
 def load_owner_name():
     if not ROBOT_ENV_PATH.exists():
         return DEFAULT_OWNER_NAME
@@ -3154,6 +3191,7 @@ def _stream_answer_sentences(
     text_state = {"full_text": "", "buffer": ""}
     total_input_tokens = 0
     total_output_tokens = 0
+    ai_tools.clear_agent_usage()
 
     with client.responses.stream(
         model=MODEL_NAME,
@@ -3187,7 +3225,16 @@ def _stream_answer_sentences(
         arguments = json.loads(call.arguments)
 
         _set_activity_label(TOOL_ACTIVITY_LABELS.get(call.name, "USING TOOLS"))
-        result = ai_tools.run_tool_call(call.name, arguments)
+        result = ai_tools.run_tool_call(
+            call.name,
+            arguments,
+            source="voice",
+        )
+        nested_input, nested_output = (
+            ai_tools.consume_agent_usage()
+        )
+        total_input_tokens += nested_input
+        total_output_tokens += nested_output
         _set_activity_label(None)
 
         with client.responses.stream(
@@ -3242,6 +3289,7 @@ def answer_text_only(question):
     instructions, budget guard, and memory as the voice path — just
     returns text. Costs the same per-question tokens as a voice question
     (on-demand only, never continuous)."""
+    ai_tools.clear_agent_usage()
     usage = load_usage()
 
     if usage["spent_usd"] + NEXT_REQUEST_RESERVE_USD > MONTHLY_LIMIT_USD:
@@ -3270,7 +3318,16 @@ def answer_text_only(question):
 
     if function_calls:
         call = function_calls[0]
-        result = ai_tools.run_tool_call(call.name, json.loads(call.arguments))
+        result = ai_tools.run_tool_call(
+            call.name,
+            json.loads(call.arguments),
+            source="phone",
+        )
+        nested_input, nested_output = (
+            ai_tools.consume_agent_usage()
+        )
+        input_tokens += nested_input
+        output_tokens += nested_output
         response = client.responses.create(
             model=MODEL_NAME,
             reasoning={"effort": "none"},
