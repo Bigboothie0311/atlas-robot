@@ -91,7 +91,7 @@ def _forward_agent_event_to_hud(event):
     """Best-effort bridge from the agent process to robot-hub state."""
     try:
         requests.post(
-            f"{ATLAS_HUB}/agent/event",
+            f"{HUB}/agent/event",
             json={
                 "name": event.name,
                 "source": event.source,
