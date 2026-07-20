@@ -1,0 +1,154 @@
+# /etc/systemd/system/atlas-hub.service
+[Unit]
+Description=A.T.L.A.S. Hub Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=atlas
+WorkingDirectory=/home/atlas/atlas-hub
+ExecStart=/home/atlas/atlas-hub/.venv/bin/python /home/atlas/atlas-hub/atlas_hub.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+
+# /etc/systemd/system/atlas-hud.service
+# Runs the J.A.R.V.I.S. HUD (Chromium kiosk under cage) on boot.
+#
+# Install:
+#   sudo cp systemd/atlas-hud.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now atlas-hud.service
+#
+# Before installing, replace YOUR_USERNAME below with your actual Linux
+# username (matching atlas-robot.service and atlas-wake.service).
+#
+# Requires `cage` and `seatd` (see README.md) and the `chromium` package.
+
+[Unit]
+Description=A.T.L.A.S. JARVIS HUD Kiosk
+# seatd grants cage its DRM/VT permissions. Without an explicit ordering
+# dependency here, systemd is free to start this unit before seatd is
+# actually ready on a cold boot (both just depend on generic targets like
+# multi-user.target) — cage then fails to get a seat, and Restart=on-failure
+# just keeps retrying every RestartSec until seatd happens to come up on its
+# own. That looks exactly like "stuck on the console until something
+# unrelated (an SSH login) nudges it," when it's really just a race that
+# happened to resolve around the same time.
+After=network-online.target atlas-robot.service seatd.service
+Wants=network-online.target
+Requires=atlas-robot.service seatd.service
+
+[Service]
+Type=simple
+User=atlas
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+# The arrow on screen was cage's OWN default cursor, not Chromium's — cage
+# draws its built-in left_ptr sprite itself regardless of any pointer
+# device existing, which is why the HUD page's `cursor: none` never had
+# any effect on it (that CSS only governs Chromium's own cursor).
+# XCURSOR_THEME below is kept for documentation/any future consumer that
+# does read it, but it is NOT what actually hides the cursor — confirmed
+# by grepping libwlroots-0.18.so's strings: it contains XCURSOR_PATH but
+# never XCURSOR_THEME or XCURSOR_SIZE, so wlroots (and therefore cage)
+# never reads this variable at all. The REAL fix lives outside this repo,
+# in system-installed cursor theme files: /usr/share/icons/Adwaita/
+# cursors/default (the actual bitmap cage ends up rendering — left_ptr,
+# arrow, top_left_arrow, and move are all symlinks to it) was overwritten
+# with a fully transparent, multi-size (16-128px) Xcursor file; the
+# original was preserved alongside it as default.orig-backup. This isn't
+# captured by the repo/install script — if this kiosk is ever set up on a
+# fresh machine, that same file needs to be replaced again.
+Environment=XCURSOR_THEME=atlas-invisible
+# The cursor sits on a DRM hardware overlay plane by default, which
+# wlr-screencopy does NOT composite into captures — grim screenshots
+# showed a clean screen while the physical display still had the arrow.
+# Forcing software cursors makes wlroots draw the (now-transparent)
+# cursor bitmap into the actual frame: invisible for real, and
+# screencopy verification becomes truthful. Still valid on wlroots 0.18
+# (renamed WLR_NO_HARDWARE_CURSORS only in 0.19+).
+Environment=WLR_NO_HARDWARE_CURSORS=1
+# A cold-boot HDMI display can take several seconds to complete its
+# handshake after power-on. A blind fixed sleep here isn't long enough on
+# some screens — cage fails immediately ("Unable to open Wayland socket")
+# if it starts before the DRM connector reports "connected", and it then
+# takes several retry cycles (each gated by RestartSec) to eventually
+# succeed once the display is actually ready. Poll the connector status
+# directly instead of guessing a sleep duration — up to 30s, falling
+# through either way so a genuinely stuck/disconnected display doesn't
+# block startup forever (Restart=on-failure below is still the safety net).
+ExecStartPre=/bin/bash -c 'for i in $(seq 1 30); do grep -q ^connected /sys/class/drm/card*-HDMI-*/status 2>/dev/null && break; sleep 1; done'
+ExecStart=/usr/bin/cage -- /usr/bin/chromium --kiosk --no-first-run --disable-restore-session-state --ozone-platform=wayland --start-fullscreen http://127.0.0.1:5051/hud
+# NOTE: there must be NO pointer input on this kiosk — not even a
+# virtual one. A uinput "cursor nudge" script used to run here as
+# ExecStartPost; it turned out to be the thing MAKING the cursor
+# visible: any pointer enter event causes Chromium to set its own
+# client-drawn cursor bitmap (which ignores XCURSOR_THEME), and cage
+# never honors the later hide request, so the arrow stuck around
+# forever. With zero pointer devices Chromium never draws a cursor at
+# all, and cage's own default cursor is handled by the transparent
+# theme above.
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+
+# /etc/systemd/system/atlas-robot.service
+[Unit]
+Description=A.T.L.A.S. Robot Hub
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=atlas
+WorkingDirectory=/home/atlas/atlas-robot
+ExecStart=/home/atlas/atlas-robot/venv/bin/python /home/atlas/atlas-robot/robot_hub.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+
+# /etc/systemd/system/atlas-wake.service
+[Unit]
+Description=A.T.L.A.S. Wake Word Listener
+After=network-online.target sound.target atlas-robot.service
+Wants=network-online.target
+Requires=atlas-robot.service
+
+[Service]
+Type=simple
+User=atlas
+WorkingDirectory=/home/atlas/atlas-robot
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/atlas/atlas-robot/venv/bin/python /home/atlas/atlas-robot/wake_listener.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+
+# /etc/systemd/system/graphify-mcp.service
+[Unit]
+Description=Graphify MCP Server for A.T.L.A.S.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=atlas
+WorkingDirectory=/home/atlas/atlas-robot
+EnvironmentFile=/home/atlas/.config/graphify/mcp.env
+ExecStart=/home/atlas/.local/bin/graphify-mcp /home/atlas/atlas-robot/graphify-out/graph.json --transport http --host 0.0.0.0 --port 8080
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
