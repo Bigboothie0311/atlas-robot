@@ -5,6 +5,10 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
 
+from atlas_agent.argument_validation import (
+    ArgumentValidationError,
+    validate_tool_arguments,
+)
 from atlas_agent.router import (
     ExecutionTarget,
     ToolRouter,
@@ -205,6 +209,21 @@ class AgentPlanner:
                     f"Plan step {index} cannot be routed: "
                     f"{route.reason}"
                 )
+
+            tool = self._registry.get(call.tool_name)
+            parameters = tool.metadata.get("parameters")
+
+            if isinstance(parameters, dict):
+                try:
+                    validate_tool_arguments(
+                        call.arguments,
+                        parameters,
+                    )
+                except ArgumentValidationError as exc:
+                    raise PlanValidationError(
+                        f"Plan step {index} has invalid "
+                        f"arguments: {exc}"
+                    ) from exc
 
             steps.append(
                 PlanStep(
