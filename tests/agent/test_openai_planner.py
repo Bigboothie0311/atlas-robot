@@ -11,6 +11,63 @@ from atlas_agent.openai_planner import (
 from atlas_agent.tools import AtlasTool
 
 
+ENSURE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "wake_if_needed": {
+            "type": "boolean",
+        }
+    },
+    "required": ["wake_if_needed"],
+    "additionalProperties": False,
+}
+
+
+SEARCH_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "query": {
+            "type": "string",
+        },
+        "extensions": {
+            "type": ["array", "null"],
+            "items": {
+                "type": "string",
+            },
+        },
+        "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+        },
+    },
+    "required": [
+        "query",
+        "extensions",
+        "limit",
+    ],
+    "additionalProperties": False,
+}
+
+
+DOWNLOAD_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "remote_path": {
+            "type": "string",
+        },
+        "local_name": {
+            "type": ["string", "null"],
+        },
+    },
+    "required": [
+        "remote_path",
+        "local_name",
+    ],
+    "additionalProperties": False,
+}
+
+
 class FakeResponses:
     def __init__(self, output):
         self.output = output
@@ -33,16 +90,29 @@ class FakeClient:
         self.responses = FakeResponses(output)
 
 
-def make_tool(name, description="Test tool", permission_level=0):
+def make_tool(
+    name,
+    *,
+    parameters=None,
+    permission_level=0,
+):
     def handler(**_arguments):
-        raise AssertionError("The plan generator must never execute tools.")
+        raise AssertionError(
+            "The plan generator must never execute tools."
+        )
+
+    metadata = {}
+
+    if parameters is not None:
+        metadata["parameters"] = parameters
 
     return AtlasTool(
         name=name,
-        description=description,
+        description=f"Tool {name}",
         runs_on="pi",
         handler=handler,
         permission_level=permission_level,
+        metadata=metadata,
     )
 
 
@@ -51,39 +121,51 @@ def make_plan_call(steps):
         type="function_call",
         name=SUBMIT_PLAN_TOOL_NAME,
         call_id="call-123",
-        arguments=json.dumps({"steps": steps}),
+        arguments=json.dumps(
+            {
+                "steps": steps,
+            }
+        ),
     )
 
 
-def test_generates_constrained_plan_without_executing_tools():
+def test_generates_strict_tool_specific_plan():
     output = [
         make_plan_call(
             [
                 {
                     "tool": "pc.ensure_online",
-                    "description": "Make sure the Windows PC is reachable.",
-                    "arguments_json": "{}",
+                    "description": (
+                        "Make sure the Windows PC is reachable."
+                    ),
+                    "arguments": {
+                        "wake_if_needed": True,
+                    },
                 },
                 {
                     "tool": "pc.search_files",
-                    "description": "Find matching Atlas files.",
-                    "arguments_json": json.dumps(
-                        {
-                            "query": "atlas",
-                            "limit": 5,
-                        }
+                    "description": (
+                        "Find matching Atlas files."
                     ),
+                    "arguments": {
+                        "query": "atlas",
+                        "extensions": None,
+                        "limit": 5,
+                    },
                 },
                 {
                     "tool": "pc.download_file",
-                    "description": "Download and verify the newest match.",
-                    "arguments_json": json.dumps(
-                        {
-                            "remote_path": {
-                                "$ref": "steps.2.output.0.path"
-                            }
-                        }
+                    "description": (
+                        "Download and verify the newest match."
                     ),
+                    "arguments": {
+                        "remote_path": {
+                            "$ref": (
+                                "steps.2.output.0.path"
+                            )
+                        },
+                        "local_name": None,
+                    },
                 },
             ]
         )
@@ -94,9 +176,18 @@ def test_generates_constrained_plan_without_executing_tools():
         model="gpt-test",
     )
     tools = [
-        make_tool("pc.search_files", permission_level=1),
-        make_tool("pc.download_file", permission_level=1),
-        make_tool("pc.ensure_online"),
+        make_tool(
+            "pc.search_files",
+            parameters=SEARCH_SCHEMA,
+        ),
+        make_tool(
+            "pc.download_file",
+            parameters=DOWNLOAD_SCHEMA,
+        ),
+        make_tool(
+            "pc.ensure_online",
+            parameters=ENSURE_SCHEMA,
+        ),
     ]
 
     result = generator.generate(
@@ -115,34 +206,78 @@ def test_generates_constrained_plan_without_executing_tools():
         "pc.search_files",
         "pc.download_file",
     ]
+    assert result.proposal.steps[0].arguments == {
+        "wake_if_needed": True,
+    }
     assert result.proposal.steps[1].arguments == {
         "query": "atlas",
+        "extensions": None,
         "limit": 5,
     }
     assert result.proposal.steps[2].arguments == {
         "remote_path": {
             "$ref": "steps.2.output.0.path",
-        }
+        },
+        "local_name": None,
     }
 
     request = client.responses.calls[0]
     assert request["model"] == "gpt-test"
-    assert request["reasoning"] == {"effort": "none"}
+    assert request["reasoning"] == {
+        "effort": "none",
+    }
     assert request["tool_choice"] == {
         "type": "function",
         "name": SUBMIT_PLAN_TOOL_NAME,
     }
-    assert request["tools"][0]["strict"] is True
 
-    tool_enum = request["tools"][0]["parameters"]["properties"][
-        "steps"
-    ]["items"]["properties"]["tool"]["enum"]
+    submission_tool = request["tools"][0]
+    assert submission_tool["strict"] is True
 
-    assert tool_enum == [
+    item_schema = submission_tool[
+        "parameters"
+    ]["properties"]["steps"]["items"]
+    variants = item_schema["anyOf"]
+    variants_by_tool = {
+        variant["properties"]["tool"]["enum"][0]: (
+            variant
+        )
+        for variant in variants
+    }
+
+    assert set(variants_by_tool) == {
         "pc.download_file",
         "pc.ensure_online",
         "pc.search_files",
+    }
+
+    ensure_arguments = variants_by_tool[
+        "pc.ensure_online"
+    ]["properties"]["arguments"]
+
+    assert ensure_arguments["required"] == [
+        "wake_if_needed"
     ]
+    assert (
+        ensure_arguments["properties"][
+            "wake_if_needed"
+        ]["anyOf"][0]["type"]
+        == "boolean"
+    )
+
+    download_arguments = variants_by_tool[
+        "pc.download_file"
+    ]["properties"]["arguments"]
+    remote_path_schema = download_arguments[
+        "properties"
+    ]["remote_path"]
+
+    assert remote_path_schema["anyOf"][0] == {
+        "type": "string",
+    }
+    assert remote_path_schema["anyOf"][1][
+        "properties"
+    ]["$ref"]["type"] == "string"
 
 
 def test_rejects_tool_that_is_not_available():
@@ -152,7 +287,7 @@ def test_rejects_tool_that_is_not_available():
                 {
                     "tool": "pc.delete_everything",
                     "description": "Use an invented tool.",
-                    "arguments_json": "{}",
+                    "arguments": {},
                 }
             ]
         )
@@ -172,14 +307,14 @@ def test_rejects_tool_that_is_not_available():
         )
 
 
-def test_rejects_malformed_step_argument_json():
+def test_rejects_non_object_step_arguments():
     output = [
         make_plan_call(
             [
                 {
                     "tool": "pc.search_files",
                     "description": "Search for a file.",
-                    "arguments_json": "{not valid json",
+                    "arguments": "not-an-object",
                 }
             ]
         )
@@ -191,7 +326,7 @@ def test_rejects_malformed_step_argument_json():
 
     with pytest.raises(
         OpenAIPlanningError,
-        match="malformed argument JSON",
+        match="arguments must be an object",
     ):
         generator.generate(
             "Find a file.",
@@ -221,14 +356,17 @@ def test_rejects_response_without_plan_function_call():
         )
 
 
-def test_rejects_empty_goal_before_calling_api():
+def test_rejects_empty_goal_before_api_call():
     client = FakeClient([])
     generator = OpenAIPlanGenerator(
         client=client,
         model="gpt-test",
     )
 
-    with pytest.raises(OpenAIPlanningError, match="goal is empty"):
+    with pytest.raises(
+        OpenAIPlanningError,
+        match="goal is empty",
+    ):
         generator.generate(
             "   ",
             [make_tool("pc.ensure_online")],
@@ -237,17 +375,54 @@ def test_rejects_empty_goal_before_calling_api():
     assert client.responses.calls == []
 
 
-def test_rejects_empty_tool_catalog_before_calling_api():
+def test_rejects_empty_tool_catalog_before_api_call():
     client = FakeClient([])
     generator = OpenAIPlanGenerator(
         client=client,
         model="gpt-test",
     )
 
-    with pytest.raises(OpenAIPlanningError, match="No tools"):
+    with pytest.raises(
+        OpenAIPlanningError,
+        match="No tools",
+    ):
         generator.generate(
             "Check the PC.",
             [],
+        )
+
+    assert client.responses.calls == []
+
+
+def test_rejects_schema_that_is_not_strict():
+    client = FakeClient([])
+    generator = OpenAIPlanGenerator(
+        client=client,
+        model="gpt-test",
+    )
+    incomplete_schema = {
+        "type": "object",
+        "properties": {
+            "app": {
+                "type": "string",
+            }
+        },
+        "required": [],
+        "additionalProperties": False,
+    }
+
+    with pytest.raises(
+        OpenAIPlanningError,
+        match="must list every property as required",
+    ):
+        generator.generate(
+            "Open an app.",
+            [
+                make_tool(
+                    "pc.open_app",
+                    parameters=incomplete_schema,
+                )
+            ],
         )
 
     assert client.responses.calls == []
