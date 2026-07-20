@@ -47,6 +47,28 @@ app = Flask(__name__)
 
 state_lock = threading.Lock()
 
+
+def _default_agent_state():
+    return {
+        "active": False,
+        "phase": "idle",
+        "status": "idle",
+        "task_id": None,
+        "goal": None,
+        "source": None,
+        "plan_id": None,
+        "step_count": 0,
+        "current_step": 0,
+        "completed_steps": 0,
+        "tool_name": None,
+        "description": None,
+        "error": None,
+        "last_event": None,
+        "updated_at": 0.0,
+        "visible_until": 0.0,
+    }
+
+
 robot_state = {
     "expression": "happy",
     "speaking": False,
@@ -61,9 +83,11 @@ robot_state = {
     "hud_layout": "idle",
     "intruder_records": [],
     "active_intruder_photo": None,
+    "agent": _default_agent_state(),
 }
 
 QA_LOG_MAX_ENTRIES = 20
+AGENT_TERMINAL_DISPLAY_SECONDS = 8.0
 
 HUD_DIR = os.path.join(os.path.dirname(__file__), "hud")
 
@@ -244,6 +268,7 @@ def get_state():
     with state_lock:
         clear_expired_image_locked()
         clear_expired_gallery_locked()
+        _expire_agent_state_locked()
         state = robot_state.copy()
         state["gallery_until"] = gallery_until
 
@@ -315,6 +340,263 @@ def set_activity():
         robot_state["activity_label"] = label or None
 
     return jsonify({"ok": True, "activity_label": label})
+
+
+def _event_int(value, default=0):
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _expire_agent_state_locked(now=None):
+    agent = robot_state.get("agent")
+
+    if not isinstance(agent, dict):
+        robot_state["agent"] = _default_agent_state()
+        return
+
+    current_time = time.time() if now is None else now
+    visible_until = float(agent.get("visible_until") or 0.0)
+
+    if (
+        not agent.get("active")
+        and visible_until
+        and current_time >= visible_until
+    ):
+        robot_state["agent"] = _default_agent_state()
+
+
+@app.post("/agent/event")
+def set_agent_event():
+    payload = request.get_json(silent=True) or {}
+    event_name = str(payload.get("name", "")).strip()
+    event_data = payload.get("data")
+
+    if not event_name.startswith("agent."):
+        return jsonify({
+            "ok": False,
+            "error": "A valid agent event name is required",
+        }), 400
+
+    if not isinstance(event_data, dict):
+        return jsonify({
+            "ok": False,
+            "error": "Agent event data must be an object",
+        }), 400
+
+    supported = {
+        "agent.planning.started",
+        "agent.planning.completed",
+        "agent.planning.failed",
+        "agent.workflow.started",
+        "agent.step.started",
+        "agent.step.completed",
+        "agent.workflow.completed",
+        "agent.workflow.failed",
+        "agent.workflow.waiting_confirmation",
+    }
+
+    if event_name not in supported:
+        return jsonify({
+            "ok": True,
+            "ignored": True,
+            "event": event_name,
+        })
+
+    now = time.time()
+
+    with state_lock:
+        current = robot_state.get("agent")
+
+        if not isinstance(current, dict):
+            current = _default_agent_state()
+        else:
+            current = dict(current)
+
+        incoming_task_id = event_data.get("task_id")
+
+        if (
+            incoming_task_id
+            and current.get("task_id")
+            and incoming_task_id != current.get("task_id")
+        ):
+            current = _default_agent_state()
+
+        if incoming_task_id:
+            current["task_id"] = str(incoming_task_id)
+
+        current["last_event"] = event_name
+        current["updated_at"] = now
+
+        if event_data.get("plan_id"):
+            current["plan_id"] = str(event_data["plan_id"])
+
+        if event_data.get("goal"):
+            current["goal"] = str(event_data["goal"])
+
+        event_source = event_data.get("source")
+
+        if event_source:
+            current["source"] = str(event_source)
+
+        if event_name == "agent.planning.started":
+            current.update({
+                "active": True,
+                "phase": "planning",
+                "status": "running",
+                "goal": str(event_data.get("goal") or ""),
+                "source": str(event_data.get("source") or ""),
+                "plan_id": None,
+                "step_count": 0,
+                "current_step": 0,
+                "completed_steps": 0,
+                "tool_name": None,
+                "description": "BUILDING EXECUTION PLAN",
+                "error": None,
+                "visible_until": 0.0,
+            })
+
+        elif event_name == "agent.planning.completed":
+            current.update({
+                "active": True,
+                "phase": "plan_ready",
+                "status": "running",
+                "step_count": _event_int(
+                    event_data.get("step_count")
+                ),
+                "description": "PLAN VALIDATED",
+                "error": None,
+                "visible_until": 0.0,
+            })
+
+        elif event_name == "agent.planning.failed":
+            current.update({
+                "active": False,
+                "phase": "failed",
+                "status": "failed",
+                "description": "PLANNING FAILED",
+                "error": str(event_data.get("error") or ""),
+                "visible_until": (
+                    now + AGENT_TERMINAL_DISPLAY_SECONDS
+                ),
+            })
+
+        elif event_name == "agent.workflow.started":
+            current.update({
+                "active": True,
+                "phase": "executing",
+                "status": "running",
+                "goal": str(
+                    event_data.get("goal")
+                    or current.get("goal")
+                    or ""
+                ),
+                "step_count": _event_int(
+                    event_data.get("step_count")
+                ),
+                "current_step": 0,
+                "completed_steps": 0,
+                "tool_name": None,
+                "description": "EXECUTION STARTED",
+                "error": None,
+                "visible_until": 0.0,
+            })
+
+        elif event_name == "agent.step.started":
+            current.update({
+                "active": True,
+                "phase": "executing",
+                "status": "running",
+                "current_step": _event_int(
+                    event_data.get("position")
+                ),
+                "tool_name": str(
+                    event_data.get("tool_name") or ""
+                ),
+                "description": str(
+                    event_data.get("description")
+                    or "EXECUTING STEP"
+                ),
+                "error": None,
+                "visible_until": 0.0,
+            })
+
+        elif event_name == "agent.step.completed":
+            position = _event_int(
+                event_data.get("position")
+            )
+            current.update({
+                "active": True,
+                "phase": "executing",
+                "status": "running",
+                "current_step": position,
+                "completed_steps": max(
+                    _event_int(
+                        current.get("completed_steps")
+                    ),
+                    position,
+                ),
+                "tool_name": str(
+                    event_data.get("tool_name")
+                    or current.get("tool_name")
+                    or ""
+                ),
+                "visible_until": 0.0,
+            })
+
+        elif event_name == "agent.workflow.waiting_confirmation":
+            current.update({
+                "active": True,
+                "phase": "waiting_confirmation",
+                "status": "waiting_confirmation",
+                "completed_steps": _event_int(
+                    event_data.get("completed_steps")
+                ),
+                "description": "OWNER CONFIRMATION REQUIRED",
+                "error": str(event_data.get("error") or ""),
+                "visible_until": 0.0,
+            })
+
+        elif event_name == "agent.workflow.completed":
+            completed = _event_int(
+                event_data.get("completed_steps")
+            )
+            current.update({
+                "active": False,
+                "phase": "completed",
+                "status": "completed",
+                "completed_steps": completed,
+                "current_step": completed,
+                "description": "MISSION COMPLETE",
+                "error": None,
+                "visible_until": (
+                    now + AGENT_TERMINAL_DISPLAY_SECONDS
+                ),
+            })
+
+        elif event_name == "agent.workflow.failed":
+            current.update({
+                "active": False,
+                "phase": "failed",
+                "status": "failed",
+                "completed_steps": _event_int(
+                    event_data.get("completed_steps")
+                ),
+                "description": "MISSION FAILED",
+                "error": str(event_data.get("error") or ""),
+                "visible_until": (
+                    now + AGENT_TERMINAL_DISPLAY_SECONDS
+                ),
+            })
+
+        robot_state["agent"] = current
+
+    return jsonify({
+        "ok": True,
+        "event": event_name,
+        "agent": current,
+    })
 
 
 @app.post("/qa_log")

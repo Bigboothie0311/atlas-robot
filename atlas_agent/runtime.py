@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from atlas_agent.event_bus import EventBus
+from atlas_agent.events import AtlasEvent
 from atlas_agent.mission_store import MissionStore
 from atlas_agent.planning_service import (
     NaturalLanguagePlanningService,
@@ -42,6 +44,7 @@ class AgentRuntime:
         *,
         task_queue: TaskQueue | None = None,
         mission_store: MissionStore | None = None,
+        event_bus: EventBus | None = None,
     ) -> None:
         self.planning_service = planning_service
         self.workflow_runner = workflow_runner
@@ -51,6 +54,7 @@ class AgentRuntime:
             else TaskQueue()
         )
         self.mission_store = mission_store
+        self.event_bus = event_bus
 
     def run_goal(
         self,
@@ -83,10 +87,45 @@ class AgentRuntime:
         self.task_queue.enqueue(task)
         self._persist()
 
+        self._publish(
+            "agent.planning.started",
+            {
+                "task_id": task.task_id,
+                "goal": task.goal,
+                "source": task.source,
+            },
+        )
+
         try:
             planning = (
                 self.planning_service.create_plan(task)
             )
+        except Exception as exc:
+            self._publish(
+                "agent.planning.failed",
+                {
+                    "task_id": task.task_id,
+                    "goal": task.goal,
+                    "error": f"{type(exc).__name__}: {exc}",
+                },
+            )
+            self._mark_failed(task.task_id)
+            self._persist()
+            raise
+
+        plan_id = getattr(planning.plan, "plan_id", None)
+        plan_steps = getattr(planning.plan, "steps", ())
+
+        self._publish(
+            "agent.planning.completed",
+            {
+                "task_id": task.task_id,
+                "plan_id": plan_id,
+                "step_count": len(plan_steps),
+            },
+        )
+
+        try:
             workflow = self.workflow_runner.run(
                 task,
                 planning.plan,
@@ -94,7 +133,19 @@ class AgentRuntime:
                     confirmed_call_ids or set()
                 ),
             )
-        except Exception:
+        except Exception as exc:
+            self._publish(
+                "agent.workflow.failed",
+                {
+                    "task_id": task.task_id,
+                    "plan_id": plan_id,
+                    "status": "failed",
+                    "completed_steps": 0,
+                    "failed_step": None,
+                    "confirmation_call_id": None,
+                    "error": f"{type(exc).__name__}: {exc}",
+                },
+            )
             self._mark_failed(task.task_id)
             self._persist()
             raise
@@ -143,4 +194,20 @@ class AgentRuntime:
 
         self.mission_store.save(
             self.task_queue.list_tasks()
+        )
+
+    def _publish(
+        self,
+        name: str,
+        data: dict[str, Any],
+    ) -> None:
+        if self.event_bus is None:
+            return
+
+        self.event_bus.publish(
+            AtlasEvent(
+                name=name,
+                source="agent_runtime",
+                data=data,
+            )
         )

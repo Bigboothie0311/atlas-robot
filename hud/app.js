@@ -142,9 +142,29 @@ function updateClock() {
 
 const STATE_CLASSES = ["state-idle", "state-listening", "state-thinking", "state-speaking"];
 
+const AGENT_PHASE_LABELS = {
+  planning: "PLANNING",
+  plan_ready: "PLAN READY",
+  executing: "EXECUTING",
+  waiting_confirmation: "AUTHORIZATION",
+  completed: "COMPLETE",
+  failed: "FAILED",
+};
+
+const AGENT_MASTHEAD_LABELS = {
+  planning: "CONSTRUCTING EXECUTION PLAN",
+  plan_ready: "MISSION PLAN VALIDATED",
+  executing: "AUTONOMOUS WORKFLOW ACTIVE",
+  waiting_confirmation: "OWNER AUTHORIZATION REQUIRED",
+  completed: "MISSION ACCOMPLISHED",
+  failed: "MISSION EXECUTION FAILED",
+};
+
 function applyState(state) {
   const expression = state.expression || "happy";
   const speaking = Boolean(state.speaking);
+  const agent = state.agent || {};
+  const agentActive = Boolean(agent.active);
 
   let stateClass = "state-idle";
   let label = "IDLE";
@@ -158,10 +178,14 @@ function applyState(state) {
     stateClass = "state-listening";
     label = "LISTENING";
     mastheadText = "AUDIO CHANNEL OPEN";
-  } else if (expression === "thinking") {
+  } else if (expression === "thinking" || agentActive) {
     stateClass = "state-thinking";
-    label = state.activity_label || "THINKING";
-    mastheadText = "PROCESSING";
+    label = agentActive
+      ? (AGENT_PHASE_LABELS[agent.phase] || "AGENT ACTIVE")
+      : (state.activity_label || "THINKING");
+    mastheadText = agentActive
+      ? (AGENT_MASTHEAD_LABELS[agent.phase] || "AUTONOMOUS CORE ACTIVE")
+      : "PROCESSING";
   }
 
   // Only touch the state-* classes here — updateClock owns quiet-hours, so
@@ -170,6 +194,111 @@ function applyState(state) {
   document.body.classList.add(stateClass);
   document.getElementById("status-label").textContent = label;
   document.getElementById("masthead-state-text").textContent = mastheadText;
+}
+
+function applyAgentState(state) {
+  const agent = state.agent || {};
+  const mission = document.getElementById("agent-mission");
+  const phase = String(agent.phase || "idle");
+  const terminalPhase = ["completed", "failed"].includes(phase);
+  const visible = Boolean(agent.active) || terminalPhase;
+
+  const agentClasses = [
+    "agent-visible",
+    "agent-active",
+    "agent-planning",
+    "agent-executing",
+    "agent-waiting",
+    "agent-completed",
+    "agent-failed",
+  ];
+
+  document.body.classList.remove(...agentClasses);
+  document.body.classList.toggle("agent-visible", visible);
+  document.body.classList.toggle("agent-active", Boolean(agent.active));
+  document.body.classList.toggle(
+    "agent-planning",
+    phase === "planning" || phase === "plan_ready",
+  );
+  document.body.classList.toggle("agent-executing", phase === "executing");
+  document.body.classList.toggle(
+    "agent-waiting",
+    phase === "waiting_confirmation",
+  );
+  document.body.classList.toggle("agent-completed", phase === "completed");
+  document.body.classList.toggle("agent-failed", phase === "failed");
+
+  mission.classList.toggle("visible", visible);
+
+  if (!visible) {
+    document.getElementById("agent-phase").textContent = "MISSION STANDBY";
+    document.getElementById("agent-goal").textContent = "";
+    document.getElementById("agent-step").textContent = "";
+    document.getElementById("agent-progress-fill").style.width = "0%";
+    return;
+  }
+
+  document.getElementById("agent-phase").textContent =
+    AGENT_PHASE_LABELS[phase] || "AGENT ACTIVE";
+
+  document.getElementById("agent-goal").textContent =
+    agent.goal || "AUTONOMOUS MISSION";
+
+  const stepCount = Math.max(0, Number(agent.step_count) || 0);
+  const currentStep = Math.max(0, Number(agent.current_step) || 0);
+  const completedSteps = Math.max(0, Number(agent.completed_steps) || 0);
+
+  let progress = 0;
+
+  if (phase === "completed") {
+    progress = 100;
+  } else if (stepCount > 0) {
+    progress = Math.min(100, (completedSteps / stepCount) * 100);
+  }
+
+  document.getElementById("agent-progress-fill").style.width =
+    `${progress}%`;
+
+  let stepText = "";
+
+  if (phase === "planning") {
+    stepText = "GENERATING VERIFIED STEPS";
+  } else if (phase === "plan_ready") {
+    stepText = `${stepCount} STEP${stepCount === 1 ? "" : "S"} VALIDATED`;
+  } else if (phase === "executing") {
+    const tool = String(agent.tool_name || "")
+      .replaceAll("_", " ")
+      .replaceAll(".", " · ")
+      .toUpperCase();
+
+    stepText = stepCount > 0
+      ? `STEP ${Math.max(1, currentStep)}/${stepCount}${tool ? ` · ${tool}` : ""}`
+      : (tool || "EXECUTING WORKFLOW");
+  } else if (phase === "waiting_confirmation") {
+    stepText = "VOICE CONFIRMATION REQUIRED";
+  } else if (phase === "completed") {
+    stepText = stepCount > 0
+      ? `${completedSteps}/${stepCount} STEPS VERIFIED`
+      : "ALL OBJECTIVES VERIFIED";
+  } else if (phase === "failed") {
+    stepText = agent.error
+      ? String(agent.error).toUpperCase()
+      : "EXECUTION TERMINATED";
+  }
+
+  document.getElementById("agent-step").textContent = stepText;
+
+  if (
+    !agent.active
+    && terminalPhase
+    && !state.speaking
+    && state.expression !== "listening"
+  ) {
+    document.getElementById("status-label").textContent =
+      AGENT_PHASE_LABELS[phase];
+    document.getElementById("masthead-state-text").textContent =
+      AGENT_MASTHEAD_LABELS[phase];
+  }
 }
 
 function applyImage(state) {
@@ -429,6 +558,7 @@ async function pollState() {
     const response = await fetch("/state");
     const state = await response.json();
     applyState(state);
+    applyAgentState(state);
     applyTimers(state);
     applyAuth(state);
     applyAlertAndScreen(state);

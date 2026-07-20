@@ -729,6 +729,174 @@ body.state-speaking .ring-outer {
 body.state-listening #status-label { color: var(--amber); }
 body.state-speaking #status-label  { color: var(--green); }
 
+/* ------------------------------------------------------------------ */
+/* Autonomous agent mission readout                                    */
+/* ------------------------------------------------------------------ */
+
+#agent-mission {
+  display: none;
+  width: 260px;
+  margin: 12px auto 0;
+  text-align: center;
+  opacity: 0;
+  transform: translateY(5px);
+}
+
+#agent-mission.visible {
+  display: block;
+  animation: agent-readout-in 0.35s ease-out forwards;
+}
+
+#agent-phase {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 4px;
+  color: var(--cyan);
+  text-shadow: 0 0 10px rgba(52, 226, 255, 0.65);
+}
+
+#agent-goal {
+  margin-top: 6px;
+  overflow: hidden;
+  color: rgba(220, 248, 255, 0.88);
+  font-size: 12px;
+  letter-spacing: 1px;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#agent-progress {
+  position: relative;
+  width: 210px;
+  height: 3px;
+  margin: 9px auto 7px;
+  overflow: hidden;
+  border: 1px solid rgba(52, 226, 255, 0.28);
+  background: rgba(52, 226, 255, 0.08);
+  box-shadow: inset 0 0 7px rgba(52, 226, 255, 0.12);
+}
+
+#agent-progress-fill {
+  width: 0;
+  height: 100%;
+  background: var(--cyan);
+  box-shadow: 0 0 10px var(--cyan);
+  transition: width 0.45s ease;
+}
+
+#agent-step {
+  min-height: 13px;
+  overflow: hidden;
+  color: rgba(150, 228, 241, 0.82);
+  font-size: 9px;
+  letter-spacing: 1.5px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+body.agent-visible #clock {
+  font-size: 46px;
+  transition: font-size 0.25s ease;
+}
+
+body.agent-visible #date {
+  font-size: 15px;
+  transition: font-size 0.25s ease;
+}
+
+body.agent-active #ring-core-glow {
+  opacity: 1;
+  animation-duration: 1.6s;
+}
+
+body.agent-planning #agent-progress-fill {
+  width: 42% !important;
+  animation: agent-progress-scan 1.15s ease-in-out infinite;
+}
+
+body.agent-waiting #agent-phase,
+body.agent-waiting #status-label {
+  color: var(--amber);
+  text-shadow: 0 0 12px rgba(255, 178, 56, 0.7);
+}
+
+body.agent-waiting #agent-progress-fill {
+  background: var(--amber);
+  box-shadow: 0 0 12px var(--amber);
+  animation: agent-confirm-pulse 0.8s ease-in-out infinite;
+}
+
+body.agent-completed #agent-phase,
+body.agent-completed #status-label {
+  color: var(--green);
+  text-shadow: 0 0 12px rgba(88, 255, 156, 0.7);
+}
+
+body.agent-completed #agent-progress-fill {
+  background: var(--green);
+  box-shadow: 0 0 12px var(--green);
+}
+
+body.agent-completed .ring-inner,
+body.agent-completed .ring-middle {
+  stroke: var(--green);
+}
+
+body.agent-failed #agent-phase,
+body.agent-failed #status-label,
+body.agent-failed #agent-step {
+  color: var(--red);
+  text-shadow: 0 0 12px rgba(255, 95, 95, 0.7);
+}
+
+body.agent-failed #agent-progress-fill {
+  background: var(--red);
+  box-shadow: 0 0 12px var(--red);
+}
+
+body.agent-failed .ring-inner,
+body.agent-failed .ring-middle {
+  stroke: var(--red);
+}
+
+@keyframes agent-readout-in {
+  from {
+    opacity: 0;
+    transform: translateY(5px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes agent-progress-scan {
+  0% {
+    transform: translateX(-125%);
+  }
+
+  55% {
+    transform: translateX(120%);
+  }
+
+  100% {
+    transform: translateX(120%);
+  }
+}
+
+@keyframes agent-confirm-pulse {
+  0%, 100% {
+    opacity: 0.35;
+  }
+
+  50% {
+    opacity: 1;
+  }
+}
+
 /* Countdown readout inside the reactor — amber for timers, cyan for
    focus sessions. Hidden when neither is running. */
 #timer-readout {

@@ -64,6 +64,7 @@ def test_factory_builds_complete_pc_runtime(tmp_path):
         assert bundle.runtime.mission_store is (
             bundle.mission_store
         )
+        assert bundle.runtime.event_bus is bundle.event_bus
         assert bundle.task_queue.list_tasks() == []
     finally:
         bundle.close()

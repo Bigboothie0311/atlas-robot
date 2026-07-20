@@ -87,13 +87,35 @@ def load_api_key():
     raise RuntimeError("OPENAI_API_KEY was not found.")
 
 
+def _forward_agent_event_to_hud(event):
+    """Best-effort bridge from the agent process to robot-hub state."""
+    try:
+        requests.post(
+            f"{ATLAS_HUB}/agent/event",
+            json={
+                "name": event.name,
+                "source": event.source,
+                "data": event.data,
+                "event_id": event.event_id,
+                "created_at": event.created_at,
+            },
+            timeout=1,
+        )
+    except requests.RequestException as error:
+        print(
+            "Agent HUD event update failed:",
+            error,
+            flush=True,
+        )
+
+
 def _build_agent_voice_runtime_owner():
     """Build the lightweight owner; its real runtime remains lazy."""
     from atlas_agent.runtime_factory import build_pc_agent_runtime
     from atlas_agent.voice_runtime_owner import VoiceRuntimeOwner
 
     def build_bundle():
-        return build_pc_agent_runtime(
+        bundle = build_pc_agent_runtime(
             openai_client=OpenAI(
                 api_key=load_api_key(),
                 max_retries=0,
@@ -115,6 +137,11 @@ def _build_agent_voice_runtime_owner():
                 USAGE_PATH.parent / "agent_missions.json"
             ),
         )
+        bundle.event_bus.subscribe(
+            "*",
+            _forward_agent_event_to_hud,
+        )
+        return bundle
 
     return VoiceRuntimeOwner(build_bundle)
 

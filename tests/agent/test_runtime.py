@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from atlas_agent.event_bus import EventBus
 from atlas_agent.runtime import AgentRuntime
 from atlas_agent.task_queue import TaskQueue
 from atlas_agent.tasks import TaskStatus
@@ -247,3 +248,47 @@ def test_non_object_metadata_is_rejected():
         )
 
     assert queue.list_tasks() == []
+
+
+def test_runtime_publishes_planning_lifecycle_events():
+    queue = TaskQueue()
+    bus = EventBus()
+    events = []
+    bus.subscribe("*", events.append)
+
+    plan = SimpleNamespace(
+        plan_id="plan-1",
+        steps=(object(), object()),
+    )
+    planning = FakePlanningService(
+        result=SimpleNamespace(plan=plan),
+    )
+    workflow = FakeWorkflowRunner(
+        result=SimpleNamespace(status="completed"),
+    )
+    runtime = AgentRuntime(
+        planning_service=planning,
+        workflow_runner=workflow,
+        task_queue=queue,
+        event_bus=bus,
+    )
+
+    result = runtime.run_goal(
+        "Check the PC.",
+        source="voice",
+    )
+
+    assert [event.name for event in events] == [
+        "agent.planning.started",
+        "agent.planning.completed",
+    ]
+    assert events[0].data == {
+        "task_id": result.task.task_id,
+        "goal": "Check the PC.",
+        "source": "voice",
+    }
+    assert events[1].data == {
+        "task_id": result.task.task_id,
+        "plan_id": "plan-1",
+        "step_count": 2,
+    }

@@ -141,6 +141,7 @@ def build_pc_agent_runtime(
         workflow_runner=workflow_runner,
         task_queue=task_queue,
         mission_store=mission_store,
+        event_bus=event_bus,
     )
 
     return RuntimeBundle(
