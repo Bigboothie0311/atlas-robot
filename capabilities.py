@@ -56,6 +56,8 @@ REGISTRY = [
      "aliases": ["sky watch", "what's up in the sky", "next meteor shower"], "confirm": False, "requires": "none", "category": "information"},
     {"id": "weather", "name": "weather", "description": "answers weather questions for home or another city",
      "aliases": ["what's the weather", "will it rain tomorrow"], "confirm": False, "requires": "none", "category": "information"},
+    {"id": "instagram_stats", "name": "Instagram stats", "description": "reports Atlas's followers and latest-post performance from cached Instagram Insights",
+     "aliases": ["how is Atlas doing online", "give me Instagram stats"], "confirm": False, "requires": "none", "category": "information"},
 
     # --- Network & security ----------------------------------------
     {"id": "network_devices", "name": "network devices", "description": "lists the devices on your network",

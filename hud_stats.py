@@ -6,6 +6,7 @@ import psutil
 import requests
 
 from ai_tools import WEATHER_CODE_DESCRIPTIONS
+import instagram_stats
 import pc_stats
 
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
@@ -258,5 +259,8 @@ def get_hud_stats():
         "network": get_network_stats(),
         "uptime_seconds": get_uptime_seconds(),
         "gaming_pc": pc_stats.get_gaming_pc_stats(),
+        # The HUD polls every five seconds; never put a social API call on
+        # that rendering path. robot_hub keeps this snapshot warm.
+        "instagram": instagram_stats.get_stats(allow_fetch=False),
         "station_name": robot_config.get("STATION_NAME", "STATION-01"),
     }

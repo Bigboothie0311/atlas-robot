@@ -146,6 +146,41 @@ class CommandRoutingTests(unittest.TestCase):
         )
         get_disk_stats.assert_called_once_with()
 
+    def test_instagram_stats_phrases_are_local(self):
+        for phrase in (
+            "how is atlas doing online",
+            "give me instagram stats",
+            "how did the latest atlas post do",
+        ):
+            self.assertTrue(listen_and_answer.is_instagram_stats_query(phrase))
+            self.assertEqual(listen_and_answer._classify_intent(phrase), "instagram_stats")
+
+    @mock.patch.object(listen_and_answer.instagram_stats, "get_stats")
+    def test_instagram_stats_answer_is_local(self, get_stats):
+        get_stats.return_value = {
+            "configured": True,
+            "available": True,
+            "stale": False,
+            "username": "a.t.l.a.s_desktop_assistant",
+            "followers_count": 4,
+            "media_count": 1,
+            "latest": {
+                "views": 22,
+                "reach": 18,
+                "likes": 3,
+                "comments": 1,
+                "shares": 2,
+                "saved": 1,
+            },
+        }
+
+        answer = listen_and_answer.run_instagram_stats_command()
+
+        self.assertIn("4 followers", answer)
+        self.assertIn("22 views", answer)
+        self.assertIn("2 shares", answer)
+        get_stats.assert_called_once_with()
+
     def test_real_authorized_prompt_slides_camera_idle_window(self):
         previous_injected = listen_and_answer._injected_command
 

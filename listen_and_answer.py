@@ -23,6 +23,7 @@ import chance
 import countdown
 import diagnostics
 import hud_stats
+import instagram_stats
 import interaction_control
 import logbook
 import macros
@@ -510,6 +511,7 @@ VOSK_FAST_PATH_INTENTS = frozenset({
     "instant",
     "storage",
     "diagnostics",
+    "instagram_stats",
 })
 
 
@@ -2470,6 +2472,82 @@ def run_storage_status_command():
         f"{percent:.1f} percent full."
     )
 
+
+INSTAGRAM_STATS_PHRASES = {
+    "how is atlas doing online",
+    "how is atlas doing on instagram",
+    "how is atlas doing on insta",
+    "give me atlas social stats",
+    "give me instagram stats",
+    "give me atlas instagram stats",
+    "how did the latest atlas post do",
+    "how did the latest instagram post do",
+    "how is the latest atlas post doing",
+    "how is the latest instagram post doing",
+    "atlas social stats",
+    "instagram stats",
+}
+
+
+def is_instagram_stats_query(text):
+    normalized = _normalize_phrase(text)
+    if normalized in INSTAGRAM_STATS_PHRASES:
+        return True
+
+    social_context = "instagram" in normalized or "insta" in normalized
+    asks_for_metrics = any(term in normalized for term in (
+        "stats", "statistics", "followers", "reach", "views", "likes",
+        "post", "online", "doing", "performance",
+    ))
+    return social_context and asks_for_metrics
+
+
+def _format_count(value):
+    if value is None:
+        return None
+    return f"{int(value):,}"
+
+
+def run_instagram_stats_command():
+    """Read cached Instagram data locally; never invoke the paid model."""
+    data = instagram_stats.get_stats()
+
+    if not data.get("configured"):
+        return "My Instagram insights link is not configured yet."
+    if not data.get("available"):
+        return "I couldn't reach Instagram insights just now. I'll keep the last good reading when one is available."
+
+    followers = _format_count(data.get("followers_count")) or "an unknown number of"
+    posts = _format_count(data.get("media_count"))
+    account = data.get("username") or "Atlas"
+    parts = [f"{account} has {followers} followers"]
+    if posts is not None:
+        parts.append(f"{posts} posts live")
+
+    latest = data.get("latest")
+    if latest:
+        latest_parts = []
+        if latest.get("views") is not None:
+            latest_parts.append(f"{_format_count(latest['views'])} views")
+        if latest.get("reach") is not None:
+            latest_parts.append(f"{_format_count(latest['reach'])} reached")
+        if latest.get("likes") is not None:
+            latest_parts.append(f"{_format_count(latest['likes'])} likes")
+        if latest.get("comments") is not None:
+            latest_parts.append(f"{_format_count(latest['comments'])} comments")
+        if latest.get("shares") is not None:
+            latest_parts.append(f"{_format_count(latest['shares'])} shares")
+        if latest.get("saved") is not None:
+            latest_parts.append(f"{_format_count(latest['saved'])} saves")
+        if latest_parts:
+            parts.append("The latest post has " + ", ".join(latest_parts))
+
+    answer = ". ".join(parts) + "."
+    if data.get("stale"):
+        answer += " That is my last cached reading."
+    return answer
+
+
 # "Get the whole system healthy" — full diagnose + safe repair sweep (P1-D).
 EMERGENCY_SHUTDOWN_PHRASES = {
     "initiate emergency shutdown",
@@ -3479,6 +3557,8 @@ def _classify_intent(text):
         return "wake_pc"
     if is_storage_query(normalized):
         return "storage"
+    if is_instagram_stats_query(normalized):
+        return "instagram_stats"
     if normalized in DIAGNOSTICS_PHRASES:
         return "diagnostics"
     if normalized in SYSTEM_HEALTH_PHRASES:
@@ -4266,6 +4346,12 @@ def _handle_turn_body(model):
 
         if is_storage_query(normalized_phrase):
             answer = run_storage_status_command()
+            log_qa(text, answer)
+            speak(answer)
+            return
+
+        if is_instagram_stats_query(normalized_phrase):
+            answer = run_instagram_stats_command()
             log_qa(text, answer)
             speak(answer)
             return

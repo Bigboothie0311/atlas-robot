@@ -350,7 +350,7 @@ body.state-speaking .live-dot {
 }
 
 #cosmetic-terminal {
-  grid-column: 1 / span 3;
+  grid-column: 1 / span 2;
   grid-row: 5;
   position: relative;
   border: 1px solid var(--cyan-dim);
@@ -397,6 +397,7 @@ body.state-speaking .live-dot {
 .panel-core    { grid-column: 1; grid-row: 4; }
 .panel-weather { grid-column: 3; grid-row: 2; }
 .panel-gaming-pc { grid-column: 3; grid-row: 4; }
+.panel-instagram { grid-column: 3; grid-row: 5; }
 
 .panel-gaming-pc.offline .panel-value {
   color: var(--red);

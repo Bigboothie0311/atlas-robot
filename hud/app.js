@@ -522,6 +522,37 @@ async function pollStats() {
       document.getElementById("gaming-pc-gpu").textContent = "GPU -- % / -- °C";
       document.getElementById("gaming-pc-ram").textContent = "RAM -- %";
     }
+
+    const instagram = stats.instagram || {};
+    const instagramPanel = document.getElementById("instagram-panel");
+    const instagramFollowers = document.getElementById("instagram-followers");
+    const instagramAccount = document.getElementById("instagram-account");
+    const instagramLatest = document.getElementById("instagram-latest");
+
+    if (instagram.available) {
+      instagramPanel.classList.remove("offline");
+      instagramFollowers.textContent = `${instagram.followers_count ?? "--"}`;
+      instagramAccount.textContent =
+        `${instagram.username || "ATLAS"} · ${instagram.media_count ?? "--"} POSTS`;
+      const latest = instagram.latest || {};
+      const performance = [];
+      if (latest.views !== null && latest.views !== undefined) performance.push(`${latest.views} VIEWS`);
+      if (latest.reach !== null && latest.reach !== undefined) performance.push(`${latest.reach} REACH`);
+      if (latest.likes !== null && latest.likes !== undefined) performance.push(`${latest.likes} LIKES`);
+      instagramLatest.textContent = performance.length
+        ? `LATEST · ${performance.join(" · ")}`
+        : "LATEST POST · METRICS PENDING";
+    } else if (instagram.configured) {
+      instagramPanel.classList.add("offline");
+      instagramFollowers.textContent = "--";
+      instagramAccount.textContent = "SOCIAL LINK RETRYING";
+      instagramLatest.textContent = "INSTAGRAM API UNAVAILABLE";
+    } else {
+      instagramPanel.classList.add("offline");
+      instagramFollowers.textContent = "--";
+      instagramAccount.textContent = "SOCIAL LINK STANDBY";
+      instagramLatest.textContent = "INSTAGRAM NOT CONNECTED";
+    }
     const printer = stats.printer || { online: false };
     const printerPanel = document.getElementById("printer-panel");
 

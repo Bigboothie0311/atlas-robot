@@ -14,6 +14,7 @@ from piper import PiperVoice, SynthesisConfig
 import alerts
 import camera_gate
 import hud_stats
+import instagram_stats
 import memory_store
 import network_sentinel
 import pc_power
@@ -1409,6 +1410,7 @@ def proactive_watcher_loop():
 
 
 HEADLINES_REFRESH_SECONDS = 15 * 60
+INSTAGRAM_REFRESH_SECONDS = 15 * 60
 
 
 def headlines_refresher_loop():
@@ -1422,6 +1424,17 @@ def headlines_refresher_loop():
             print("Headline refresh error:", type(error).__name__, error)
 
         time.sleep(HEADLINES_REFRESH_SECONDS)
+
+
+def instagram_refresher_loop():
+    """Keep cached social stats off the HUD request path."""
+    while True:
+        try:
+            instagram_stats.get_stats()
+        except Exception as error:
+            print("Instagram refresh error:", type(error).__name__, error)
+
+        time.sleep(INSTAGRAM_REFRESH_SECONDS)
 
 
 def _sentinel_should_stay_quiet():
@@ -1455,6 +1468,7 @@ if __name__ == "__main__":
         daemon=True,
     ).start()
     threading.Thread(target=headlines_refresher_loop, daemon=True).start()
+    threading.Thread(target=instagram_refresher_loop, daemon=True).start()
 
     # Self-healing core — silent unless it actually repairs something.
     try:
