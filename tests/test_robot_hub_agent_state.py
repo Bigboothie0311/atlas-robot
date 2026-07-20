@@ -125,6 +125,22 @@ class AgentHudStateTests(unittest.TestCase):
             time.time(),
         )
 
+    def test_completed_event_records_supplied_step_count(self):
+        agent = self.post_event(
+            "agent.workflow.completed",
+            {
+                "task_id": "direct-completion",
+                "goal": "Verify mission completion.",
+                "source": "voice",
+                "step_count": 1,
+                "completed_steps": 1,
+            },
+        )
+
+        self.assertEqual(agent["step_count"], 1)
+        self.assertEqual(agent["completed_steps"], 1)
+        self.assertEqual(agent["current_step"], 1)
+
     def test_terminal_agent_state_expires_back_to_idle(self):
         with robot_hub.state_lock:
             robot_hub.robot_state["agent"] = {

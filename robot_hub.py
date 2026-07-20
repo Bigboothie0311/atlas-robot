@@ -562,10 +562,16 @@ def set_agent_event():
             completed = _event_int(
                 event_data.get("completed_steps")
             )
+            step_count = max(
+                _event_int(current.get("step_count")),
+                _event_int(event_data.get("step_count")),
+                completed,
+            )
             current.update({
                 "active": False,
                 "phase": "completed",
                 "status": "completed",
+                "step_count": step_count,
                 "completed_steps": completed,
                 "current_step": completed,
                 "description": "MISSION COMPLETE",
