@@ -80,6 +80,7 @@ class FakeRunner:
         if command[0] == "sftp":
             if self.sftp_returncode == 0:
                 batch = kwargs["input"]
+                assert batch.startswith('get "/C:/')
                 match = re.search(
                     r'get ".*" "([^"]+)"',
                     batch,

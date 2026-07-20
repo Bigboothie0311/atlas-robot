@@ -296,7 +296,7 @@ class SFTPClient:
             temporary_path = self.staging_directory / (
                 f".{destination_name}.{uuid4().hex}.part"
             )
-            remote_sftp_path = PureWindowsPath(
+            remote_sftp_path = "/" + PureWindowsPath(
                 info.path
             ).as_posix()
             batch = (
