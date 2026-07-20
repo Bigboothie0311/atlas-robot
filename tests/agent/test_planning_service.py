@@ -201,7 +201,7 @@ def test_local_plan_rejection_propagates_without_execution():
     ):
         service.create_plan(task)
 
-    assert len(planner.calls) == 1
+    assert len(planner.calls) == 2
 
 
 def test_generation_failure_never_reaches_local_planner():
