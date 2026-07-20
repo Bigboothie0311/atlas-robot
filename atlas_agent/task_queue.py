@@ -49,6 +49,19 @@ class TaskQueue:
             self._tasks[task.task_id] = task
             self._queued_ids.append(task.task_id)
 
+    def restore(self, task: AtlasTask) -> None:
+        """Restore a persisted task without changing its status."""
+        with self._lock:
+            if task.task_id in self._tasks:
+                raise ValueError(
+                    f"Task already exists: {task.task_id}"
+                )
+
+            self._tasks[task.task_id] = task
+
+            if task.status is TaskStatus.QUEUED:
+                self._queued_ids.append(task.task_id)
+
     def claim_next(self) -> AtlasTask | None:
         with self._lock:
             while self._queued_ids:

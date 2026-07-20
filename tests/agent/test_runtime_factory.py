@@ -4,7 +4,7 @@ from atlas_agent.mission_store import MissionStore
 from atlas_agent.runtime_factory import (
     build_pc_agent_runtime,
 )
-from atlas_agent.tasks import AtlasTask
+from atlas_agent.tasks import AtlasTask, TaskStatus
 
 
 EXPECTED_PC_TOOLS = {
@@ -109,6 +109,31 @@ def test_factory_recovers_persisted_tasks(tmp_path):
         assert recovered.goal == (
             "Remember this mission."
         )
+    finally:
+        bundle.close()
+
+
+def test_factory_recovers_completed_task_history(tmp_path):
+    mission_path = tmp_path / "missions.json"
+    completed_task = AtlasTask(
+        goal="Completed historical mission.",
+        source="test",
+    )
+    completed_task.set_status(TaskStatus.RUNNING)
+    completed_task.set_status(TaskStatus.COMPLETED)
+
+    MissionStore(mission_path).save([completed_task])
+
+    bundle = build_bundle(tmp_path)
+
+    try:
+        recovered = bundle.task_queue.get(
+            completed_task.task_id
+        )
+
+        assert recovered.status is TaskStatus.COMPLETED
+        assert bundle.task_queue.pending_count == 0
+        assert bundle.task_queue.claim_next() is None
     finally:
         bundle.close()
 

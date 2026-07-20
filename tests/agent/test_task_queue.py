@@ -47,6 +47,26 @@ def test_queue_rejects_duplicate_and_nonqueued_tasks() -> None:
         queue.enqueue(running_task)
 
 
+def test_restore_preserves_history_and_only_queues_pending_tasks() -> None:
+    queue = TaskQueue()
+
+    completed = make_task(1)
+    completed.set_status(TaskStatus.RUNNING)
+    completed.set_status(TaskStatus.COMPLETED)
+
+    queued = make_task(2)
+
+    queue.restore(completed)
+    queue.restore(queued)
+
+    assert queue.get(completed.task_id) is completed
+    assert completed.status is TaskStatus.COMPLETED
+    assert queue.pending_count == 1
+
+    assert queue.claim_next() is queued
+    assert queue.claim_next() is None
+
+
 def test_waiting_task_can_be_requeued_and_completed() -> None:
     queue = TaskQueue()
     task = make_task(1)

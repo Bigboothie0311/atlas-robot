@@ -85,7 +85,7 @@ def build_pc_agent_runtime(
     )
 
     for task in recovered_tasks:
-        task_queue.enqueue(task)
+        task_queue.restore(task)
 
     if recovered_tasks:
         mission_store.save(
