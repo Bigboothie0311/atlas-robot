@@ -5,31 +5,77 @@
 > `ATLAS_V2_AGENT_HANDOFF_*.md` by date first (`ls -lat *.md`) before
 > trusting this one.
 >
-> - **Branch / HEAD:** `atlas-v2-agent` — HEAD is `a9ce869` ("fix:
->   self-recorded clips are silent and unplayable on Windows"). `git log
->   -1` to confirm it's still there. **674 tests passing.**
-> - **⏸️ LEFT OFF HERE (2026-07-21, iteration 5):** Wesley live-tested
->   iteration 4's work — the REC indicator worked, but the clip itself
->   was silent and wouldn't play on his PC at all. Root-caused and fixed
->   both problems (see "What changed 2026-07-21, iteration 5" below):
->   an mp4 pixel-format bug Windows' native players reject outright, and
->   the *actual* mic-contention fix — the previous session's
->   retry-then-fallback (`9030897`) could never succeed in practice
->   because barge-in never releases the mic until the whole answer
->   finishes, so self-recording (invoked mid-answer) always landed on
->   muted. Added `mic_arbiter.py` so `capture_clip()` now actively
->   coordinates with `watch_for_barge_in()` to get the mic released
->   instead of hoping a retry gets lucky. **Not yet live-voice-verified —
->   this is the first-ever change to the core barge-in device loop and it
->   has zero prior test coverage**, so treat it as higher-risk than the
->   other fixes this session. See "What Wesley needs to test" at the
->   bottom. **Still stopped deliberately before Phase 11** (edit-and-post
->   pipeline) — needs Wesley's input on Instagram credentials, licensed
->   audio, and branding/caption style before any of that gets built; see
->   that section below, unchanged from iteration 4.
+> - **Branch / HEAD:** `atlas-v2-agent` — HEAD is `dc594e9` ("fix: stop
+>   offering self_record_clip -- physical camera faces the room, not
+>   Atlas"). `git log -1` to confirm it's still there. **674 tests
+>   passing** (test count unchanged from iteration 5 — one test swapped
+>   for its inverse).
+> - **⏸️ LEFT OFF HERE (2026-07-21, iteration 6) — self-recording via the
+>   physical camera is RETIRED, not fixed further.** Wesley live-tested
+>   iteration 5's mic-coordination fix and confirmed (via journalctl) it
+>   actually worked mechanically — no more "resource busy" fallback. But
+>   the clip showed **Wesley**, not Atlas: the onboard USB camera
+>   physically faces the room/desk, not himself. This is the exact "may
+>   not be able to film Atlas itself depending on mounting position" risk
+>   the original mission doc flagged in advance, now confirmed live twice
+>   (the clip, and separate vision-command snapshots earlier in the same
+>   session log). Wesley was explicit: **never use this camera for
+>   self-showcase content again**; PC screen recording, or a genuine
+>   future "his own" video source, are the only acceptable paths for
+>   Instagram content. Removed `self_record_clip` from
+>   `capabilities.REGISTRY` so voice no longer routes there — see "What
+>   changed 2026-07-21, iteration 6" below for full detail, including why
+>   the underlying tool/`mic_arbiter`/HUD indicator were left in place
+>   rather than ripped out. Video-jump/audio-content quality symptoms on
+>   that camera path were **not** debugged further — not worth chasing
+>   artifacts on a capture source we just retired. **Still stopped before
+>   Phase 11** (edit-and-post pipeline) — same blockers as before
+>   (Instagram credentials, licensed audio, branding/caption style), now
+>   with an added wrinkle: Wesley wants Instagram content specifically as
+>   *screen recording + witty narrated conversation*, not raw self-video,
+>   which actually simplifies Phase 11 now that the camera path is off
+>   the table.
 > - **Phase / milestone:** Phase 4, milestone 1 (spoken-command tests,
 >   see below) plus an out-of-band Phase 3 fix Wesley reported directly:
 >   he asked Atlas to turn off his PC and it didn't work.
+> - **What changed 2026-07-21, iteration 6 (wrong-camera finding —
+>   self-recording retired):** Wesley live-tested iteration 5's
+>   mic-coordination fix. Checked journalctl for the actual test run
+>   (22:48): confirmed `mic_arbiter` worked — no "resource busy" fallback
+>   message this time, unlike an earlier 22:36 attempt that was still
+>   running the old retry-only code. But Wesley reported the clip's video
+>   jumped, its audio didn't capture cleanly, and — the important part —
+>   **it showed him, not Atlas**. His onboard USB camera physically faces
+>   the room/desk, not himself; confirmed independently by two unrelated
+>   vision-command snapshots earlier in the *same* session log
+>   ("a person leaning close to the camera in a kitchen", "a shirtless
+>   person seated close to the camera"). This is the exact risk the
+>   original mission doc called out in advance ("Atlas's onboard camera
+>   may not be able to film Atlas itself depending on its mounting
+>   position") — a hardware/placement fact, not a bug any of this
+>   session's software fixes could have caused or can fix.
+>   Wesley's instruction was explicit: never use this camera for
+>   self-showcase content; PC screen recording, or a real future "his
+>   own" video source, are the only acceptable capture paths for
+>   Instagram content — where he wants Atlas doing a screen recording
+>   with witty narrated conversation, not raw self-video. **Fix:**
+>   removed `self_record_clip` from `capabilities.REGISTRY` so voice no
+>   longer routes "record a clip of yourself" to `camera.capture_clip` at
+>   all. **Deliberately did NOT rip out** the underlying tool,
+>   `mic_arbiter.py`, or the HUD recording indicator — none of that is
+>   actually broken, it's just pointed at the wrong physical source; all
+>   of it is one registry line away from working again once the camera
+>   is repositioned or a real "his own" (e.g. Pi HUD screen-video) source
+>   exists. Quick recon done: no `wf-recorder`/`wl-recorder` installed on
+>   the Pi, and the HUD kiosk runs under Cage (Wayland/wlroots), so
+>   `ffmpeg`'s `x11grab` won't work directly for a future HUD-video
+>   capability — that would need a package install and live testing
+>   against the real kiosk session, not attempted this session. Did
+>   *not* chase the video-jump/audio-quality symptoms further, since
+>   that capture path is no longer voice-reachable. Updated
+>   `tests/test_capabilities_registry.py` (one test inverted, not added)
+>   — 674 passing, unchanged count. `graphify update .` run, `atlas-wake`
+>   restarted clean. Committed as `dc594e9`.
 > - **What changed 2026-07-21, iteration 5 (silent/unplayable clip
 >   investigation):** Wesley live-tested iteration 4's mic-contention fix.
 >   The REC indicator worked, but the resulting clip had no audio, and
@@ -185,53 +231,69 @@ reports either misbehaving.
 
 ## What's left to fully close Phase 4
 
-1. ~~**Fix the mic-contention bug.**~~ **Attempted twice.** Iteration 3's
-   retry-and-fallback (`9030897`) was live-tested by Wesley in iteration
-   4/5 and, as suspected, always landed on the muted fallback — it could
-   never actually succeed given how `watch_for_barge_in()` holds the mic.
-   Iteration 5 (`a9ce869`) took the harder, originally-deferred approach
-   instead: `mic_arbiter.py` coordinates an actual mic release between
-   `capture_clip()` and `listen_for_barge_in()`. This is now the real
-   fix; the retry/fallback from iteration 3 remains as a fail-open safety
-   net underneath it. 12 more regression tests, 674 passing total.
-   **Still needs a real live-voice test — this is higher-risk than the
-   other fixes**, since it's the first-ever change to
-   `listen_for_barge_in`'s device loop and that loop has zero prior test
-   coverage. Say "Hey Atlas, record a 10 second clip of yourself" and
-   **actually talk during the recording window** — confirm the clip has
-   real narration, AND separately confirm barge-in still works normally
-   afterward (say "Hey Atlas" mid-answer on an unrelated turn) since a
-   regression there would be silent and easy to miss.
-2. Once self-recording-by-voice is live-verified end to end (see item 1),
-   flip `phase4_screen_capture` to `live_verified` in the ledger.
-3. ~~**Add the HUD recording-state indicator.**~~ **Done 2026-07-21
-   (iteration 4), pending live verification.** New `/hud/recording` flag
+1. ~~**Fix the mic-contention bug.**~~ **Mechanically fixed, but now
+   moot for the moment.** Iteration 3's retry-and-fallback (`9030897`)
+   was live-tested and, as suspected, always landed on the muted
+   fallback. Iteration 5 (`a9ce869`) took the harder, originally-deferred
+   approach: `mic_arbiter.py` coordinates an actual mic release between
+   `capture_clip()` and `listen_for_barge_in()` — confirmed *mechanically
+   working* via journalctl in iteration 6 (no more "resource busy"
+   fallback). But iteration 6 also found the actual blocker was
+   upstream of any of this: the physical camera faces the wrong
+   direction, so `self_record_clip` is now removed from voice entirely
+   (see item 4). `mic_arbiter` and the retry/fallback logic are still
+   real, tested, working code — they'll matter again the moment
+   self-recording (or any other audio-capturing tool) is voice-reachable
+   again, whether that's a repositioned camera or a Pi HUD screen-video
+   capability. **Regression check still worth doing:** on a live turn,
+   interrupt Atlas mid-answer on something *unrelated* to recording
+   (say "Hey Atlas" while he's talking) and confirm barge-in still works
+   normally — `listen_for_barge_in`'s device loop changed for the first
+   time ever this session and had zero prior test coverage, so this is
+   the one regression risk left worth a live sanity check even though
+   the recording path itself is now dormant.
+2. ~~Once self-recording-by-voice is live-verified end to end, flip
+   `phase4_screen_capture` to `live_verified`.~~ **Superseded** — see
+   item 4; self-recording via the physical camera isn't the path forward
+   anymore, so this specific milestone won't be the thing that flips the
+   ledger. PC screen recording is already `live_verified` from Phase 4
+   milestone 1.
+3. ~~**Add the HUD recording-state indicator.**~~ **Built and confirmed
+   working (iteration 4), now dormant.** New `/hud/recording` flag
    endpoint (same `/screen`-flag pattern as dark mode), `recording_active`
    in `GET /state`, a `recording-active` body class toggled by
    `hud/app.js`, and a pulsing red "REC" dot in the masthead
-   (`hud/style.css`). Wired into `capture_self_clip` in
-   `atlas_agent/pi_tools.py` (flag on before the capture, off in a
-   `finally` after) via a best-effort HTTP notifier that swallows its own
-   failures. Scoped to Pi self-recording only — **not** wired to PC
-   screen recording (`pc.start_screen_recording`), which would need a
-   separate design for polling PC state back to the Pi HUD; flag that as
-   a follow-up if Wesley wants it too. 4 new tests, 666 passing.
-   Committed as `d693854`. `atlas-robot`/`atlas-wake`/`atlas-hud`
-   restarted clean, confirmed `recording_active: false` in a live
-   `GET /state`. **Still needs a real live-voice test** — confirm the REC
-   dot actually appears on the physical kiosk during self-recording and
-   disappears after.
+   (`hud/style.css`) — Wesley confirmed live it actually shows up on the
+   physical kiosk. Wired into `capture_self_clip` in
+   `atlas_agent/pi_tools.py`, which is no longer voice-reachable as of
+   iteration 6 (see item 1/4), so the dot currently has nothing to fire
+   it — not broken, just unused until self-recording (physical camera or
+   a future HUD-video source) is voice-reachable again. **Not** wired to
+   PC screen recording (`pc.start_screen_recording`), which would need
+   separate design for polling PC state back to the Pi HUD; worth
+   revisiting once Phase 11 actually needs a recording indicator for
+   screen-record content instead.
 4. **Phase 11 (edit pipeline) — deliberately not started.** This is where
-   this session stopped. It needs decisions only Wesley can make before
-   any code gets written:
+   this session stopped. Wesley clarified the actual product goal this
+   session: Instagram content should be a **screen recording with witty
+   narrated conversation**, not raw self-video via camera — which
+   conveniently simplifies this list, since the self-video capture
+   question (item 1) is now moot. It still needs decisions only Wesley
+   can make before any code gets written:
    - **Instagram credentials/OAuth.** No API access exists yet at all.
-   - **Licensed background audio.** Can't just grab something off the
-     internet — copyright risk. Needs a real source (royalty-free
-     library, an actual license, or Wesley's own audio).
+   - **Licensed background audio** — only relevant if music/background
+     audio is wanted under the narration; Atlas's own spoken narration
+     itself isn't a licensing question. Can't just grab something off
+     the internet if music is wanted — copyright risk.
    - **Branding/caption style.** Logo overlay? Watermark? Caption tone?
      Nothing defined yet.
    - **Which editing approach.** Deterministic FFmpeg filter chains vs.
      something higher-level — not evaluated this session.
+   - **Where the narration audio comes from and how it syncs to the
+     screen recording** — Atlas's TTS plays on the Pi's speakers while
+     the screen recording happens on the PC, two separate machines; the
+     narration audio needs its own capture/transfer path to mux with the
+     PC video during editing. Not designed yet.
    - The pipeline's last step is a **real public Instagram post**, which
      the safety model (see the main mission doc, "Safety and Authority
      Model") explicitly requires confirming the exact media and caption
@@ -239,17 +301,16 @@ reports either misbehaving.
      build silently and gate behind a runtime confirmation prompt later;
      the credentials and content-source decisions above have to happen
      with Wesley first.
-   The capture primitives Phase 11 will consume already exist and are
-   proven end to end (PC screenshot confirmed live; Pi self-recording
-   fixed this session, pending its own live-voice confirmation above).
+   The capture primitive Phase 11 will actually use is already proven
+   end to end (PC screenshot/screen-recording confirmed live 2026-07-20).
+   Pi self-recording via camera is explicitly off the table (item 1).
 
 ## Next session
 
 Verify state first (`git log -1`, `./venv/bin/python -m pytest tests/ -q`
-should show 666+ passing). Everything code-side for this session's two
-fixes is done — what's left is live voice verification (see the
-checklist below) and then, only after Wesley weighs in on the Phase 11
-questions above, starting the edit pipeline. Same loop as always:
+should show 674+ passing). What's left is one live regression check (see
+the checklist below) and then, only after Wesley weighs in on the
+Phase 11 questions above, starting the edit pipeline. Same loop as always:
 graphify orientation (max 3 queries) → tests first → implement → full
 suite → `graphify update .` (only if source changed) → restart only
 affected services → live verify → commit exact paths → update
@@ -261,29 +322,25 @@ affected services → live verify → commit exact paths → update
 Say/do each of these for real, one at a time, and report back what
 actually happened in this same order:
 
-1. **"Hey Atlas, record a 10 second clip of yourself" — and actually
-   talk during the 10 seconds.** This is the real test of the
-   `mic_arbiter` fix. Pass = the clip has your voice in it, not silence.
-2. **Play the resulting clip on your PC.** Confirms the `-pix_fmt
-   yuv420p` fix — it should just open and play now instead of
-   "unsupported encoding settings."
-3. **While #1 is recording, watch the HUD kiosk screen** for the small
-   red pulsing "REC" dot in the top-right masthead area, and confirm it
-   disappears once the recording finishes.
-4. **On a separate, later turn, say "Hey Atlas" while Atlas is mid-answer
-   on something unrelated** (barge-in), and confirm it still interrupts
-   normally. This is the regression check — `listen_for_barge_in`'s
-   device loop changed for the first time ever this session, and a
-   regression here wouldn't show up in #1-3.
-5. *(Optional sanity check, not new this session)* **"Hey Atlas, take a
+1. **"Hey Atlas, record a 10 second clip of yourself."** Should now get
+   an honest refusal or a redirect toward PC screen recording, instead of
+   actually using the camera — confirms `self_record_clip` is really off.
+2. **On a separate, later turn, say "Hey Atlas" while Atlas is mid-answer
+   on something unrelated** (normal barge-in, nothing to do with
+   recording), and confirm it still interrupts normally. This is the one
+   regression risk left from this session — `listen_for_barge_in`'s
+   device loop changed for the first time ever and had zero prior test
+   coverage, so even though nothing currently triggers the
+   mic-yield path in practice, the loop itself runs on every barge-in
+   check now and deserves a sanity check.
+3. *(Optional sanity check, not new this session)* **"Hey Atlas, take a
    picture of my screen."** — confirms the Session 4 screenshot routing
    fix is still solid after this session's restarts.
 
-Report back in that order — which one(s) passed, which didn't, and
-anything Atlas said, the clip sounded/looked like, or the HUD showed that
-seemed off. That determines whether `phase4_screen_capture` gets flipped
-to `live_verified` or needs another round. Once all of this passes,
-Phase 11 (edit-and-post) is next — but that needs your answers on
-Instagram credentials, audio licensing, and branding/caption style
-first (see the checkpoint block and "What's left to fully close Phase 4"
-item 4 above).
+Report back in that order. Once #1 and #2 pass, this session's work is
+fully closed out. Next up is Phase 11 (edit-and-post) — but that needs
+your answers first: Instagram credentials, whether you want background
+music under the narration (and if so, from where), branding/caption
+style, and how narration audio should get from the Pi to the PC to sync
+with the screen recording (see "What's left to fully close Phase 4" item
+4 above for the full list).
