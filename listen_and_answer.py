@@ -3473,6 +3473,20 @@ def answer_text_only(question):
     return answer or "I couldn't generate an answer."
 
 
+# How long the consumer waits for the next streamed sentence before
+# giving up. Confirmed live 2026-07-21: a real content.record_self_showcase
+# call (registered timeout_seconds=300 -- the longest of any agent tool)
+# produces zero streamed text while it runs, since the whole recording
+# happens synchronously inside the model's tool-call handling. The old
+# 30s value abandoned the turn ("Sentence stream timed out...") and told
+# the owner it failed while the recording was still genuinely in
+# progress in the background -- it finished seconds later (a real,
+# valid Reel), just with nobody told. Set comfortably above the longest
+# registered agent tool timeout so no legitimate slow tool call gets
+# orphaned this way again.
+SENTENCE_STREAM_IDLE_TIMEOUT_SECONDS = 320
+
+
 def ask_and_speak_streaming(question, model, retry_attempted=False):
     """Streams the model's answer and speaks each sentence as soon as it's
     ready instead of waiting for the whole answer to finish generating —
@@ -3565,7 +3579,9 @@ def ask_and_speak_streaming(question, model, retry_attempted=False):
     try:
         while True:
             try:
-                sentence = sentence_queue.get(timeout=30)
+                sentence = sentence_queue.get(
+                    timeout=SENTENCE_STREAM_IDLE_TIMEOUT_SECONDS
+                )
             except queue.Empty:
                 print(
                     "Sentence stream timed out waiting for the next chunk.",
