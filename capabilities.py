@@ -70,8 +70,20 @@ REGISTRY = [
      "aliases": ["do I have any intruder alerts", "were there any unauthorized users"], "confirm": False, "requires": "none", "category": "security"},
     {"id": "camera_gate", "name": "camera gate", "description": "turns face verification on or off",
      "aliases": ["camera gate on", "camera gate off"], "confirm": False, "requires": "none", "category": "security"},
-    {"id": "self_record_clip", "name": "self-recording clip", "description": "records a short video clip of itself using its own camera and mic",
-     "aliases": ["record a clip of yourself", "record a video of yourself"], "confirm": False, "requires": "none", "category": "security"},
+
+    # self_record_clip (camera.capture_clip) intentionally NOT listed here.
+    # Confirmed live 2026-07-20/21 (two separate tests): the physical USB
+    # camera faces the room/Wesley, not Atlas, so "record a clip of
+    # yourself" produced footage of Wesley, not Atlas -- exactly the
+    # "onboard camera may not be able to film Atlas itself" risk the
+    # original mission doc flagged in advance. Wesley explicitly said this
+    # camera must never be used for self-showcase content; PC screen
+    # recording (pc_screen_recording below) is the supported path until
+    # the camera is repositioned or a real "his own" video source (e.g. a
+    # Pi HUD screen recording, not built yet) exists. The underlying tool
+    # (camera.capture_clip in atlas_agent/pi_tools.py) and its mic-sharing
+    # fix are left in place, just not offered here, so this is a one-line
+    # re-add once the hardware/product gap is actually resolved.
 
     # --- Diagnostics & self ----------------------------------------
     {"id": "diagnostics", "name": "diagnostics", "description": "runs a self-check of services, sensors, and budget",

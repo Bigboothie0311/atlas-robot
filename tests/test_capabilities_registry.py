@@ -9,9 +9,12 @@ def test_registry_has_no_duplicate_ids():
     assert len(ids) == len(set(ids))
 
 
-def test_self_recording_clip_is_listed():
+def test_self_recording_clip_is_not_listed():
+    """Confirmed live 2026-07-20/21: the physical camera faces the room,
+    not Atlas, so this must not be offered to voice until that's fixed --
+    see the comment above self_record_clip's old spot in capabilities.py."""
     ids = {entry["id"] for entry in capabilities.REGISTRY}
-    assert "self_record_clip" in ids
+    assert "self_record_clip" not in ids
 
 
 def test_pc_screen_recording_is_listed():
@@ -21,5 +24,5 @@ def test_pc_screen_recording_is_listed():
 
 def test_instruction_summary_mentions_recording():
     summary = capabilities.instruction_summary()
-    assert "self-recording clip" in summary
+    assert "self-recording clip" not in summary
     assert "PC screen recording" in summary
