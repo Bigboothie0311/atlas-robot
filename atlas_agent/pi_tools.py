@@ -7,8 +7,6 @@ from collections.abc import Callable
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
-import requests
-
 from atlas_agent.sftp_client import SFTPClient
 from atlas_agent.tool_registry import ToolRegistry
 from atlas_agent.tools import AtlasTool
@@ -18,23 +16,8 @@ from atlas_agent.verifier import (
 )
 
 HUD_DISPLAY = ":0"
-HUB = "http://127.0.0.1:5051"
 
-CameraCaptureHandler = Callable[
-    ...,
-    dict[str, Any] | None,
-]
 HudFrameHandler = Callable[[Path], bool]
-HudRecordingNotifier = Callable[[bool], None]
-
-
-def _notify_hud_recording(active: bool) -> None:
-    """Best-effort HUD recording indicator toggle — never raises, since a
-    HUD/network hiccup must not block or fail the actual capture."""
-    try:
-        requests.post(f"{HUB}/hud/recording", json={"active": active}, timeout=3)
-    except requests.RequestException:
-        pass
 
 
 def _capture_hud_frame_file(out_path: Path) -> bool:
@@ -62,25 +45,27 @@ def register_pi_capture_tools(
     sftp_client: SFTPClient,
     recordings_remote_root: str,
     staging_directory: str | Path,
-    camera_capture_handler: CameraCaptureHandler | None = None,
     hud_frame_handler: HudFrameHandler | None = None,
-    hud_recording_notifier: HudRecordingNotifier | None = None,
 ) -> list[AtlasTool]:
-    """Registers A.T.L.A.S.'s self-showcase capture tools: recording
-    himself via the USB camera, and grabbing his own HUD kiosk screen.
-    Both stage briefly on the Pi, upload to the PC's recordings folder
-    over the existing SFTP link, and delete the local copy only once
-    the upload is verified — footage never lingers on the Pi."""
-    if camera_capture_handler is None:
-        import camera_gate
+    """Registers A.T.L.A.S.'s self-showcase capture tools: currently just
+    grabbing his own HUD kiosk screen. Stages briefly on the Pi, uploads
+    to the PC's recordings folder over the existing SFTP link, and
+    deletes the local copy only once the upload is verified — footage
+    never lingers on the Pi.
 
-        camera_capture_handler = camera_gate.capture_clip
-
+    camera.capture_clip (recording via the physical USB camera) is
+    deliberately NOT registered here. Confirmed live 2026-07-21: that
+    camera faces the room, not Atlas, so any tool that can reach it will
+    eventually get called for "record a clip of yourself" regardless of
+    what capabilities.py's system-prompt text says -- removing it from
+    capabilities.REGISTRY alone was not enough, since run_atlas_agent's
+    own planner can still pick a registered-but-undocumented tool.
+    camera_gate.capture_clip() itself, and its mic_arbiter coordination,
+    are untouched and correct -- they're just not wired into the agent's
+    tool roster until there's a camera actually pointed at Atlas, or a
+    real "his own" video source (e.g. a Pi HUD screen recording)."""
     if hud_frame_handler is None:
         hud_frame_handler = _capture_hud_frame_file
-
-    if hud_recording_notifier is None:
-        hud_recording_notifier = _notify_hud_recording
 
     staging_path = Path(staging_directory)
 
@@ -131,59 +116,6 @@ def register_pi_capture_tools(
             **_upload_and_finalize(local_path, name),
         }
 
-    def capture_self_clip(
-        duration_seconds: int,
-        mission: str | None = None,
-        mute_audio: bool = False,
-    ) -> dict[str, Any]:
-        if (
-            not isinstance(duration_seconds, int)
-            or duration_seconds <= 0
-        ):
-            raise ValueError(
-                "duration_seconds must be a positive integer"
-            )
-
-        if mission is not None and not isinstance(
-            mission, str
-        ):
-            raise ValueError(
-                "mission must be a string or null"
-            )
-
-        if not isinstance(mute_audio, bool):
-            raise ValueError(
-                "mute_audio must be a boolean"
-            )
-
-        hud_recording_notifier(True)
-        try:
-            clip = camera_capture_handler(
-                duration_seconds,
-                mission=mission,
-                mute_audio=mute_audio,
-            )
-        finally:
-            hud_recording_notifier(False)
-
-        if clip is None:
-            return {
-                "ok": False,
-                "mission": mission,
-                "error": "camera clip capture failed",
-            }
-
-        local_path = Path(clip["path"])
-
-        return {
-            "mission": mission,
-            "duration_seconds": clip.get("duration_seconds"),
-            "has_audio": clip.get("has_audio"),
-            **_upload_and_finalize(
-                local_path, local_path.name
-            ),
-        }
-
     tools = [
         AtlasTool(
             name="pi.capture_hud_frame",
@@ -210,44 +142,6 @@ def register_pi_capture_tools(
                 }
             },
         ),
-        AtlasTool(
-            name="camera.capture_clip",
-            description=(
-                "Record A.T.L.A.S. himself via the USB "
-                "camera (video) and Pi microphone (audio, "
-                "unless mute_audio) for a bounded duration, "
-                "then upload the clip to the PC's "
-                "recordings folder."
-            ),
-            runs_on="pi",
-            handler=capture_self_clip,
-            permission_level=0,
-            timeout_seconds=180,
-            metadata={
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "duration_seconds": {
-                            "type": "integer",
-                            "minimum": 1,
-                            "maximum": 120,
-                        },
-                        "mission": {
-                            "type": ["string", "null"],
-                        },
-                        "mute_audio": {
-                            "type": "boolean",
-                        },
-                    },
-                    "required": [
-                        "duration_seconds",
-                        "mission",
-                        "mute_audio",
-                    ],
-                    "additionalProperties": False,
-                }
-            },
-        ),
     ]
 
     for tool in tools:
@@ -255,9 +149,6 @@ def register_pi_capture_tools(
 
     verifier.register(
         "pi.capture_hud_frame", _verify_capture_upload
-    )
-    verifier.register(
-        "camera.capture_clip", _verify_capture_upload
     )
 
     return tools

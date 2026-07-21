@@ -113,7 +113,10 @@ def test_factory_registers_pi_capture_tools_when_recordings_root_given(
             tool.name for tool in bundle.registry.list_tools()
         }
         assert "pi.capture_hud_frame" in registered_names
-        assert "camera.capture_clip" in registered_names
+        # camera.capture_clip is deliberately never registered -- the
+        # physical USB camera faces the room, not Atlas (confirmed live
+        # 2026-07-21). See pi_tools.register_pi_capture_tools's docstring.
+        assert "camera.capture_clip" not in registered_names
     finally:
         bundle.close()
 
