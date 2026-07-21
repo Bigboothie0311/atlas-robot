@@ -38,9 +38,12 @@ def test_pi_directory_tool_lists_names_and_verifies(
         tmp_path
     )
 
-    assert len(tools) == 1
+    assert len(tools) == 2
     assert registry.get(
         "pi.list_directory"
+    ).runs_on == "pi"
+    assert registry.get(
+        "pi.read_text_file"
     ).runs_on == "pi"
 
     call = ToolCall(
@@ -93,3 +96,95 @@ def test_pi_directory_tool_rejects_unapproved_path(
 
     assert result.status is ResultStatus.ERROR
     assert "PermissionError" in result.error
+
+
+
+def test_pi_text_file_reads_bounded_lines_and_verifies(
+    tmp_path,
+):
+    source = tmp_path / "notes.txt"
+    source.write_text(
+        "one\ntwo\nthree\nfour\n",
+        encoding="utf-8",
+    )
+
+    registry, verifier, _tools = build_tools(
+        tmp_path
+    )
+    call = ToolCall(
+        tool_name="pi.read_text_file",
+        arguments={
+            "path": str(source),
+            "start_line": 2,
+            "max_lines": 2,
+            "max_chars": 100,
+        },
+    )
+
+    result = execute(registry, call)
+    verification = verifier.verify(call, result)
+
+    assert result.status is ResultStatus.SUCCESS
+    assert result.output["content"] == "two\nthree"
+    assert result.output["start_line"] == 2
+    assert result.output["end_line"] == 3
+    assert result.output["line_count"] == 2
+    assert result.output["total_lines"] == 4
+    assert result.output["truncated"] is True
+    assert (
+        verification.status
+        is VerificationStatus.VERIFIED
+    )
+
+
+def test_pi_text_file_rejects_sensitive_file(
+    tmp_path,
+):
+    sensitive = tmp_path / ".env"
+    sensitive.write_text(
+        "TOKEN=test-only",
+        encoding="utf-8",
+    )
+
+    registry, _verifier, _tools = build_tools(
+        tmp_path
+    )
+    call = ToolCall(
+        tool_name="pi.read_text_file",
+        arguments={
+            "path": str(sensitive),
+            "start_line": 1,
+            "max_lines": 20,
+            "max_chars": 1000,
+        },
+    )
+
+    result = execute(registry, call)
+
+    assert result.status is ResultStatus.ERROR
+    assert "PermissionError" in result.error
+
+
+def test_pi_text_file_rejects_binary_file(
+    tmp_path,
+):
+    binary = tmp_path / "image.bin"
+    binary.write_bytes(b"test\x00binary")
+
+    registry, _verifier, _tools = build_tools(
+        tmp_path
+    )
+    call = ToolCall(
+        tool_name="pi.read_text_file",
+        arguments={
+            "path": str(binary),
+            "start_line": 1,
+            "max_lines": 20,
+            "max_chars": 1000,
+        },
+    )
+
+    result = execute(registry, call)
+
+    assert result.status is ResultStatus.ERROR
+    assert "not text" in result.error

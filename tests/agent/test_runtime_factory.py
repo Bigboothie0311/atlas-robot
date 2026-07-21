@@ -14,6 +14,7 @@ EXPECTED_PC_TOOLS = {
     "pc.active_apps",
     "pc.open_app",
     "pi.list_directory",
+    "pi.read_text_file",
 }
 
 
