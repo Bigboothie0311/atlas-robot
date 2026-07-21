@@ -1062,3 +1062,172 @@ def test_pi_explain_last_failure_speaks_no_evidence():
         "I checked my mission history and logs, and I found no "
         "recorded failure to explain."
     )
+
+
+def test_spoken_summary_for_diagnostics_all_healthy():
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.COMPLETED,
+        confirmation_call_id=None,
+        error=None,
+        steps=(
+            make_step(
+                tool_name="pi.run_diagnostics",
+                output={
+                    "components": ["disk", "wifi"],
+                    "findings": [
+                        {
+                            "component": "disk",
+                            "ok": True,
+                            "detail": "disk 27% used",
+                        },
+                        {
+                            "component": "wifi",
+                            "ok": True,
+                            "detail": "connected",
+                        },
+                    ],
+                    "count": 2,
+                    "ok_count": 2,
+                    "problem_count": 0,
+                    "all_ok": True,
+                },
+            ),
+        ),
+    )
+    controller = AgentVoiceController(
+        FakeBundle(FakeRuntime(result=make_result(workflow)))
+    )
+
+    response = controller.handle_goal("Run diagnostics")
+
+    assert "2" in response.text
+    assert "pass" in response.text.lower()
+
+
+def test_spoken_summary_for_diagnostics_reports_problems():
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.COMPLETED,
+        confirmation_call_id=None,
+        error=None,
+        steps=(
+            make_step(
+                tool_name="pi.run_diagnostics",
+                output={
+                    "components": ["wifi", "camera"],
+                    "findings": [
+                        {
+                            "component": "wifi",
+                            "ok": True,
+                            "detail": "connected",
+                        },
+                        {
+                            "component": "camera",
+                            "ok": False,
+                            "detail": (
+                                "no camera device connected"
+                            ),
+                        },
+                    ],
+                    "count": 2,
+                    "ok_count": 1,
+                    "problem_count": 1,
+                    "all_ok": False,
+                },
+            ),
+        ),
+    )
+    controller = AgentVoiceController(
+        FakeBundle(FakeRuntime(result=make_result(workflow)))
+    )
+
+    response = controller.handle_goal("Run diagnostics")
+
+    assert "camera" in response.text
+    assert "no camera device connected" in response.text
+
+
+def test_spoken_summary_for_resolved_recovery():
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.COMPLETED,
+        confirmation_call_id=None,
+        error=None,
+        steps=(
+            make_step(
+                tool_name="pi.recover_component",
+                output={
+                    "component": "hud",
+                    "cause": "the HUD kiosk was not active",
+                    "action": "restarted atlas-hud.service",
+                    "verification": "service now active",
+                    "resolved": True,
+                },
+            ),
+        ),
+    )
+    controller = AgentVoiceController(
+        FakeBundle(FakeRuntime(result=make_result(workflow)))
+    )
+
+    response = controller.handle_goal("Fix the HUD")
+
+    assert "hud" in response.text.lower()
+    assert "restarted atlas-hud.service" in response.text
+    assert "service now active" in response.text
+
+
+def test_spoken_summary_for_recovery_noop_when_healthy():
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.COMPLETED,
+        confirmation_call_id=None,
+        error=None,
+        steps=(
+            make_step(
+                tool_name="pi.recover_component",
+                output={
+                    "component": "hud",
+                    "cause": "the HUD kiosk was already active",
+                    "action": "none",
+                    "verification": "service reports active",
+                    "resolved": True,
+                },
+            ),
+        ),
+    )
+    controller = AgentVoiceController(
+        FakeBundle(FakeRuntime(result=make_result(workflow)))
+    )
+
+    response = controller.handle_goal("Fix the HUD")
+
+    assert "already" in response.text.lower()
+
+
+def test_spoken_summary_for_unresolved_recovery_is_truthful():
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.COMPLETED,
+        confirmation_call_id=None,
+        error=None,
+        steps=(
+            make_step(
+                tool_name="pi.recover_component",
+                output={
+                    "component": "camera",
+                    "cause": "camera capture was failing",
+                    "action": "re-probed the USB camera node",
+                    "verification": (
+                        "camera still not responding "
+                        "(check USB connection)"
+                    ),
+                    "resolved": False,
+                },
+            ),
+        ),
+    )
+    controller = AgentVoiceController(
+        FakeBundle(FakeRuntime(result=make_result(workflow)))
+    )
+
+    response = controller.handle_goal("Fix the camera")
+
+    assert "couldn't" in response.text.lower()
+    assert "camera still not responding" in response.text

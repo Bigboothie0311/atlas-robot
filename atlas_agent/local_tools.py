@@ -5,8 +5,10 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+import diagnostics
 import implementation_ledger
 import logbook
+import recovery
 from atlas_agent.mission_store import MissionStore
 from atlas_agent.tool_registry import ToolRegistry
 from atlas_agent.tools import AtlasTool
@@ -37,6 +39,8 @@ _DEFAULT_MISSION_STORE_PATH = Path(
 _MAX_SPOKEN_ERROR_CHARS = 300
 _MAX_FAILURE_ERRORS = 3
 _MAX_RECENT_INCIDENTS = 5
+
+_RECOVERY_COMPONENTS = tuple(sorted(recovery.PLAYBOOKS))
 
 
 _MAX_TEXT_FILE_BYTES = 1_048_576
@@ -956,6 +960,77 @@ def register_local_tools(
             "evidence_found": evidence_found,
         }
 
+    def run_diagnostics(
+        components: list[str] | None,
+    ) -> dict[str, Any]:
+        if components is not None:
+            if (
+                not isinstance(components, list)
+                or not components
+            ):
+                raise ValueError(
+                    "components must be null or a "
+                    "non-empty list"
+                )
+
+            unknown = [
+                component
+                for component in components
+                if component
+                not in diagnostics.STRUCTURED_COMPONENTS
+            ]
+
+            if unknown:
+                raise ValueError(
+                    "unknown diagnostic components: "
+                    + ", ".join(
+                        str(item) for item in unknown
+                    )
+                )
+
+        findings = diagnostics.run_structured_checks(
+            components
+        )
+        problem_count = sum(
+            1
+            for finding in findings
+            if not finding["ok"]
+        )
+
+        return {
+            "components": [
+                finding["component"]
+                for finding in findings
+            ],
+            "findings": findings,
+            "count": len(findings),
+            "ok_count": len(findings) - problem_count,
+            "problem_count": problem_count,
+            "all_ok": problem_count == 0,
+        }
+
+    def recover_component(
+        component: str,
+    ) -> dict[str, Any]:
+        if (
+            not isinstance(component, str)
+            or component not in _RECOVERY_COMPONENTS
+        ):
+            raise ValueError(
+                "component must be one of "
+                f"{', '.join(_RECOVERY_COMPONENTS)}"
+            )
+
+        incident = recovery.run_playbook(component)
+
+        return {
+            "component": incident.get("component"),
+            "cause": incident.get("cause"),
+            "action": incident.get("action"),
+            "verification": incident.get("verification"),
+            "resolved": bool(incident.get("resolved")),
+        }
+
     roots_text = ", ".join(str(root) for root in roots)
 
     tools = [
@@ -1388,6 +1463,85 @@ def register_local_tools(
                 }
             },
         ),
+        AtlasTool(
+            name="pi.run_diagnostics",
+            description=(
+                "Run read-only structured diagnostics "
+                "across the A.T.L.A.S. systems: services, "
+                "microphone, speaker, camera, PC "
+                "companion, direct Ethernet, Wi-Fi, disk, "
+                "temperature, budget, mission store, "
+                "Instagram refresher, printer, and voice "
+                "provider. Reports honest findings and "
+                "never repairs anything."
+            ),
+            runs_on="pi",
+            handler=run_diagnostics,
+            permission_level=0,
+            timeout_seconds=60,
+            metadata={
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "components": {
+                            "type": ["array", "null"],
+                            "items": {
+                                "type": "string",
+                                "enum": list(
+                                    diagnostics.STRUCTURED_COMPONENTS
+                                ),
+                            },
+                            "description": (
+                                "Specific components to "
+                                "check, or null to check "
+                                "everything."
+                            ),
+                        },
+                    },
+                    "required": ["components"],
+                    "additionalProperties": False,
+                }
+            },
+        ),
+        AtlasTool(
+            name="pi.recover_component",
+            description=(
+                "Run one approved, bounded recovery "
+                "playbook for a failed A.T.L.A.S. "
+                "component. Each playbook only repairs "
+                "its own component, is cooldown-guarded "
+                "against restart loops, verifies the "
+                "result, and does nothing when the "
+                "component is already healthy. Approved "
+                "components: "
+                + ", ".join(_RECOVERY_COMPONENTS)
+                + "."
+            ),
+            runs_on="pi",
+            handler=recover_component,
+            permission_level=1,
+            timeout_seconds=60,
+            metadata={
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "component": {
+                            "type": "string",
+                            "enum": list(
+                                _RECOVERY_COMPONENTS
+                            ),
+                            "description": (
+                                "The approved component "
+                                "whose recovery playbook "
+                                "should run."
+                            ),
+                        },
+                    },
+                    "required": ["component"],
+                    "additionalProperties": False,
+                }
+            },
+        ),
     ]
 
     for tool in tools:
@@ -1428,6 +1582,14 @@ def register_local_tools(
     verifier.register(
         "pi.explain_last_failure",
         _verify_failure_explanation,
+    )
+    verifier.register(
+        "pi.run_diagnostics",
+        _verify_diagnostics,
+    )
+    verifier.register(
+        "pi.recover_component",
+        _verify_recovery,
     )
 
     return tools
@@ -2020,6 +2182,128 @@ def _verify_failure_explanation(
                 incident_count
                 if isinstance(incident_count, int)
                 else 0
+            ),
+        },
+    )
+
+
+def _verify_diagnostics(
+    call: Any,
+    result: Any,
+) -> VerificationCheck:
+    output = result.output
+
+    if not isinstance(output, dict):
+        return VerificationCheck(
+            verified=False,
+            reason=(
+                "Diagnostics output was not an object."
+            ),
+        )
+
+    findings = output.get("findings")
+    count = output.get("count")
+    ok_count = output.get("ok_count")
+    problem_count = output.get("problem_count")
+    all_ok = output.get("all_ok")
+
+    valid_findings = (
+        isinstance(findings, list)
+        and all(
+            isinstance(finding, dict)
+            and finding.get("component")
+            in diagnostics.STRUCTURED_COMPONENTS
+            and isinstance(finding.get("ok"), bool)
+            and isinstance(finding.get("detail"), str)
+            and bool(finding.get("detail"))
+            for finding in findings
+        )
+    )
+
+    verified = (
+        valid_findings
+        and isinstance(count, int)
+        and count == len(findings)
+        and isinstance(ok_count, int)
+        and isinstance(problem_count, int)
+        and ok_count + problem_count == count
+        and problem_count
+        == sum(
+            1
+            for finding in findings
+            if finding.get("ok") is False
+        )
+        and isinstance(all_ok, bool)
+        and all_ok == (problem_count == 0)
+    )
+
+    return VerificationCheck(
+        verified=verified,
+        reason=(
+            "The structured diagnostics findings were "
+            "returned consistently."
+            if verified
+            else "The structured diagnostics result was "
+            "malformed."
+        ),
+        evidence={
+            "count": (
+                count if isinstance(count, int) else 0
+            ),
+            "problem_count": (
+                problem_count
+                if isinstance(problem_count, int)
+                else 0
+            ),
+        },
+    )
+
+
+def _verify_recovery(
+    call: Any,
+    result: Any,
+) -> VerificationCheck:
+    output = result.output
+
+    if not isinstance(output, dict):
+        return VerificationCheck(
+            verified=False,
+            reason=(
+                "Recovery output was not an object."
+            ),
+        )
+
+    component = output.get("component")
+    cause = output.get("cause")
+    action = output.get("action")
+    verification = output.get("verification")
+    resolved = output.get("resolved")
+
+    verified = (
+        component in _RECOVERY_COMPONENTS
+        and isinstance(cause, str)
+        and bool(cause)
+        and isinstance(action, str)
+        and bool(action)
+        and isinstance(verification, str)
+        and bool(verification)
+        and isinstance(resolved, bool)
+    )
+
+    return VerificationCheck(
+        verified=verified,
+        reason=(
+            "The recovery playbook reported a complete "
+            "incident record."
+            if verified
+            else "The recovery result was malformed."
+        ),
+        evidence={
+            "component": component,
+            "resolved": (
+                resolved
+                if isinstance(resolved, bool)
+                else False
             ),
         },
     )

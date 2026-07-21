@@ -50,6 +50,38 @@ _EXPLICIT_SERVICE_PATTERN = re.compile(
     r"|graphify-mcp\.service)\b",
     re.IGNORECASE,
 )
+# Ordered (component, synonyms, extra words also required); the first
+# match wins, so the two-word "printer hub" pairing stays ahead of the
+# single-word matchers.
+_RECOVERY_COMPONENT_MATCHERS: tuple[
+    tuple[str, frozenset[str], frozenset[str]], ...
+] = (
+    (
+        "printer_hub",
+        frozenset({"printer"}),
+        frozenset({"hub"}),
+    ),
+    (
+        "network_sentinel",
+        frozenset({"sentinel"}),
+        frozenset(),
+    ),
+    ("hud", frozenset({"hud"}), frozenset()),
+    ("camera", frozenset({"camera"}), frozenset()),
+    (
+        "audio",
+        frozenset(
+            {
+                "audio",
+                "microphone",
+                "mic",
+                "sound",
+                "speaker",
+            }
+        ),
+        frozenset(),
+    ),
+)
 _NUMBER_WORDS = {
     "one": 1,
     "two": 2,
@@ -796,6 +828,116 @@ class OpenAIPlanGenerator:
                 input_tokens=0,
                 output_tokens=0,
             )
+
+        requests_diagnostics = (
+            bool(
+                words
+                & {
+                    "diagnostics",
+                    "diagnostic",
+                    "diagnose",
+                }
+            )
+            or (
+                "health" in words
+                and bool(
+                    words
+                    & {
+                        "check",
+                        "checks",
+                        "scan",
+                        "sweep",
+                        "report",
+                    }
+                )
+            )
+            or (
+                "check" in words
+                and "systems" in words
+            )
+        )
+
+        if (
+            "pi.run_diagnostics" in available_tools
+            and requests_diagnostics
+        ):
+            return PlanGenerationResult(
+                proposal=PlanProposal(
+                    goal=goal,
+                    steps=(
+                        PlanStepProposal(
+                            tool="pi.run_diagnostics",
+                            description=(
+                                "Run read-only structured "
+                                "diagnostics across the "
+                                "A.T.L.A.S. systems."
+                            ),
+                            arguments={
+                                "components": None,
+                            },
+                        ),
+                    ),
+                ),
+                response_id=None,
+                input_tokens=0,
+                output_tokens=0,
+            )
+
+        requests_recovery = bool(
+            words
+            & {
+                "recover",
+                "repair",
+                "heal",
+                "fix",
+                "restart",
+                "restore",
+            }
+        )
+
+        if (
+            "pi.recover_component" in available_tools
+            and requests_recovery
+        ):
+            matched_component = None
+
+            for component, synonyms, also_required in (
+                _RECOVERY_COMPONENT_MATCHERS
+            ):
+                if bool(words & synonyms) and (
+                    not also_required
+                    or bool(words & also_required)
+                ):
+                    matched_component = component
+                    break
+
+            if matched_component is not None:
+                return PlanGenerationResult(
+                    proposal=PlanProposal(
+                        goal=goal,
+                        steps=(
+                            PlanStepProposal(
+                                tool=(
+                                    "pi.recover_component"
+                                ),
+                                description=(
+                                    "Run the approved "
+                                    "bounded recovery "
+                                    "playbook for the "
+                                    "requested component."
+                                ),
+                                arguments={
+                                    "component": (
+                                        matched_component
+                                    ),
+                                },
+                            ),
+                        ),
+                    ),
+                    response_id=None,
+                    input_tokens=0,
+                    output_tokens=0,
+                )
 
         return None
 

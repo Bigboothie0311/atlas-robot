@@ -71,7 +71,7 @@ def test_pi_directory_tool_lists_names_and_verifies(
         tmp_path
     )
 
-    assert len(tools) == 9
+    assert len(tools) == 11
     assert registry.get(
         "pi.list_directory"
     ).runs_on == "pi"
@@ -1261,4 +1261,194 @@ def test_pi_explain_last_failure_collects_real_evidence(
     assert result.output["recent_incidents"][0]["component"] == (
         "hud"
     )
+    assert verification.status is VerificationStatus.VERIFIED
+
+
+def test_pi_run_diagnostics_reports_findings_and_verifies(
+    tmp_path, monkeypatch
+):
+    import diagnostics
+
+    monkeypatch.setattr(
+        diagnostics,
+        "run_structured_checks",
+        lambda components=None: [
+            {
+                "component": "disk",
+                "ok": True,
+                "detail": "disk 27% used, level ok",
+            },
+            {
+                "component": "wifi",
+                "ok": False,
+                "detail": "Wi-Fi down",
+            },
+        ],
+    )
+
+    registry, verifier, tools = build_tools(tmp_path)
+
+    tool = registry.get("pi.run_diagnostics")
+    assert tool.permission_level == 0
+    assert tool.runs_on == "pi"
+
+    call = ToolCall(
+        tool_name="pi.run_diagnostics",
+        arguments={"components": ["disk", "wifi"]},
+    )
+
+    result = execute(registry, call)
+    verification = verifier.verify(call, result)
+
+    assert result.status is ResultStatus.SUCCESS
+    assert result.output["count"] == 2
+    assert result.output["ok_count"] == 1
+    assert result.output["problem_count"] == 1
+    assert result.output["all_ok"] is False
+    assert result.output["findings"][1]["detail"] == (
+        "Wi-Fi down"
+    )
+    assert verification.status is VerificationStatus.VERIFIED
+
+
+def test_pi_run_diagnostics_null_components_runs_everything(
+    tmp_path, monkeypatch
+):
+    import diagnostics
+
+    captured = {}
+
+    def fake_checks(components=None):
+        captured["components"] = components
+        return [
+            {
+                "component": name,
+                "ok": True,
+                "detail": "fine",
+            }
+            for name in diagnostics.STRUCTURED_COMPONENTS
+        ]
+
+    monkeypatch.setattr(
+        diagnostics, "run_structured_checks", fake_checks
+    )
+
+    registry, verifier, _tools = build_tools(tmp_path)
+    call = ToolCall(
+        tool_name="pi.run_diagnostics",
+        arguments={"components": None},
+    )
+
+    result = execute(registry, call)
+    verification = verifier.verify(call, result)
+
+    assert result.status is ResultStatus.SUCCESS
+    assert captured["components"] is None
+    assert result.output["all_ok"] is True
+    assert result.output["count"] == len(
+        diagnostics.STRUCTURED_COMPONENTS
+    )
+    assert verification.status is VerificationStatus.VERIFIED
+
+
+def test_pi_run_diagnostics_rejects_unknown_component(
+    tmp_path,
+):
+    registry, _verifier, _tools = build_tools(tmp_path)
+    call = ToolCall(
+        tool_name="pi.run_diagnostics",
+        arguments={"components": ["warp_core"]},
+    )
+
+    result = execute(registry, call)
+
+    assert result.status is ResultStatus.ERROR
+    assert "ValueError" in result.error
+
+
+def test_pi_recover_component_runs_allowlisted_playbook(
+    tmp_path, monkeypatch
+):
+    import recovery
+
+    monkeypatch.setattr(
+        recovery,
+        "run_playbook",
+        lambda component: {
+            "component": component,
+            "cause": "the HUD kiosk was not active",
+            "action": "restarted atlas-hud.service",
+            "verification": "service now active",
+            "resolved": True,
+        },
+    )
+
+    registry, verifier, _tools = build_tools(tmp_path)
+
+    tool = registry.get("pi.recover_component")
+    assert tool.permission_level == 1
+
+    call = ToolCall(
+        tool_name="pi.recover_component",
+        arguments={"component": "hud"},
+    )
+
+    result = execute(registry, call)
+    verification = verifier.verify(call, result)
+
+    assert result.status is ResultStatus.SUCCESS
+    assert result.output["component"] == "hud"
+    assert result.output["resolved"] is True
+    assert result.output["action"] == (
+        "restarted atlas-hud.service"
+    )
+    assert verification.status is VerificationStatus.VERIFIED
+
+
+def test_pi_recover_component_rejects_unknown_component(
+    tmp_path,
+):
+    registry, _verifier, _tools = build_tools(tmp_path)
+    call = ToolCall(
+        tool_name="pi.recover_component",
+        arguments={"component": "mainframe"},
+    )
+
+    result = execute(registry, call)
+
+    assert result.status is ResultStatus.ERROR
+    assert "ValueError" in result.error
+
+
+def test_pi_recover_component_reports_unresolved_honestly(
+    tmp_path, monkeypatch
+):
+    import recovery
+
+    monkeypatch.setattr(
+        recovery,
+        "run_playbook",
+        lambda component: {
+            "component": component,
+            "cause": "camera capture was failing",
+            "action": "re-probed the USB camera node",
+            "verification": (
+                "camera still not responding "
+                "(check USB connection)"
+            ),
+            "resolved": False,
+        },
+    )
+
+    registry, verifier, _tools = build_tools(tmp_path)
+    call = ToolCall(
+        tool_name="pi.recover_component",
+        arguments={"component": "camera"},
+    )
+
+    result = execute(registry, call)
+    verification = verifier.verify(call, result)
+
+    assert result.status is ResultStatus.SUCCESS
+    assert result.output["resolved"] is False
     assert verification.status is VerificationStatus.VERIFIED

@@ -734,6 +734,125 @@ class AgentVoiceController:
             return " ".join(parts)
 
         if (
+            tool_name == "pi.run_diagnostics"
+            and isinstance(output, dict)
+        ):
+            findings = output.get("findings")
+            count = output.get("count")
+
+            if not isinstance(findings, list):
+                return (
+                    "I ran diagnostics, but the result "
+                    "was incomplete."
+                )
+
+            total = (
+                count
+                if isinstance(count, int)
+                else len(findings)
+            )
+            problems = [
+                finding
+                for finding in findings
+                if isinstance(finding, dict)
+                and finding.get("ok") is False
+            ]
+
+            if not problems:
+                return (
+                    f"I ran {total} diagnostic checks. "
+                    "All of them pass."
+                )
+
+            maximum_spoken_problems = 3
+            described = []
+
+            for finding in problems[
+                :maximum_spoken_problems
+            ]:
+                component = finding.get("component")
+                detail = finding.get("detail")
+
+                if not isinstance(component, str):
+                    continue
+
+                spoken_component = component.replace(
+                    "_", " "
+                )
+
+                if isinstance(detail, str) and detail:
+                    described.append(
+                        f"{spoken_component}: {detail}"
+                    )
+                else:
+                    described.append(spoken_component)
+
+            remaining_count = len(problems) - len(
+                described
+            )
+            extra = (
+                f", plus {remaining_count} more"
+                if remaining_count > 0
+                else ""
+            )
+
+            return (
+                f"I ran {total} diagnostic checks. "
+                f"{len(problems)} reported problems: "
+                f"{'; '.join(described)}{extra}."
+            )
+
+        if (
+            tool_name == "pi.recover_component"
+            and isinstance(output, dict)
+        ):
+            component = output.get("component")
+            action = output.get("action")
+            verification = output.get("verification")
+            resolved = output.get("resolved")
+
+            if not (
+                isinstance(component, str)
+                and isinstance(action, str)
+                and isinstance(verification, str)
+            ):
+                return (
+                    "I ran the recovery playbook, but "
+                    "its report was incomplete."
+                )
+
+            spoken_component = component.replace(
+                "_", " "
+            )
+
+            if action.startswith("none"):
+                return (
+                    f"The {spoken_component} was "
+                    f"already healthy: {verification}."
+                )
+
+            if action.startswith("skipped"):
+                return (
+                    f"I skipped repairing the "
+                    f"{spoken_component} to avoid a "
+                    f"restart loop: {verification}."
+                )
+
+            if resolved is True:
+                return (
+                    f"I recovered the "
+                    f"{spoken_component}. I "
+                    f"{action}, and verified: "
+                    f"{verification}."
+                )
+
+            return (
+                f"I couldn't fully recover the "
+                f"{spoken_component}. I {action}, "
+                f"but: {verification}."
+            )
+
+        if (
             tool_name == "pc.ensure_online"
             and isinstance(output, dict)
         ):

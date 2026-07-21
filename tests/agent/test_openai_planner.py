@@ -1286,3 +1286,208 @@ def test_routes_pi_explain_last_failure_what_went_wrong():
     assert result.proposal.steps[0].tool == (
         "pi.explain_last_failure"
     )
+
+
+RUN_DIAGNOSTICS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "components": {
+            "type": ["array", "null"],
+            "items": {"type": "string"},
+        },
+    },
+    "required": ["components"],
+    "additionalProperties": False,
+}
+
+
+RECOVER_COMPONENT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "component": {
+            "type": "string",
+        },
+    },
+    "required": ["component"],
+    "additionalProperties": False,
+}
+
+
+def test_routes_pi_run_diagnostics_without_api_call():
+    client = FakeClient([])
+    generator = OpenAIPlanGenerator(
+        client=client,
+        model="gpt-test",
+    )
+
+    result = generator.generate(
+        "Atlas, run diagnostics",
+        [
+            make_tool(
+                "pi.run_diagnostics",
+                parameters=RUN_DIAGNOSTICS_SCHEMA,
+            ),
+        ],
+    )
+
+    assert client.responses.calls == []
+    assert result.response_id is None
+    assert len(result.proposal.steps) == 1
+    assert result.proposal.steps[0].tool == (
+        "pi.run_diagnostics"
+    )
+    assert result.proposal.steps[0].arguments == {
+        "components": None,
+    }
+
+
+def test_routes_pi_run_diagnostics_from_health_check():
+    client = FakeClient([])
+    generator = OpenAIPlanGenerator(
+        client=client,
+        model="gpt-test",
+    )
+
+    result = generator.generate(
+        "Give me a full system health check",
+        [
+            make_tool(
+                "pi.run_diagnostics",
+                parameters=RUN_DIAGNOSTICS_SCHEMA,
+            ),
+        ],
+    )
+
+    assert client.responses.calls == []
+    assert result.proposal.steps[0].tool == (
+        "pi.run_diagnostics"
+    )
+
+
+def test_routes_pi_run_diagnostics_from_check_your_systems():
+    client = FakeClient([])
+    generator = OpenAIPlanGenerator(
+        client=client,
+        model="gpt-test",
+    )
+
+    result = generator.generate(
+        "Check your systems please",
+        [
+            make_tool(
+                "pi.run_diagnostics",
+                parameters=RUN_DIAGNOSTICS_SCHEMA,
+            ),
+        ],
+    )
+
+    assert client.responses.calls == []
+    assert result.proposal.steps[0].tool == (
+        "pi.run_diagnostics"
+    )
+
+
+def test_routes_pi_recover_component_audio():
+    client = FakeClient([])
+    generator = OpenAIPlanGenerator(
+        client=client,
+        model="gpt-test",
+    )
+
+    result = generator.generate(
+        "Fix the microphone audio",
+        [
+            make_tool(
+                "pi.recover_component",
+                parameters=RECOVER_COMPONENT_SCHEMA,
+            ),
+        ],
+    )
+
+    assert client.responses.calls == []
+    assert result.proposal.steps[0].tool == (
+        "pi.recover_component"
+    )
+    assert result.proposal.steps[0].arguments == {
+        "component": "audio",
+    }
+
+
+def test_routes_pi_recover_component_hud_restart():
+    client = FakeClient([])
+    generator = OpenAIPlanGenerator(
+        client=client,
+        model="gpt-test",
+    )
+
+    result = generator.generate(
+        "Restart the HUD",
+        [
+            make_tool(
+                "pi.recover_component",
+                parameters=RECOVER_COMPONENT_SCHEMA,
+            ),
+            make_tool(
+                "pi.get_service_status",
+                parameters=SERVICE_STATUS_SCHEMA,
+            ),
+        ],
+    )
+
+    assert client.responses.calls == []
+    assert result.proposal.steps[0].tool == (
+        "pi.recover_component"
+    )
+    assert result.proposal.steps[0].arguments == {
+        "component": "hud",
+    }
+
+
+def test_routes_pi_recover_component_printer_hub():
+    client = FakeClient([])
+    generator = OpenAIPlanGenerator(
+        client=client,
+        model="gpt-test",
+    )
+
+    result = generator.generate(
+        "Repair the printer hub",
+        [
+            make_tool(
+                "pi.recover_component",
+                parameters=RECOVER_COMPONENT_SCHEMA,
+            ),
+        ],
+    )
+
+    assert client.responses.calls == []
+    assert result.proposal.steps[0].arguments == {
+        "component": "printer_hub",
+    }
+
+
+def test_hud_status_question_not_hijacked_by_recovery():
+    client = FakeClient([])
+    generator = OpenAIPlanGenerator(
+        client=client,
+        model="gpt-test",
+    )
+
+    result = generator.generate(
+        "Is the hud service running?",
+        [
+            make_tool(
+                "pi.recover_component",
+                parameters=RECOVER_COMPONENT_SCHEMA,
+            ),
+            make_tool(
+                "pi.get_service_status",
+                parameters=SERVICE_STATUS_SCHEMA,
+            ),
+        ],
+    )
+
+    assert client.responses.calls == []
+    assert result.proposal.steps[0].tool == (
+        "pi.get_service_status"
+    )

@@ -22,6 +22,8 @@ EXPECTED_PC_TOOLS = {
     "pi.get_upgrade_status",
     "pi.get_mission_history",
     "pi.explain_last_failure",
+    "pi.run_diagnostics",
+    "pi.recover_component",
 }
 
 
