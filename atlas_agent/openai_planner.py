@@ -217,10 +217,7 @@ class OpenAIPlanGenerator:
         goal: str,
         available_tools: set[str],
     ) -> PlanGenerationResult | None:
-        """Route unmistakable local project listings without an API call."""
-
-        if "pi.list_directory" not in available_tools:
-            return None
+        """Route unmistakable local file requests without an API call."""
 
         normalized = " ".join(goal.casefold().split())
         words = set(
@@ -229,6 +226,75 @@ class OpenAIPlanGenerator:
                 normalized,
             )
         )
+
+        explicit_file_match = re.search(
+            r"(?P<path>/home/atlas/atlas-robot"
+            r"(?:/[A-Za-z0-9._-]+)+)",
+            goal,
+        )
+        requests_file_read = (
+            bool(
+                words
+                & {
+                    "read",
+                    "inspect",
+                }
+            )
+            or (
+                bool(
+                    words
+                    & {
+                        "show",
+                        "display",
+                    }
+                )
+                and bool(
+                    words
+                    & {
+                        "file",
+                        "text",
+                        "contents",
+                        "content",
+                    }
+                )
+            )
+        )
+
+        if (
+            explicit_file_match is not None
+            and requests_file_read
+            and "pi.read_text_file" in available_tools
+        ):
+            file_path = explicit_file_match.group(
+                "path"
+            ).rstrip(".,;:!?")
+
+            return PlanGenerationResult(
+                proposal=PlanProposal(
+                    goal=goal,
+                    steps=(
+                        PlanStepProposal(
+                            tool="pi.read_text_file",
+                            description=(
+                                "Read the requested approved "
+                                "Raspberry Pi text file."
+                            ),
+                            arguments={
+                                "path": file_path,
+                                "start_line": 1,
+                                "max_lines": 200,
+                                "max_chars": 12_000,
+                            },
+                        ),
+                    ),
+                ),
+                response_id=None,
+                input_tokens=0,
+                output_tokens=0,
+            )
+
+        if "pi.list_directory" not in available_tools:
+            return None
 
         names_project_folder = (
             "/home/atlas/atlas-robot" in normalized
@@ -647,7 +713,10 @@ class OpenAIPlanGenerator:
             "Raspberry Pi, including the A.T.L.A.S. project "
             "at /home/atlas/atlas-robot, use "
             "pi.list_directory and do not use Windows file "
-            "tools. Finding and retrieving a Windows file "
+            "tools. To read a text file inside an approved "
+            "Raspberry Pi root, use pi.read_text_file with "
+            "bounded line and character limits. Finding and "
+            "retrieving a Windows file "
             "normally requires an online check, file search, "
             "and verified download. The local validated "
             "planner remains "

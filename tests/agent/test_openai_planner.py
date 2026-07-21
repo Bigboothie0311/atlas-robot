@@ -499,3 +499,93 @@ def test_routes_atlas_project_listing_to_pi_without_api_call():
         "path": "/home/atlas/atlas-robot",
         "limit": 200,
     }
+
+
+
+def test_routes_explicit_pi_text_file_read_without_api_call():
+    client = FakeClient(
+        [
+            make_plan_call(
+                [
+                    {
+                        "tool": "pc.search_files",
+                        "description": (
+                            "Incorrectly search Windows."
+                        ),
+                        "arguments": {
+                            "query": "robot_hub.py",
+                            "extensions": [".py"],
+                            "limit": 20,
+                        },
+                    }
+                ]
+            )
+        ]
+    )
+    generator = OpenAIPlanGenerator(
+        client=client,
+        model="gpt-test",
+    )
+    read_schema = {
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+            },
+            "start_line": {
+                "type": "integer",
+                "minimum": 1,
+            },
+            "max_lines": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 500,
+            },
+            "max_chars": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 50_000,
+            },
+        },
+        "required": [
+            "path",
+            "start_line",
+            "max_lines",
+            "max_chars",
+        ],
+        "additionalProperties": False,
+    }
+
+    result = generator.generate(
+        (
+            "Read the file "
+            "/home/atlas/atlas-robot/robot_hub.py."
+        ),
+        [
+            make_tool(
+                "pc.search_files",
+                parameters=SEARCH_SCHEMA,
+            ),
+            make_tool(
+                "pi.read_text_file",
+                parameters=read_schema,
+            ),
+        ],
+    )
+
+    assert client.responses.calls == []
+    assert result.response_id is None
+    assert result.input_tokens == 0
+    assert result.output_tokens == 0
+    assert len(result.proposal.steps) == 1
+    assert result.proposal.steps[0].tool == (
+        "pi.read_text_file"
+    )
+    assert result.proposal.steps[0].arguments == {
+        "path": (
+            "/home/atlas/atlas-robot/robot_hub.py"
+        ),
+        "start_line": 1,
+        "max_lines": 200,
+        "max_chars": 12_000,
+    }

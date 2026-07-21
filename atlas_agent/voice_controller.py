@@ -230,6 +230,67 @@ class AgentVoiceController:
                 return "That Raspberry Pi folder is empty."
 
         if (
+            tool_name == "pi.read_text_file"
+            and isinstance(output, dict)
+        ):
+            path = output.get("path")
+            content = output.get("content")
+            start_line = output.get("start_line")
+            end_line = output.get("end_line")
+            truncated = output.get("truncated")
+
+            filename = (
+                Path(path).name
+                if isinstance(path, str) and path
+                else "the requested file"
+            )
+
+            if not isinstance(content, str) or not content.strip():
+                return (
+                    f"I read {filename}, but the requested "
+                    "section is empty."
+                )
+
+            excerpt = content.strip()
+            maximum_spoken_characters = 1500
+            excerpt_was_truncated = (
+                len(excerpt) > maximum_spoken_characters
+            )
+
+            if excerpt_was_truncated:
+                excerpt = excerpt[
+                    :maximum_spoken_characters
+                ].rstrip()
+
+            if (
+                isinstance(start_line, int)
+                and isinstance(end_line, int)
+            ):
+                if start_line == end_line:
+                    location = f"line {start_line}"
+                else:
+                    location = (
+                        f"lines {start_line} through "
+                        f"{end_line}"
+                    )
+            else:
+                location = "the requested section"
+
+            continuation = (
+                " The requested section continues beyond "
+                "what I read aloud."
+                if truncated is True
+                or excerpt_was_truncated
+                else ""
+            )
+
+            return (
+                f"I read {location} of {filename}. "
+                f"Here is the text: {excerpt}"
+                f"{continuation}"
+            )
+
+        if (
             tool_name == "pc.ensure_online"
             and isinstance(output, dict)
         ):

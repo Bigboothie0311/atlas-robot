@@ -358,3 +358,52 @@ def test_windows_search_speaks_matching_names():
         "I found 2 matching files in the approved "
         "Windows folders: ATLAS.f3d, ATLAS.stl."
     )
+
+
+
+def test_pi_text_file_read_speaks_bounded_content():
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.COMPLETED,
+        confirmation_call_id=None,
+        error=None,
+        steps=(
+            make_step(
+                tool_name="pi.read_text_file",
+                output={
+                    "path": (
+                        "/home/atlas/atlas-robot/"
+                        "status.txt"
+                    ),
+                    "content": (
+                        "Wake phrase: Hey Atlas.\n"
+                        "Service: active."
+                    ),
+                    "start_line": 3,
+                    "end_line": 4,
+                    "line_count": 2,
+                    "total_lines": 4,
+                    "char_count": 39,
+                    "size_bytes": 39,
+                    "truncated": False,
+                },
+            ),
+        ),
+    )
+    controller = AgentVoiceController(
+        FakeBundle(
+            FakeRuntime(
+                result=make_result(workflow)
+            )
+        )
+    )
+
+    response = controller.handle_goal(
+        "Read the requested status file."
+    )
+
+    assert response.ok is True
+    assert response.text == (
+        "I read lines 3 through 4 of status.txt. "
+        "Here is the text: Wake phrase: Hey Atlas.\n"
+        "Service: active."
+    )
