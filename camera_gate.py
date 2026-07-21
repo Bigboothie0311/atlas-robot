@@ -321,18 +321,14 @@ def capture_burst(frame_count, directory, sample_fps=None):
     return sorted(Path(directory).glob("frame_*.jpg"))
 
 
-def capture_clip(duration_seconds, mission=None, mute_audio=False):
-    """Records A.T.L.A.S. himself — video from the USB camera, audio
-    from the Pi's mic (unless mute_audio) — for the self-showcase media
-    pipeline. Bounded to MAX_CLIP_SECONDS regardless of what's
-    requested. Returns clip metadata on success or None on failure;
-    callers own uploading the clip to the PC and deleting the local
-    copy — clips are not meant to live on the Pi indefinitely."""
-    seconds = max(1, min(int(duration_seconds), MAX_CLIP_SECONDS))
-    CLIPS_DIR.mkdir(parents=True, exist_ok=True)
-    name = f"clip_{int(time.time())}.mp4"
-    out_path = CLIPS_DIR / name
+MIC_BUSY_RETRY_DELAY_SECONDS = 1.5
 
+
+def _is_mic_busy_error(stderr_text):
+    return "resource busy" in (stderr_text or "").lower()
+
+
+def _build_clip_command(out_path, seconds, mute_audio):
     command = [
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
         "-f", "v4l2", "-input_format", "mjpeg",
@@ -353,25 +349,81 @@ def capture_clip(duration_seconds, mission=None, mute_audio=False):
         command.extend(["-c:v", "libx264"])
 
     command.append(str(out_path))
+    return command
 
-    try:
-        subprocess.run(command, check=True, timeout=seconds + 20)
-    except (subprocess.SubprocessError, OSError) as error:
-        print("Camera clip capture failed:", type(error).__name__, error, flush=True)
-        return None
 
-    if not out_path.is_file() or out_path.stat().st_size == 0:
-        return None
+def capture_clip(duration_seconds, mission=None, mute_audio=False):
+    """Records A.T.L.A.S. himself — video from the USB camera, audio
+    from the Pi's mic (unless mute_audio) — for the self-showcase media
+    pipeline. Bounded to MAX_CLIP_SECONDS regardless of what's
+    requested. Returns clip metadata on success or None on failure;
+    callers own uploading the clip to the PC and deleting the local
+    copy — clips are not meant to live on the Pi indefinitely.
 
-    return {
-        "path": str(out_path),
-        "name": name,
-        "mission": mission,
-        "duration_seconds": seconds,
-        "has_audio": not mute_audio,
-        "captured_at": time.time(),
-        "size_bytes": out_path.stat().st_size,
-    }
+    The mic (plughw:CARD=Device,DEV=0) is shared with the voice
+    pipeline's barge-in listener, which can hold it open for the
+    duration of a whole streamed answer. If ffmpeg reports the device
+    busy, retry once, then fall back to a muted/video-only clip
+    (flagged via "audio_fallback": True) rather than failing the whole
+    request outright."""
+    seconds = max(1, min(int(duration_seconds), MAX_CLIP_SECONDS))
+    CLIPS_DIR.mkdir(parents=True, exist_ok=True)
+
+    # If audio was requested: try, retry once on a busy mic, then fall
+    # back to a muted attempt. If mute_audio was requested up front,
+    # there's nothing to retry or fall back to.
+    attempts = [False, False, True] if not mute_audio else [True]
+
+    for index, attempt_mute in enumerate(attempts):
+        is_last_attempt = index == len(attempts) - 1
+        name = f"clip_{int(time.time())}.mp4"
+        out_path = CLIPS_DIR / name
+        command = _build_clip_command(out_path, seconds, attempt_mute)
+
+        try:
+            subprocess.run(
+                command, check=True, timeout=seconds + 20,
+                stderr=subprocess.PIPE, text=True,
+            )
+        except subprocess.CalledProcessError as error:
+            stderr_text = error.stderr or str(error)
+
+            if not is_last_attempt and _is_mic_busy_error(stderr_text):
+                next_attempt_mute = attempts[index + 1]
+
+                if next_attempt_mute and not attempt_mute:
+                    print("Mic still busy — falling back to a muted clip.", flush=True)
+                else:
+                    print("Mic busy for self-recording, retrying once:", stderr_text, flush=True)
+                    time.sleep(MIC_BUSY_RETRY_DELAY_SECONDS)
+
+                continue
+
+            print("Camera clip capture failed:", stderr_text, flush=True)
+            return None
+        except (subprocess.SubprocessError, OSError) as error:
+            print("Camera clip capture failed:", type(error).__name__, error, flush=True)
+            return None
+
+        if not out_path.is_file() or out_path.stat().st_size == 0:
+            return None
+
+        metadata = {
+            "path": str(out_path),
+            "name": name,
+            "mission": mission,
+            "duration_seconds": seconds,
+            "has_audio": not attempt_mute,
+            "captured_at": time.time(),
+            "size_bytes": out_path.stat().st_size,
+        }
+
+        if attempt_mute and not mute_audio:
+            metadata["audio_fallback"] = True
+
+        return metadata
+
+    return None
 
 
 def capture_frame(path=str(DATA_DIR / "tmp_capture.jpg")):

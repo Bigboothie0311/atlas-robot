@@ -336,6 +336,93 @@ class CaptureClipTests(unittest.TestCase):
 
             self.assertIsNone(result)
 
+    def test_capture_clip_retries_once_then_succeeds_on_busy_mic(self):
+        busy_error = camera_gate.subprocess.CalledProcessError(
+            1, ["ffmpeg"], stderr="cannot open audio device (Device or resource busy)"
+        )
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append(command)
+            if len(calls) == 1:
+                raise busy_error
+            self._fake_run_writing_output(command, **kwargs)
+
+        with tempfile.TemporaryDirectory() as directory:
+            clips_dir = Path(directory) / "clips"
+            with mock.patch.object(camera_gate, "CLIPS_DIR", clips_dir), \
+                    mock.patch.object(camera_gate.subprocess, "run", side_effect=fake_run), \
+                    mock.patch.object(camera_gate.time, "sleep") as sleep:
+                result = camera_gate.capture_clip(10)
+
+            self.assertEqual(len(calls), 2)
+            sleep.assert_called_once_with(camera_gate.MIC_BUSY_RETRY_DELAY_SECONDS)
+            self.assertTrue(result["has_audio"])
+            self.assertNotIn("audio_fallback", result)
+
+    def test_capture_clip_falls_back_to_muted_after_repeated_busy_mic(self):
+        busy_error = camera_gate.subprocess.CalledProcessError(
+            1, ["ffmpeg"], stderr="cannot open audio device (Device or resource busy)"
+        )
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append(command)
+            if len(calls) <= 2:
+                raise busy_error
+            self._fake_run_writing_output(command, **kwargs)
+
+        with tempfile.TemporaryDirectory() as directory:
+            clips_dir = Path(directory) / "clips"
+            with mock.patch.object(camera_gate, "CLIPS_DIR", clips_dir), \
+                    mock.patch.object(camera_gate.subprocess, "run", side_effect=fake_run), \
+                    mock.patch.object(camera_gate.time, "sleep") as sleep:
+                result = camera_gate.capture_clip(10)
+
+            self.assertEqual(len(calls), 3)
+            self.assertNotIn("alsa", calls[2])
+            sleep.assert_called_once()
+            self.assertFalse(result["has_audio"])
+            self.assertTrue(result["audio_fallback"])
+
+    def test_capture_clip_gives_up_after_muted_fallback_also_fails(self):
+        busy_error = camera_gate.subprocess.CalledProcessError(
+            1, ["ffmpeg"], stderr="cannot open audio device (Device or resource busy)"
+        )
+        other_error = camera_gate.subprocess.CalledProcessError(
+            1, ["ffmpeg"], stderr="no such device"
+        )
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append(command)
+            raise busy_error if len(calls) <= 2 else other_error
+
+        with tempfile.TemporaryDirectory() as directory:
+            clips_dir = Path(directory) / "clips"
+            with mock.patch.object(camera_gate, "CLIPS_DIR", clips_dir), \
+                    mock.patch.object(camera_gate.subprocess, "run", side_effect=fake_run), \
+                    mock.patch.object(camera_gate.time, "sleep"):
+                result = camera_gate.capture_clip(10)
+
+            self.assertEqual(len(calls), 3)
+            self.assertIsNone(result)
+
+    def test_capture_clip_does_not_retry_non_busy_failures(self):
+        with tempfile.TemporaryDirectory() as directory:
+            clips_dir = Path(directory) / "clips"
+            with mock.patch.object(camera_gate, "CLIPS_DIR", clips_dir), \
+                    mock.patch.object(
+                        camera_gate.subprocess, "run",
+                        side_effect=camera_gate.subprocess.CalledProcessError(
+                            1, ["ffmpeg"], stderr="no such device"
+                        ),
+                    ) as run:
+                result = camera_gate.capture_clip(5)
+
+            self.assertEqual(run.call_count, 1)
+            self.assertIsNone(result)
+
 
 class DismissIntruderAlertsTests(unittest.TestCase):
     def test_dismiss_deletes_photos_marks_reviewed_and_keeps_log(self):
