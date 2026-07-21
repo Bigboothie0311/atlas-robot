@@ -5,7 +5,7 @@
 > root for a newer `ATLAS_V2_AGENT_HANDOFF_*.md` by date first
 > (`ls -lat *.md`) before trusting this one.
 >
-> - **Branch:** `atlas-v2-agent`. **735 tests passing** (`./venv/bin/python
+> - **Branch:** `atlas-v2-agent`. **737 tests passing** (`./venv/bin/python
 >   -m pytest tests/` — this repo's own `venv/`, not system Python, which
 >   is missing `psutil` and others). **Use pytest, not `unittest
 >   discover`** — confirmed live: `unittest discover` silently collects
@@ -58,9 +58,29 @@
 >   router (`ai_tools.py`) had a tool description gap, not a
 >   content-pipeline bug -- see "Same day, round 3" below. Fixed, plus
 >   added real PC-screen-clip interleaving (`"source": "pc"` beats) and
->   found + fixed a real concat DTS bug live-testing that. **Actually
->   ready now** -- this time verified by trying the literal failing
->   scenario again, not just re-asserting it.
+>   found + fixed a real concat DTS bug live-testing that. Said
+>   "actually ready now" -- **wrong again, see round 4.**
+> - **Round 4, same day: the real, actual root cause.** Wesley tried it
+>   again and got a different but equally wrong result ("the HUD service
+>   is active and running... recording requires another attempt").
+>   Round 3's `ai_tools.py` fix was real and correct but incomplete --
+>   the top-level router picked the right tool (`run_atlas_agent`) both
+>   times, confirmed via `data/agent_missions.json`, which had a
+>   well-formed goal both times. The actual bug was one layer deeper:
+>   `OpenAIPlanGenerator._deterministic_local_plan()` -- a zero-token
+>   shortcut that runs *before* the real planning LLM -- was hijacking
+>   every self-showcase goal via loose word matches on "HUD" and
+>   "status"/"diagnostics", words *any* self-showcase goal naturally
+>   contains, so `content.record_self_showcase` never even got
+>   considered. Fixing that surfaced a second, previously-masked bug:
+>   the tool's own `beats` schema was invalid for OpenAI's strict mode
+>   (missing `items` on an array type) -- never caught before because
+>   the shortcut bug meant a real planning call never happened. Both
+>   fixed and verified live end-to-end twice (once at the planning
+>   level, once running the full workflow for real) -- see "Same day,
+>   round 4" below. This is the first time "ready" was verified by
+>   actually running the previously-failing goal through the real
+>   planner and the real executor, not by inference.
 
 ## What got built
 
@@ -456,3 +476,91 @@ and `pc_reachable()` both true this session) -- not just mocked:
 `atlas-wake.service` restarted again after all of this (it's the
 process that loads `ai_tools.py`/`content_tools.py`/`content_pipeline.py`
 in memory and doesn't auto-reload).
+
+## Same day, round 4: the real root cause, two layers deeper
+
+Wesley tried the exact phrase again after round 3's restart. Different
+wrong result this time: *"The HUD service is active and running, but the
+Reel was not recorded or saved. Recording requires another attempt
+through the self-recording pipeline."*
+
+**First, ruled out the top-level router (round 3's fix) as the culprit.**
+Checked `data/logs/tool_audit.jsonl` — untouched since 2026-07-20, which
+first looked like proof nothing in `atlas_agent` ever ran. Wrong
+inference: `ToolExecutor._audit()` deliberately skips "anything routine"
+— a `permission_level=0` tool succeeding normally never gets logged, only
+denials/confirmations/failures do. So an empty audit log does *not* mean
+no tool ran; it only means nothing *non-routine* happened. Real evidence
+instead: `data/agent_missions.json`'s two most recent entries (one from
+round 3's original failure, one from this one) both show a genuinely
+well-formed `goal` string — e.g. *"Record a narrated Instagram Reel
+showcasing Atlas's own tactical HUD screen, using the real self-recording
+path..."* — meaning `run_atlas_agent` *was* being selected correctly both
+times. Round 3's fix was real and still correct, just not the whole
+story.
+
+**The actual bug, one layer deeper:** `atlas_agent/openai_planner.py`'s
+`OpenAIPlanGenerator._deterministic_local_plan()` is a zero-token
+shortcut that runs *before* the real planning LLM call, matching the goal
+against loose word-set intersections to route unambiguous requests (like
+"is the wake service running?") without spending an API call. Traced the
+exact match: it checks for a mentioned service name (`"hud"` →
+`atlas-hud.service`) *and* any of `{"running", "active", "status",
+"healthy", "up"}`. A self-showcase goal inherently mentions "HUD" — that
+*is* the feature — and commonly "status" (the self-diagnostics tour beat
+literally says "status readout"), so this shortcut fired on both real
+attempts: `pi.get_service_status` this round (goal contained "status"),
+`pi.run_diagnostics` last round (goal contained "diagnostics", a
+different but sibling shortcut a few branches down). Confirmed precisely
+by matching the exact spoken phrases in both failures against
+`voice_controller.py`'s literal templates (`"The {service} is active and
+running."` / `"I ran {N} diagnostic checks. All of them pass."`) — this
+wasn't a fuzzy guess, both matched verbatim.
+
+**Fix:** added an early guard at the top of `_deterministic_local_plan()`
+that returns `None` (falls through to the real planner) whenever the goal
+contains `record`/`recording`/`reel`/`showcase`/`publish`/`publishing` —
+before any of the existing shortcuts get a chance to fire. Deliberately
+left `video` and `instagram` out of that guard: an existing test
+(`test_routes_pi_search_files_without_api_call`, goal: *"search your
+project for files named Instagram"*) legitimately wants the local
+shortcut, and those two words are too generic on their own to safely gate
+on.
+
+**Fixing that surfaced a second, previously-masked bug.** With the
+shortcut correctly skipped, the real OpenAI planning call ran for the
+first time on this exact goal — and immediately failed:
+`openai.BadRequestError: Invalid schema for function 'submit_agent_plan':
+... array schema missing items`. `content.record_self_showcase`'s
+`beats` parameter was declared `"type": ["array", "null"]` with no
+`items` sub-schema — invalid under OpenAI's strict-mode structured
+outputs, which require every array type to declare `items`. This bug
+existed since `beats` was first added and was *never once exercised*
+until now, because the deterministic-shortcut bug had been swallowing
+every self-showcase goal before a real planning call ever got made. Added
+the missing `items` schema (`{narration: str, action: str|null, source:
+str|null, pc_action: object|null}`, itself following strict-mode rules —
+every property required, `additionalProperties: false` throughout).
+
+**Verified live, twice, at two different layers:**
+1. Called `bundle.runtime.planning_service.create_plan()` directly with
+   the exact real goal text from `agent_missions.json` — confirmed the
+   real OpenAI planner (not the shortcut) now runs and returns a valid,
+   well-formed plan selecting `content.record_self_showcase` with 3
+   sensible beats.
+2. Ran `bundle.runtime.run_goal()` for the same goal — the *entire* real
+   pipeline, planning through execution through verification:
+   `WorkflowStatus.COMPLETED`, `content.record_self_showcase` succeeded
+   and verified, real `video_path` produced. Checked the file directly:
+   1080x1920, 24fps, 17.6s, zero warnings on a full decode pass.
+
+Two new regression tests in `tests/agent/test_openai_planner.py`
+reproduce both real failing goals verbatim
+(`test_self_showcase_recording_goal_not_hijacked_by_service_status`,
+`test_diagnostics_word_in_showcase_goal_not_hijacked`) so this exact
+failure mode can't silently come back.
+
+**Actual state now:** the previously-failing scenario was reproduced,
+diagnosed at the correct layer, fixed, and re-run successfully end to
+end through the real planner and real executor — not re-asserted from
+inference. `atlas-wake.service` restarted again to load this.
