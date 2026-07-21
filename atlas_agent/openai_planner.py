@@ -651,6 +651,47 @@ class OpenAIPlanGenerator:
                 output_tokens=0,
             )
 
+        mentions_upgrades = bool(
+            words & {"upgrade", "upgrades", "roadmap"}
+        )
+
+        if (
+            "pi.get_upgrade_status" in available_tools
+            and mentions_upgrades
+        ):
+            if words & {"blocked", "stuck"}:
+                scope = "blocked"
+            elif words & {
+                "finished",
+                "done",
+                "complete",
+                "completed",
+            }:
+                scope = "finished"
+            elif words & {"remaining", "left", "next", "todo"}:
+                scope = "remaining"
+            else:
+                scope = "summary"
+
+            return PlanGenerationResult(
+                proposal=PlanProposal(
+                    goal=goal,
+                    steps=(
+                        PlanStepProposal(
+                            tool="pi.get_upgrade_status",
+                            description=(
+                                "Report the A.T.L.A.S. upgrade "
+                                "roadmap ledger status."
+                            ),
+                            arguments={"scope": scope},
+                        ),
+                    ),
+                ),
+                response_id=None,
+                input_tokens=0,
+                output_tokens=0,
+            )
+
         return None
 
     def _find_plan_call(

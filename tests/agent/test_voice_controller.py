@@ -760,3 +760,93 @@ def test_pi_get_service_status_speaks_failed_state_truthfully():
         "The A.T.L.A.S. wake service is failed, with "
         "substate failed."
     )
+
+
+def test_pi_get_upgrade_status_speaks_bounded_summary():
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.COMPLETED,
+        confirmation_call_id=None,
+        error=None,
+        steps=(
+            make_step(
+                tool_name="pi.get_upgrade_status",
+                output={
+                    "scope": "summary",
+                    "finished_count": 4,
+                    "remaining_count": 12,
+                    "blocked_count": 1,
+                    "total_count": 17,
+                    "last_updated_feature": (
+                        "Storage monitoring, thresholds, and safe cleanup"
+                    ),
+                },
+            ),
+        ),
+    )
+    controller = AgentVoiceController(
+        FakeBundle(FakeRuntime(result=make_result(workflow)))
+    )
+
+    response = controller.handle_goal("What is your upgrade status?")
+
+    assert response.ok is True
+    assert response.text == (
+        "4 of 17 upgrade items are finished, 12 remain, and 1 "
+        "are blocked on something external. The last thing I "
+        "finished was: Storage monitoring, thresholds, and safe "
+        "cleanup."
+    )
+
+
+def test_pi_get_upgrade_status_speaks_bounded_blocked_list():
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.COMPLETED,
+        confirmation_call_id=None,
+        error=None,
+        steps=(
+            make_step(
+                tool_name="pi.get_upgrade_status",
+                output={
+                    "scope": "blocked",
+                    "count": 7,
+                    "items": [
+                        {"feature_id": f"phase{i}", "title": f"Feature {i}"}
+                        for i in range(7)
+                    ],
+                },
+            ),
+        ),
+    )
+    controller = AgentVoiceController(
+        FakeBundle(FakeRuntime(result=make_result(workflow)))
+    )
+
+    response = controller.handle_goal("What upgrades are blocked?")
+
+    assert response.ok is True
+    assert response.text.startswith("7 upgrade items are blocked: ")
+    assert "Feature 0" in response.text
+    assert "Feature 4" in response.text
+    assert "Feature 5" not in response.text
+    assert "plus 2 more" in response.text
+
+
+def test_pi_get_upgrade_status_speaks_empty_scope():
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.COMPLETED,
+        confirmation_call_id=None,
+        error=None,
+        steps=(
+            make_step(
+                tool_name="pi.get_upgrade_status",
+                output={"scope": "blocked", "count": 0, "items": []},
+            ),
+        ),
+    )
+    controller = AgentVoiceController(
+        FakeBundle(FakeRuntime(result=make_result(workflow)))
+    )
+
+    response = controller.handle_goal("What upgrades are blocked?")
+
+    assert response.text == "No upgrade items are currently blocked."

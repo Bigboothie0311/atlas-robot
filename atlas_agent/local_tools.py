@@ -5,11 +5,19 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+import implementation_ledger
 from atlas_agent.tool_registry import ToolRegistry
 from atlas_agent.tools import AtlasTool
 from atlas_agent.verifier import (
     ResultVerifier,
     VerificationCheck,
+)
+
+_UPGRADE_STATUS_SCOPES = (
+    "summary",
+    "finished",
+    "remaining",
+    "blocked",
 )
 
 
@@ -732,6 +740,44 @@ def register_local_tools(
             "main_pid": main_pid,
         }
 
+    def get_upgrade_status(
+        scope: str = "summary",
+    ) -> dict[str, Any]:
+        if scope not in _UPGRADE_STATUS_SCOPES:
+            raise ValueError(
+                "scope must be one of "
+                f"{', '.join(_UPGRADE_STATUS_SCOPES)}"
+            )
+
+        summary = implementation_ledger.summarize()
+
+        if scope == "summary":
+            last = summary["last_updated_feature"]
+            return {
+                "scope": scope,
+                "finished_count": summary["counts"]["finished"],
+                "remaining_count": summary["counts"]["remaining"],
+                "blocked_count": summary["counts"]["blocked"],
+                "total_count": summary["counts"]["total"],
+                "last_updated_feature": (
+                    last["title"] if last is not None else None
+                ),
+            }
+
+        entries = summary[scope]
+
+        return {
+            "scope": scope,
+            "items": [
+                {
+                    "feature_id": entry["feature_id"],
+                    "title": entry["title"],
+                }
+                for entry in entries
+            ],
+            "count": len(entries),
+        }
+
     roots_text = ", ".join(str(root) for root in roots)
 
     tools = [
@@ -1053,6 +1099,38 @@ def register_local_tools(
                 }
             },
         ),
+        AtlasTool(
+            name="pi.get_upgrade_status",
+            description=(
+                "Report the A.T.L.A.S. upgrade roadmap ledger: which "
+                "features are finished, remaining, or blocked on an "
+                "external dependency, and what was implemented last. "
+                "Read-only."
+            ),
+            runs_on="pi",
+            handler=get_upgrade_status,
+            permission_level=0,
+            timeout_seconds=10,
+            metadata={
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "scope": {
+                            "type": "string",
+                            "enum": list(_UPGRADE_STATUS_SCOPES),
+                            "description": (
+                                "'summary' for counts and the last "
+                                "finished item, or 'finished'/"
+                                "'remaining'/'blocked' for the matching "
+                                "feature list."
+                            ),
+                        },
+                    },
+                    "required": ["scope"],
+                    "additionalProperties": False,
+                }
+            },
+        ),
     ]
 
     for tool in tools:
@@ -1081,6 +1159,10 @@ def register_local_tools(
     verifier.register(
         "pi.get_service_status",
         _verify_service_status,
+    )
+    verifier.register(
+        "pi.get_upgrade_status",
+        _verify_upgrade_status,
     )
 
     return tools
@@ -1484,4 +1566,59 @@ def _verify_service_status(
             "active_state": active_state,
             "sub_state": sub_state,
         },
+    )
+
+
+def _verify_upgrade_status(
+    call: Any,
+    result: Any,
+) -> VerificationCheck:
+    output = result.output
+
+    if not isinstance(output, dict):
+        return VerificationCheck(
+            verified=False,
+            reason=(
+                "Upgrade status output was not an object."
+            ),
+        )
+
+    scope = output.get("scope")
+
+    if scope not in _UPGRADE_STATUS_SCOPES:
+        return VerificationCheck(
+            verified=False,
+            reason="Upgrade status result had an unknown scope.",
+        )
+
+    if scope == "summary":
+        verified = (
+            isinstance(output.get("finished_count"), int)
+            and isinstance(output.get("remaining_count"), int)
+            and isinstance(output.get("blocked_count"), int)
+            and isinstance(output.get("total_count"), int)
+        )
+    else:
+        items = output.get("items")
+        count = output.get("count")
+        verified = (
+            isinstance(items, list)
+            and all(
+                isinstance(item, dict)
+                and isinstance(item.get("feature_id"), str)
+                and isinstance(item.get("title"), str)
+                for item in items
+            )
+            and isinstance(count, int)
+            and count == len(items)
+        )
+
+    return VerificationCheck(
+        verified=verified,
+        reason=(
+            "The A.T.L.A.S. upgrade status was returned successfully."
+            if verified
+            else "The A.T.L.A.S. upgrade status result was malformed."
+        ),
+        evidence={"scope": scope},
     )

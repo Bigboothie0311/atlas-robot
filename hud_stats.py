@@ -6,8 +6,10 @@ import psutil
 import requests
 
 from ai_tools import WEATHER_CODE_DESCRIPTIONS
+import cost_ledger
 import instagram_stats
 import pc_stats
+import storage_monitor
 
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 
@@ -229,6 +231,19 @@ def get_disk_stats():
     }
 
 
+def get_storage_report_stats():
+    """Root-device-aware storage report with configurable warning
+    thresholds, additive alongside get_disk_stats() (which existing voice
+    and HUD code already depends on unchanged)."""
+    return storage_monitor.get_storage_report()
+
+
+def get_budget_stats():
+    """Monthly API spend, remaining budget, and premium-voice sub-budget
+    state for the HUD."""
+    return cost_ledger.budget_summary()
+
+
 def get_network_stats():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
@@ -256,6 +271,8 @@ def get_hud_stats():
         "cpu": get_cpu_stats(),
         "memory": get_memory_stats(),
         "disk": get_disk_stats(),
+        "storage": get_storage_report_stats(),
+        "budget": get_budget_stats(),
         "network": get_network_stats(),
         "uptime_seconds": get_uptime_seconds(),
         "gaming_pc": pc_stats.get_gaming_pc_stats(),

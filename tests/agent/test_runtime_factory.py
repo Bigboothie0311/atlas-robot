@@ -19,6 +19,7 @@ EXPECTED_PC_TOOLS = {
     "pi.search_text",
     "pi.read_service_logs",
     "pi.get_service_status",
+    "pi.get_upgrade_status",
 }
 
 

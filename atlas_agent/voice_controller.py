@@ -491,6 +491,70 @@ class AgentVoiceController:
             )
 
         if (
+            tool_name == "pi.get_upgrade_status"
+            and isinstance(output, dict)
+        ):
+            scope = output.get("scope")
+
+            if scope == "summary":
+                finished = output.get("finished_count")
+                remaining = output.get("remaining_count")
+                blocked = output.get("blocked_count")
+                total = output.get("total_count")
+                last = output.get("last_updated_feature")
+
+                if not all(
+                    isinstance(value, int)
+                    for value in (finished, remaining, blocked, total)
+                ):
+                    return (
+                        "I checked the upgrade ledger, but its "
+                        "summary was incomplete."
+                    )
+
+                message = (
+                    f"{finished} of {total} upgrade items are "
+                    f"finished, {remaining} remain, and {blocked} "
+                    "are blocked on something external."
+                )
+
+                if isinstance(last, str) and last:
+                    message += f" The last thing I finished was: {last}."
+
+                return message
+
+            items = output.get("items")
+            count = output.get("count")
+
+            if not isinstance(items, list):
+                return (
+                    "I checked the upgrade ledger, but its result "
+                    "was incomplete."
+                )
+
+            if not items:
+                return f"No upgrade items are currently {scope}."
+
+            total = count if isinstance(count, int) else len(items)
+            maximum_spoken_items = 5
+            titles = [
+                item.get("title")
+                for item in items[:maximum_spoken_items]
+                if isinstance(item, dict) and isinstance(item.get("title"), str)
+            ]
+            remaining_count = total - len(titles)
+            extra = (
+                f", plus {remaining_count} more"
+                if remaining_count > 0
+                else ""
+            )
+
+            return (
+                f"{total} upgrade items are {scope}: "
+                f"{'; '.join(titles)}{extra}."
+            )
+
+        if (
             tool_name == "pc.ensure_online"
             and isinstance(output, dict)
         ):

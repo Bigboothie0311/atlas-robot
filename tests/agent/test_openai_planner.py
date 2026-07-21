@@ -942,3 +942,157 @@ def test_windows_video_request_not_hijacked_by_new_rules():
     assert result.proposal.steps[0].tool == (
         "pc.search_files"
     )
+
+
+UPGRADE_STATUS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "scope": {
+            "type": "string",
+            "enum": [
+                "summary",
+                "finished",
+                "remaining",
+                "blocked",
+            ],
+        },
+    },
+    "required": ["scope"],
+    "additionalProperties": False,
+}
+
+
+def test_routes_pi_get_upgrade_status_summary_without_api_call():
+    client = FakeClient([])
+    generator = OpenAIPlanGenerator(
+        client=client,
+        model="gpt-test",
+    )
+
+    result = generator.generate(
+        "What is your upgrade status?",
+        [
+            make_tool(
+                "pi.get_upgrade_status",
+                parameters=UPGRADE_STATUS_SCHEMA,
+            ),
+        ],
+    )
+
+    assert client.responses.calls == []
+    assert result.response_id is None
+    assert len(result.proposal.steps) == 1
+    assert result.proposal.steps[0].tool == (
+        "pi.get_upgrade_status"
+    )
+    assert result.proposal.steps[0].arguments == {
+        "scope": "summary",
+    }
+
+
+def test_routes_pi_get_upgrade_status_finished_scope():
+    client = FakeClient([])
+    generator = OpenAIPlanGenerator(
+        client=client,
+        model="gpt-test",
+    )
+
+    result = generator.generate(
+        "What upgrades are finished so far?",
+        [
+            make_tool(
+                "pi.get_upgrade_status",
+                parameters=UPGRADE_STATUS_SCHEMA,
+            ),
+        ],
+    )
+
+    assert client.responses.calls == []
+    assert result.proposal.steps[0].arguments == {
+        "scope": "finished",
+    }
+
+
+def test_routes_pi_get_upgrade_status_blocked_scope():
+    client = FakeClient([])
+    generator = OpenAIPlanGenerator(
+        client=client,
+        model="gpt-test",
+    )
+
+    result = generator.generate(
+        "What upgrades are blocked right now?",
+        [
+            make_tool(
+                "pi.get_upgrade_status",
+                parameters=UPGRADE_STATUS_SCHEMA,
+            ),
+        ],
+    )
+
+    assert client.responses.calls == []
+    assert result.proposal.steps[0].arguments == {
+        "scope": "blocked",
+    }
+
+
+def test_routes_pi_get_upgrade_status_remaining_scope():
+    client = FakeClient([])
+    generator = OpenAIPlanGenerator(
+        client=client,
+        model="gpt-test",
+    )
+
+    result = generator.generate(
+        "What upgrades are left on the roadmap?",
+        [
+            make_tool(
+                "pi.get_upgrade_status",
+                parameters=UPGRADE_STATUS_SCHEMA,
+            ),
+        ],
+    )
+
+    assert client.responses.calls == []
+    assert result.proposal.steps[0].arguments == {
+        "scope": "remaining",
+    }
+
+
+def test_upgrade_status_not_hijacked_without_tool_available():
+    client = FakeClient(
+        [
+            make_plan_call(
+                [
+                    {
+                        "tool": "pi.get_service_status",
+                        "description": (
+                            "Check the wake service instead."
+                        ),
+                        "arguments": {
+                            "service": "atlas-wake.service",
+                        },
+                    }
+                ]
+            )
+        ]
+    )
+    generator = OpenAIPlanGenerator(
+        client=client,
+        model="gpt-test",
+    )
+
+    result = generator.generate(
+        "What is your upgrade status?",
+        [
+            make_tool(
+                "pi.get_service_status",
+                parameters=SERVICE_STATUS_SCHEMA,
+            ),
+        ],
+    )
+
+    assert len(client.responses.calls) == 1
+    assert result.proposal.steps[0].tool == (
+        "pi.get_service_status"
+    )

@@ -41,7 +41,7 @@ def test_pi_directory_tool_lists_names_and_verifies(
         tmp_path
     )
 
-    assert len(tools) == 6
+    assert len(tools) == 7
     assert registry.get(
         "pi.list_directory"
     ).runs_on == "pi"
@@ -844,3 +844,96 @@ def test_pi_get_service_status_handles_subprocess_failure(
 
     assert result.status is ResultStatus.ERROR
     assert "RuntimeError" in result.error
+
+
+def test_pi_get_upgrade_status_rejects_unknown_scope(tmp_path):
+    registry, _verifier, _tools = build_tools(tmp_path)
+    call = ToolCall(
+        tool_name="pi.get_upgrade_status",
+        arguments={"scope": "everything"},
+    )
+
+    result = execute(registry, call)
+
+    assert result.status is ResultStatus.ERROR
+    assert "ValueError" in result.error
+
+
+def test_pi_get_upgrade_status_summary_scope_and_verifies(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        local_tools.implementation_ledger,
+        "summarize",
+        lambda: {
+            "finished": [{"feature_id": "phase1a", "title": "Storage"}],
+            "remaining": [],
+            "blocked": [],
+            "last_updated_feature": {
+                "feature_id": "phase1a",
+                "title": "Storage monitoring",
+            },
+            "counts": {
+                "finished": 1,
+                "remaining": 16,
+                "blocked": 0,
+                "total": 17,
+            },
+        },
+    )
+
+    registry, verifier, _tools = build_tools(tmp_path)
+    call = ToolCall(
+        tool_name="pi.get_upgrade_status",
+        arguments={"scope": "summary"},
+    )
+
+    result = execute(registry, call)
+    verification = verifier.verify(call, result)
+
+    assert result.status is ResultStatus.SUCCESS
+    assert result.output["finished_count"] == 1
+    assert result.output["total_count"] == 17
+    assert (
+        result.output["last_updated_feature"] == "Storage monitoring"
+    )
+    assert verification.status is VerificationStatus.VERIFIED
+
+
+def test_pi_get_upgrade_status_blocked_scope_lists_items(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        local_tools.implementation_ledger,
+        "summarize",
+        lambda: {
+            "finished": [],
+            "remaining": [],
+            "blocked": [
+                {"feature_id": "phase7_gmail_agent", "title": "Gmail agent"}
+            ],
+            "last_updated_feature": None,
+            "counts": {
+                "finished": 0,
+                "remaining": 16,
+                "blocked": 1,
+                "total": 17,
+            },
+        },
+    )
+
+    registry, verifier, _tools = build_tools(tmp_path)
+    call = ToolCall(
+        tool_name="pi.get_upgrade_status",
+        arguments={"scope": "blocked"},
+    )
+
+    result = execute(registry, call)
+    verification = verifier.verify(call, result)
+
+    assert result.status is ResultStatus.SUCCESS
+    assert result.output["count"] == 1
+    assert result.output["items"][0]["feature_id"] == "phase7_gmail_agent"
+    assert verification.status is VerificationStatus.VERIFIED
