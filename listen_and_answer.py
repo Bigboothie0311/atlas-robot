@@ -136,6 +136,9 @@ def _build_agent_voice_runtime_owner():
             mission_store_path=(
                 USAGE_PATH.parent / "agent_missions.json"
             ),
+            recordings_remote_root=(
+                r"C:\Users\wesle\Videos\AtlasRecordings"
+            ),
         )
         bundle.event_bus.subscribe(
             "*",

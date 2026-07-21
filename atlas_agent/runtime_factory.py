@@ -15,6 +15,7 @@ from atlas_agent.openai_planner import OpenAIPlanGenerator
 from atlas_agent.pc_client import PCClient
 from atlas_agent.pc_tools import register_pc_tools
 from atlas_agent.permissions import PermissionPolicy
+from atlas_agent.pi_tools import register_pi_capture_tools
 from atlas_agent.planner import AgentPlanner
 from atlas_agent.planning_service import (
     NaturalLanguagePlanningService,
@@ -55,6 +56,7 @@ def build_pc_agent_runtime(
     approved_remote_roots: Iterable[str],
     staging_directory: str | Path,
     mission_store_path: str | Path,
+    recordings_remote_root: str | None = None,
     ssh_port: int = 22,
     planning_attempts: int = 2,
 ) -> RuntimeBundle:
@@ -95,6 +97,15 @@ def build_pc_agent_runtime(
             task_queue.list_tasks()
         )
 
+    sftp_client = SFTPClient(
+        host=normalized_host,
+        username=normalized_username,
+        identity_file=identity_file,
+        staging_directory=staging_directory,
+        approved_remote_roots=roots,
+        port=ssh_port,
+    )
+
     register_pc_tools(
         registry,
         verifier,
@@ -106,14 +117,7 @@ def build_pc_agent_runtime(
             approved_remote_roots=roots,
             port=ssh_port,
         ),
-        sftp_client=SFTPClient(
-            host=normalized_host,
-            username=normalized_username,
-            identity_file=identity_file,
-            staging_directory=staging_directory,
-            approved_remote_roots=roots,
-            port=ssh_port,
-        ),
+        sftp_client=sftp_client,
     )
     register_local_tools(
         registry,
@@ -123,6 +127,15 @@ def build_pc_agent_runtime(
         ),
         mission_store_path=mission_store_path,
     )
+
+    if recordings_remote_root is not None:
+        register_pi_capture_tools(
+            registry,
+            verifier,
+            sftp_client=sftp_client,
+            recordings_remote_root=recordings_remote_root,
+            staging_directory=staging_directory,
+        )
 
     planning_service = (
         NaturalLanguagePlanningService(

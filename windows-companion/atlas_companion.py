@@ -15,6 +15,7 @@ import base64
 import json
 import subprocess
 import tempfile
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -65,6 +66,17 @@ DEFAULT_CONFIG = {
         "clear_temp": ["cmd", "/c", "del", "/q", "/s", r"%TEMP%\*"],
     },
     "slicer_status_url": "http://127.0.0.1:8899/status",
+    # Screen recordings and standalone captures live here permanently —
+    # the Pi only ever stages footage briefly before uploading it here.
+    "recordings_folder": r"C:\Users\YOU\Videos\AtlasRecordings",
+    "max_recording_seconds": 900,
+    # Case-insensitive substrings of a window title that refuse a
+    # screenshot/window-capture/recording of that window outright.
+    "privacy_blocked_window_substrings": [
+        "password", "1password", "bitwarden", "keychain",
+        "gmail", "bank", "venmo", "paypal", "signal",
+        "private browsing", "incognito",
+    ],
 }
 
 
@@ -85,6 +97,95 @@ def ensure_config_file():
 
 
 CONFIG = load_config()
+
+
+# ---------------------------------------------------------------------
+# Recording/capture helpers
+# ---------------------------------------------------------------------
+
+def _recording_state_path():
+    return CONFIG_PATH.with_name("recording_state.json")
+
+
+def _load_recording_state():
+    path = _recording_state_path()
+
+    if not path.exists():
+        return {"active": None}
+
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {"active": None}
+
+
+def _save_recording_state(state):
+    _recording_state_path().write_text(json.dumps(state, indent=2))
+
+
+def _utc_now_iso():
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _timestamp_slug():
+    return time.strftime("%Y%m%d_%H%M%S", time.gmtime())
+
+
+def _write_sidecar(media_path, meta):
+    Path(str(media_path) + ".json").write_text(
+        json.dumps(meta, indent=2)
+    )
+
+
+def _window_is_privacy_blocked(title):
+    if not title:
+        return False
+
+    blocked = CONFIG.get("privacy_blocked_window_substrings", [])
+    lowered = title.lower()
+    return any(term.lower() in lowered for term in blocked)
+
+
+def _pid_running(pid):
+    """Windows-safe liveness check via tasklist — no extra dependency."""
+    try:
+        result = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}"],
+            capture_output=True, text=True, timeout=10,
+        )
+        return str(pid) in result.stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _reconcile_orphaned_recording():
+    """Called only from main() (never on import) — if the companion
+    crashed or was restarted mid-recording, finalize the orphaned state
+    instead of leaving a phantom 'active' recording that blocks every
+    future start_recording call forever."""
+    state = _load_recording_state()
+    active = state.get("active")
+
+    if not active:
+        return
+
+    pid = active.get("pid")
+    if pid and _pid_running(pid):
+        return
+
+    path = Path(active.get("path", ""))
+    meta = {
+        **active,
+        "kind": "screen_recording",
+        "orphaned": True,
+        "stopped_at": _utc_now_iso(),
+    }
+
+    if path.is_file() and path.stat().st_size > 0:
+        meta["size_bytes"] = path.stat().st_size
+        _write_sidecar(path, meta)
+
+    _save_recording_state({"active": None})
 
 
 # ---------------------------------------------------------------------
@@ -189,6 +290,255 @@ def act_screenshot(_body):
     data = Path(out).read_bytes()
     Path(out).unlink(missing_ok=True)
     return {"ok": True, "image_b64": base64.b64encode(data).decode()}
+
+
+def act_capture_screenshot(body):
+    """Captures the full screen to recordings_folder with a JSON sidecar
+    (mission, window, timestamp) — distinct from the legacy 'screenshot'
+    action, which only pushes a base64 image to the HUD and saves
+    nothing. Refuses if the focused window is privacy-blocked."""
+    mission = str(body.get("mission", "")).strip() or None
+    foreground = act_active_window({}).get("title")
+
+    if _window_is_privacy_blocked(foreground):
+        return {
+            "ok": False,
+            "error": f"privacy-blocked window is focused: {foreground}",
+        }
+
+    folder = Path(CONFIG["recordings_folder"])
+    folder.mkdir(parents=True, exist_ok=True)
+    name = f"screenshot_{_timestamp_slug()}.png"
+    out = folder / name
+    escaped_out = str(out).replace("'", "''")
+
+    script = (
+        "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; "
+        "$b=[System.Windows.Forms.SystemInformation]::VirtualScreen; "
+        "$bmp=New-Object Drawing.Bitmap $b.Width,$b.Height; "
+        "$g=[Drawing.Graphics]::FromImage($bmp); "
+        "$g.CopyFromScreen($b.Location,[Drawing.Point]::Empty,$b.Size); "
+        f"$bmp.Save('{escaped_out}')"
+    )
+    subprocess.run(["powershell", "-NoProfile", "-Command", script], timeout=20)
+
+    if not out.is_file():
+        return {"ok": False, "error": "screenshot capture failed"}
+
+    meta = {
+        "kind": "screenshot",
+        "path": str(out),
+        "name": name,
+        "mission": mission,
+        "captured_at": _utc_now_iso(),
+        "window": foreground,
+    }
+    _write_sidecar(out, meta)
+    return {"ok": True, **meta}
+
+
+def act_capture_window(body):
+    """Captures ONE named window (by title substring) via PrintWindow,
+    not the whole screen. Refuses unapproved/privacy-blocked titles and
+    reports clearly if nothing matched."""
+    title_query = str(body.get("window_title", "")).strip()
+    mission = str(body.get("mission", "")).strip() or None
+
+    if not title_query:
+        return {"ok": False, "error": "window_title is required"}
+
+    if _window_is_privacy_blocked(title_query):
+        return {
+            "ok": False,
+            "error": f"privacy-blocked window requested: {title_query}",
+        }
+
+    folder = Path(CONFIG["recordings_folder"])
+    folder.mkdir(parents=True, exist_ok=True)
+    name = f"window_{_timestamp_slug()}.png"
+    out = folder / name
+    escaped_query = title_query.replace("'", "''")
+    escaped_out = str(out).replace("'", "''")
+
+    script = (
+        "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; "
+        "Add-Type @'\n"
+        "using System;\n"
+        "using System.Runtime.InteropServices;\n"
+        "public class AtlasWindowCapture {\n"
+        "  [DllImport(\"user32.dll\")]\n"
+        "  public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);\n"
+        "  [DllImport(\"user32.dll\")]\n"
+        "  public static extern bool PrintWindow(IntPtr hWnd, IntPtr hdcBlt, uint nFlags);\n"
+        "  public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }\n"
+        "}\n"
+        "'@ -ErrorAction SilentlyContinue; "
+        "$p = Get-Process | Where-Object { $_.MainWindowTitle -like "
+        f"'*{escaped_query}*' }} | Select-Object -First 1; "
+        "if (-not $p) { Write-Output 'NO_MATCH'; exit }; "
+        "$h = $p.MainWindowHandle; "
+        "$rect = New-Object AtlasWindowCapture+RECT; "
+        "[AtlasWindowCapture]::GetWindowRect($h, [ref]$rect) | Out-Null; "
+        "$w = $rect.Right - $rect.Left; $ht = $rect.Bottom - $rect.Top; "
+        "$bmp = New-Object Drawing.Bitmap $w, $ht; "
+        "$g = [Drawing.Graphics]::FromImage($bmp); "
+        "$hdc = $g.GetHdc(); "
+        "[AtlasWindowCapture]::PrintWindow($h, $hdc, 2) | Out-Null; "
+        "$g.ReleaseHdc($hdc); "
+        f"$bmp.Save('{escaped_out}'); "
+        "Write-Output $p.MainWindowTitle"
+    )
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-Command", script],
+        capture_output=True, text=True, timeout=20,
+    )
+    matched_title = result.stdout.strip()
+
+    if matched_title == "NO_MATCH" or not matched_title:
+        return {"ok": False, "error": f"no open window matched '{title_query}'"}
+
+    if not out.is_file():
+        return {"ok": False, "error": "window capture failed"}
+
+    meta = {
+        "kind": "window_capture",
+        "path": str(out),
+        "name": name,
+        "mission": mission,
+        "captured_at": _utc_now_iso(),
+        "window": matched_title,
+    }
+    _write_sidecar(out, meta)
+    return {"ok": True, **meta}
+
+
+def act_start_recording(body):
+    """Starts an ffmpeg gdigrab screen recording of the full desktop or
+    one named window. Duration is bounded up-front via ffmpeg's own
+    -t flag (self-terminating), not a separate watchdog. Refuses a
+    second concurrent recording and any privacy-blocked target."""
+    mission = str(body.get("mission", "")).strip() or None
+    target = str(body.get("target", "full")).strip() or "full"
+    window_title = str(body.get("window_title", "")).strip() or None
+    privacy = bool(body.get("privacy", False))
+    configured_cap = int(CONFIG.get("max_recording_seconds", 900))
+    requested_seconds = int(body.get("max_seconds") or configured_cap)
+    max_seconds = max(1, min(requested_seconds, configured_cap))
+
+    state = _load_recording_state()
+    if state.get("active"):
+        return {"ok": False, "error": "a recording is already in progress"}
+
+    if target == "window":
+        if not window_title:
+            return {
+                "ok": False,
+                "error": "window_title is required when target is 'window'",
+            }
+
+        if _window_is_privacy_blocked(window_title):
+            return {
+                "ok": False,
+                "error": f"privacy-blocked window requested: {window_title}",
+            }
+    elif _window_is_privacy_blocked(act_active_window({}).get("title")):
+        return {
+            "ok": False,
+            "error": "the focused window is privacy-blocked; recording refused",
+        }
+
+    folder = Path(CONFIG["recordings_folder"])
+    folder.mkdir(parents=True, exist_ok=True)
+    name = f"recording_{_timestamp_slug()}.mp4"
+    out = folder / name
+
+    command = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+        "-f", "gdigrab", "-framerate", "30",
+    ]
+    if target == "window" and window_title:
+        command.extend(["-i", f"title={window_title}"])
+    else:
+        command.extend(["-i", "desktop"])
+    command.extend(["-t", str(max_seconds), str(out)])
+
+    try:
+        process = subprocess.Popen(command)
+    except OSError as error:
+        return {"ok": False, "error": f"could not start ffmpeg: {error}"}
+
+    active = {
+        "pid": process.pid,
+        "path": str(out),
+        "name": name,
+        "mission": mission,
+        "target": target,
+        "window_title": window_title,
+        "privacy": privacy,
+        "max_seconds": max_seconds,
+        "started_at": _utc_now_iso(),
+    }
+    _save_recording_state({"active": active})
+    return {"ok": True, **active}
+
+
+def act_stop_recording(_body):
+    """Stops the in-progress recording and verifies the file actually
+    landed on disk with real bytes before reporting success."""
+    state = _load_recording_state()
+    active = state.get("active")
+
+    if not active:
+        return {"ok": False, "error": "no recording is in progress"}
+
+    pid = active.get("pid")
+    path = Path(active["path"])
+
+    if pid and _pid_running(pid):
+        try:
+            subprocess.run(["taskkill", "/PID", str(pid)], timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        time.sleep(1)  # let ffmpeg flush the moov atom cleanly
+
+    _save_recording_state({"active": None})
+
+    if not path.is_file() or path.stat().st_size == 0:
+        return {"ok": False, "error": "recording file is missing or empty"}
+
+    meta = {
+        **active,
+        "kind": "screen_recording",
+        "stopped_at": _utc_now_iso(),
+        "size_bytes": path.stat().st_size,
+    }
+    _write_sidecar(path, meta)
+    return {"ok": True, **meta}
+
+
+def act_list_recordings(_body):
+    """Lists every captured screenshot/window-capture/recording from
+    their JSON sidecars, newest first, each flagged with whether the
+    media file still exists."""
+    folder = Path(CONFIG["recordings_folder"])
+
+    if not folder.is_dir():
+        return {"ok": True, "recordings": []}
+
+    items = []
+    for sidecar in sorted(
+        folder.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True
+    ):
+        try:
+            meta = json.loads(sidecar.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+
+        media_path = Path(meta.get("path", ""))
+        meta["exists"] = media_path.is_file()
+        items.append(meta)
+
+    return {"ok": True, "recordings": items}
 
 
 def act_active_apps(_body):
@@ -380,6 +730,11 @@ ACTIONS = {
     "open_app": act_open_app,
     "focus_or_open_app": act_focus_or_open_app,
     "active_window": act_active_window,
+    "capture_screenshot": act_capture_screenshot,
+    "capture_window": act_capture_window,
+    "start_recording": act_start_recording,
+    "stop_recording": act_stop_recording,
+    "list_recordings": act_list_recordings,
 }
 
 
@@ -433,6 +788,8 @@ def main():
     if CONFIG["token"] == "CHANGE_ME":
         print("Refusing to start with the default token — set one in companion_config.json.")
         return
+
+    _reconcile_orphaned_recording()
 
     server = ThreadingHTTPServer((CONFIG["bind_host"], CONFIG["bind_port"]), Handler)
     print(f"A.T.L.A.S. companion listening on {CONFIG['bind_host']}:{CONFIG['bind_port']}")

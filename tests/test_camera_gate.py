@@ -271,6 +271,72 @@ class CaptureCommandTests(unittest.TestCase):
         self.assertEqual("18", command[command.index("-frames:v") + 1])
 
 
+class CaptureClipTests(unittest.TestCase):
+    @staticmethod
+    def _fake_run_writing_output(command, **kwargs):
+        Path(command[-1]).write_bytes(b"fake mp4 bytes")
+
+    def test_capture_clip_builds_muxed_command_and_returns_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            clips_dir = Path(directory) / "clips"
+            with mock.patch.object(camera_gate, "CLIPS_DIR", clips_dir), \
+                    mock.patch.object(camera_gate.subprocess, "run",
+                                       side_effect=self._fake_run_writing_output) as run:
+                result = camera_gate.capture_clip(10, mission="showcase")
+
+            command = run.call_args.args[0]
+            self.assertIn("alsa", command)
+            self.assertIn(camera_gate.AUDIO_DEVICE, command)
+            self.assertEqual("10", command[command.index("-t") + 1])
+            self.assertTrue(result["has_audio"])
+            self.assertEqual(result["mission"], "showcase")
+            self.assertEqual(result["duration_seconds"], 10)
+            self.assertTrue(Path(result["path"]).is_file())
+
+    def test_capture_clip_mute_audio_skips_alsa_input(self):
+        with tempfile.TemporaryDirectory() as directory:
+            clips_dir = Path(directory) / "clips"
+            with mock.patch.object(camera_gate, "CLIPS_DIR", clips_dir), \
+                    mock.patch.object(camera_gate.subprocess, "run",
+                                       side_effect=self._fake_run_writing_output) as run:
+                result = camera_gate.capture_clip(5, mute_audio=True)
+
+            command = run.call_args.args[0]
+            self.assertNotIn("alsa", command)
+            self.assertFalse(result["has_audio"])
+
+    def test_capture_clip_caps_duration_to_max(self):
+        with tempfile.TemporaryDirectory() as directory:
+            clips_dir = Path(directory) / "clips"
+            with mock.patch.object(camera_gate, "CLIPS_DIR", clips_dir), \
+                    mock.patch.object(camera_gate.subprocess, "run",
+                                       side_effect=self._fake_run_writing_output):
+                result = camera_gate.capture_clip(99999)
+
+            self.assertEqual(result["duration_seconds"], camera_gate.MAX_CLIP_SECONDS)
+
+    def test_capture_clip_returns_none_on_ffmpeg_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            clips_dir = Path(directory) / "clips"
+            with mock.patch.object(camera_gate, "CLIPS_DIR", clips_dir), \
+                    mock.patch.object(
+                        camera_gate.subprocess, "run",
+                        side_effect=camera_gate.subprocess.SubprocessError("boom"),
+                    ):
+                result = camera_gate.capture_clip(5)
+
+            self.assertIsNone(result)
+
+    def test_capture_clip_returns_none_when_file_never_appears(self):
+        with tempfile.TemporaryDirectory() as directory:
+            clips_dir = Path(directory) / "clips"
+            with mock.patch.object(camera_gate, "CLIPS_DIR", clips_dir), \
+                    mock.patch.object(camera_gate.subprocess, "run"):
+                result = camera_gate.capture_clip(5)
+
+            self.assertIsNone(result)
+
+
 class DismissIntruderAlertsTests(unittest.TestCase):
     def test_dismiss_deletes_photos_marks_reviewed_and_keeps_log(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -19,13 +19,24 @@ messages, or delete anything outside the predefined maintenance scripts.
 | `active_apps` | List titles of open windows |
 | `run_script` | Run one predefined maintenance script by name |
 | `slicer_status` | Return the slicer's status |
+| `capture_screenshot` | Save the full screen to `recordings_folder` with a metadata sidecar |
+| `capture_window` | Save ONE named window (by title substring) to `recordings_folder` |
+| `start_recording` | Start an ffmpeg screen recording (full desktop or one window), bounded by `max_recording_seconds` |
+| `stop_recording` | Stop the in-progress recording and verify the file landed on disk |
+| `list_recordings` | List every capture/recording's metadata, newest first |
+
+`capture_screenshot`, `capture_window`, and `start_recording` all refuse a
+privacy-blocked window (see `privacy_blocked_window_substrings` in the
+config — password managers, email, banking, etc. by default).
 
 Every request needs the shared `X-Companion-Token`. No token, no action.
 
 ## Install (on the Windows PC)
 
-1. Install Python 3 (python.org) if not present. No packages needed —
-   stdlib only.
+1. Install Python 3 (python.org) if not present. Everything except
+   recording is stdlib only. `start_recording`/`stop_recording` need
+   **ffmpeg** on PATH (same tool already used for camera capture on the
+   Pi side) — install it separately if you want screen recording.
 2. Copy the `windows-companion` folder to the PC, e.g. `C:\atlas-companion`.
 3. Run once to generate the config:
    ```
@@ -38,6 +49,9 @@ Every request needs the shared `X-Companion-Token`. No token, no action.
    - Fix `fusion_path`, `projects`, `screenshot_folder`, `approved_folders`.
    - Add any `maintenance_scripts` you want (name → command list). Only
      these can be run.
+   - Set `recordings_folder` to where screenshots/window captures/
+     recordings should permanently live, and `max_recording_seconds`
+     to the hard ceiling for any single recording.
 5. Start it:
    ```
    python atlas_companion.py

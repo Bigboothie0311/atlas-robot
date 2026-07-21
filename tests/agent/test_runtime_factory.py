@@ -15,6 +15,11 @@ EXPECTED_PC_TOOLS = {
     "pc.open_app",
     "pc.focus_or_open_app",
     "pc.active_window",
+    "pc.capture_screenshot",
+    "pc.capture_window",
+    "pc.start_screen_recording",
+    "pc.stop_screen_recording",
+    "pc.list_recordings",
     "pi.list_directory",
     "pi.read_text_file",
     "pi.search_files",
@@ -79,6 +84,51 @@ def test_factory_builds_complete_pc_runtime(tmp_path):
         )
         assert bundle.runtime.event_bus is bundle.event_bus
         assert bundle.task_queue.list_tasks() == []
+    finally:
+        bundle.close()
+
+
+def test_factory_registers_pi_capture_tools_when_recordings_root_given(
+    tmp_path,
+):
+    identity_file = tmp_path / "test_identity"
+    identity_file.write_text("test-only-placeholder")
+
+    bundle = build_pc_agent_runtime(
+        openai_client=object(),
+        model="gpt-test",
+        host="192.168.50.2",
+        username="wesle",
+        identity_file=identity_file,
+        approved_remote_roots=[r"C:\Users\wesle"],
+        staging_directory=(tmp_path / "staging"),
+        mission_store_path=(tmp_path / "missions.json"),
+        recordings_remote_root=(
+            r"C:\Users\wesle\Videos\AtlasRecordings"
+        ),
+    )
+
+    try:
+        registered_names = {
+            tool.name for tool in bundle.registry.list_tools()
+        }
+        assert "pi.capture_hud_frame" in registered_names
+        assert "camera.capture_clip" in registered_names
+    finally:
+        bundle.close()
+
+
+def test_factory_omits_pi_capture_tools_without_recordings_root(
+    tmp_path,
+):
+    bundle = build_bundle(tmp_path)
+
+    try:
+        registered_names = {
+            tool.name for tool in bundle.registry.list_tools()
+        }
+        assert "pi.capture_hud_frame" not in registered_names
+        assert "camera.capture_clip" not in registered_names
     finally:
         bundle.close()
 

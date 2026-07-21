@@ -78,8 +78,21 @@ class FakeRunner:
             )
 
         if command[0] == "sftp":
+            batch = kwargs.get("input", "")
+
+            if batch.startswith("put "):
+                return subprocess.CompletedProcess(
+                    command,
+                    self.sftp_returncode,
+                    stdout="",
+                    stderr=(
+                        "sftp failed"
+                        if self.sftp_returncode
+                        else ""
+                    ),
+                )
+
             if self.sftp_returncode == 0:
-                batch = kwargs["input"]
                 assert batch.startswith('get "/C:/')
                 match = re.search(
                     r'get ".*" "([^"]+)"',
@@ -354,3 +367,110 @@ def test_invalid_client_configuration_is_rejected(
             staging_directory=tmp_path / "staging",
             approved_remote_roots=[],
         )
+
+
+def test_upload_is_verified_against_remote_hash(
+    tmp_path,
+) -> None:
+    payload = b"atlas clip footage"
+    local_file = tmp_path / "clip.mp4"
+    local_file.write_bytes(payload)
+    runner = FakeRunner(
+        info=remote_info(payload, path=REMOTE_PATH),
+        download_bytes=payload,
+    )
+    client = make_client(tmp_path, runner)
+
+    result = client.upload(local_file, REMOTE_PATH)
+
+    assert result.ok is True
+    assert result.verified is True
+    assert result.remote_path == REMOTE_PATH
+    assert result.local_path == str(local_file)
+    assert result.bytes_transferred == len(payload)
+    assert result.local_sha256 == result.remote_sha256
+    put_calls = [
+        call
+        for call, _kwargs in runner.calls
+        if call[0] == "sftp"
+    ]
+    assert len(put_calls) == 1
+
+
+def test_upload_rejects_missing_local_file(
+    tmp_path,
+) -> None:
+    runner = FakeRunner(
+        info=remote_info(b"data"),
+        download_bytes=b"data",
+    )
+    client = make_client(tmp_path, runner)
+
+    result = client.upload(
+        tmp_path / "missing.mp4", REMOTE_PATH
+    )
+
+    assert result.ok is False
+    assert result.verified is False
+    assert "does not exist" in result.error
+    assert runner.calls == []
+
+
+def test_upload_rejects_unapproved_remote_path(
+    tmp_path,
+) -> None:
+    local_file = tmp_path / "clip.mp4"
+    local_file.write_bytes(b"data")
+    runner = FakeRunner(
+        info=remote_info(b"data"),
+        download_bytes=b"data",
+    )
+    client = make_client(tmp_path, runner)
+
+    result = client.upload(
+        local_file, r"C:\Windows\System32\evil.mp4"
+    )
+
+    assert result.ok is False
+    assert result.verified is False
+    assert "outside approved roots" in result.error
+    assert runner.calls == []
+
+
+def test_upload_hash_mismatch_is_not_verified(
+    tmp_path,
+) -> None:
+    local_file = tmp_path / "clip.mp4"
+    local_file.write_bytes(b"local bytes")
+    runner = FakeRunner(
+        # Remote reports different bytes than what was
+        # actually sent — simulates a corrupted transfer.
+        info=remote_info(b"different remote bytes"),
+        download_bytes=b"different remote bytes",
+    )
+    client = make_client(tmp_path, runner)
+
+    result = client.upload(local_file, REMOTE_PATH)
+
+    assert result.ok is False
+    assert result.verified is False
+    assert "failed size or SHA-256" in result.error
+
+
+def test_upload_sftp_failure_is_reported(
+    tmp_path,
+) -> None:
+    local_file = tmp_path / "clip.mp4"
+    local_file.write_bytes(b"data")
+    runner = FakeRunner(
+        info=remote_info(b"data"),
+        download_bytes=b"data",
+        sftp_returncode=1,
+    )
+    client = make_client(tmp_path, runner)
+
+    result = client.upload(local_file, REMOTE_PATH)
+
+    assert result.ok is False
+    assert result.verified is False
+    assert "SFTP upload failed" in result.error

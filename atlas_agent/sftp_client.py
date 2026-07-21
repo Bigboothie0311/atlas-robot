@@ -406,6 +406,124 @@ class SFTPClient:
                 except OSError:
                     pass
 
+    def upload(
+        self,
+        local_path: str | Path,
+        remote_path: str | PureWindowsPath,
+    ) -> FileTransferResult:
+        """Uploads a local Pi file to an approved Windows path via sftp
+        put, verifying SHA-256 on both sides before confirming success.
+        Mirrors download() in the opposite direction."""
+        started_clock = monotonic()
+        requested_remote = str(remote_path)
+        source = Path(local_path)
+
+        try:
+            if not source.is_file():
+                raise FileTransferError(
+                    "Local file does not exist."
+                )
+
+            destination = self._validate_remote_path(
+                remote_path
+            )
+            local_size = source.stat().st_size
+            local_hash = self._sha256(source)
+
+            remote_sftp_path = "/" + PureWindowsPath(
+                destination
+            ).as_posix()
+            batch = (
+                f'put "{source}" '
+                f'"{remote_sftp_path}"\n'
+            )
+            command = [
+                "sftp",
+                "-q",
+                "-i",
+                str(self.identity_file),
+                "-P",
+                str(self.port),
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "StrictHostKeyChecking=yes",
+                "-b",
+                "-",
+                f"{self.username}@{self.host}",
+            ]
+
+            completed = self._run_command(
+                command,
+                input=batch,
+                capture_output=True,
+                text=True,
+                timeout=self.command_timeout_seconds,
+                check=False,
+            )
+
+            if completed.returncode != 0:
+                detail = (
+                    completed.stderr.strip()
+                    or completed.stdout.strip()
+                    or (
+                        "SFTP exited with code "
+                        f"{completed.returncode}"
+                    )
+                )
+                raise FileTransferError(
+                    f"SFTP upload failed: {detail}"
+                )
+
+            info = self.remote_file_info(destination)
+
+            if (
+                info.size != local_size
+                or info.sha256 != local_hash
+            ):
+                return self._transfer_result(
+                    started_clock,
+                    ok=False,
+                    verified=False,
+                    remote_path=str(destination),
+                    local_path=str(source),
+                    bytes_transferred=info.size,
+                    remote_sha256=info.sha256,
+                    local_sha256=local_hash,
+                    error=(
+                        "Uploaded file failed size or "
+                        "SHA-256 verification."
+                    ),
+                )
+
+            return self._transfer_result(
+                started_clock,
+                ok=True,
+                verified=True,
+                remote_path=str(destination),
+                local_path=str(source),
+                bytes_transferred=local_size,
+                remote_sha256=info.sha256,
+                local_sha256=local_hash,
+            )
+        except (
+            FileTransferError,
+            ValueError,
+            OSError,
+            subprocess.SubprocessError,
+        ) as exc:
+            return self._transfer_result(
+                started_clock,
+                ok=False,
+                verified=False,
+                remote_path=requested_remote,
+                local_path=str(source),
+                bytes_transferred=0,
+                remote_sha256=None,
+                local_sha256=None,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+
     def _validate_remote_path(
         self,
         remote_path: str | PureWindowsPath,

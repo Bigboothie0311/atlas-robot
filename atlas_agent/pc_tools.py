@@ -128,6 +128,113 @@ def register_pc_tools(
             pc_client.execute("active_window")
         )
 
+    def capture_screenshot(
+        mission: str | None = None,
+    ) -> dict[str, Any]:
+        if mission is not None and not isinstance(
+            mission, str
+        ):
+            raise ValueError(
+                "mission must be a string or null"
+            )
+
+        return asdict(
+            pc_client.execute(
+                "capture_screenshot",
+                {"mission": mission},
+            )
+        )
+
+    def capture_window(
+        window_title: str,
+        mission: str | None = None,
+    ) -> dict[str, Any]:
+        if (
+            not isinstance(window_title, str)
+            or not window_title.strip()
+        ):
+            raise ValueError(
+                "window_title must be a non-empty string"
+            )
+
+        if mission is not None and not isinstance(
+            mission, str
+        ):
+            raise ValueError(
+                "mission must be a string or null"
+            )
+
+        return asdict(
+            pc_client.execute(
+                "capture_window",
+                {
+                    "window_title": window_title.strip(),
+                    "mission": mission,
+                },
+            )
+        )
+
+    def start_screen_recording(
+        target: str = "full",
+        window_title: str | None = None,
+        mission: str | None = None,
+        privacy: bool = False,
+        max_seconds: int | None = None,
+    ) -> dict[str, Any]:
+        if target not in ("full", "window"):
+            raise ValueError(
+                "target must be 'full' or 'window'"
+            )
+
+        if target == "window" and (
+            not isinstance(window_title, str)
+            or not window_title.strip()
+        ):
+            raise ValueError(
+                "window_title is required when target "
+                "is 'window'"
+            )
+
+        if mission is not None and not isinstance(
+            mission, str
+        ):
+            raise ValueError(
+                "mission must be a string or null"
+            )
+
+        if not isinstance(privacy, bool):
+            raise ValueError("privacy must be a boolean")
+
+        if max_seconds is not None and not isinstance(
+            max_seconds, int
+        ):
+            raise ValueError(
+                "max_seconds must be an integer or null"
+            )
+
+        return asdict(
+            pc_client.execute(
+                "start_recording",
+                {
+                    "target": target,
+                    "window_title": window_title,
+                    "mission": mission,
+                    "privacy": privacy,
+                    "max_seconds": max_seconds,
+                },
+            )
+        )
+
+    def stop_screen_recording() -> dict[str, Any]:
+        return asdict(
+            pc_client.execute("stop_recording")
+        )
+
+    def list_recordings() -> dict[str, Any]:
+        return asdict(
+            pc_client.execute("list_recordings")
+        )
+
     tools = [
         AtlasTool(
             name="pc.ensure_online",
@@ -336,6 +443,155 @@ def register_pc_tools(
                 }
             },
         ),
+        AtlasTool(
+            name="pc.capture_screenshot",
+            description=(
+                "Capture the PC's full screen to the "
+                "recordings folder with mission/window "
+                "metadata. Refuses if a privacy-blocked "
+                "window (password manager, email, "
+                "banking) is focused."
+            ),
+            runs_on="pc",
+            handler=capture_screenshot,
+            permission_level=0,
+            timeout_seconds=30,
+            metadata={
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "mission": {
+                            "type": ["string", "null"],
+                            "description": (
+                                "Optional mission/feature "
+                                "name this capture belongs "
+                                "to."
+                            ),
+                        }
+                    },
+                    "required": ["mission"],
+                    "additionalProperties": False,
+                }
+            },
+        ),
+        AtlasTool(
+            name="pc.capture_window",
+            description=(
+                "Capture ONE named window on the PC by "
+                "title substring, not the whole screen. "
+                "Refuses privacy-blocked or unmatched "
+                "titles."
+            ),
+            runs_on="pc",
+            handler=capture_window,
+            permission_level=0,
+            timeout_seconds=30,
+            metadata={
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "window_title": {
+                            "type": "string",
+                            "maxLength": 200,
+                        },
+                        "mission": {
+                            "type": ["string", "null"],
+                        },
+                    },
+                    "required": [
+                        "window_title",
+                        "mission",
+                    ],
+                    "additionalProperties": False,
+                }
+            },
+        ),
+        AtlasTool(
+            name="pc.start_screen_recording",
+            description=(
+                "Start recording the PC's full desktop or "
+                "one named window to the recordings "
+                "folder. Duration is bounded by "
+                "max_seconds (capped by the companion's "
+                "configured ceiling); refuses a second "
+                "concurrent recording and any "
+                "privacy-blocked target."
+            ),
+            runs_on="pc",
+            handler=start_screen_recording,
+            permission_level=0,
+            timeout_seconds=30,
+            metadata={
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "target": {
+                            "type": "string",
+                            "enum": ["full", "window"],
+                        },
+                        "window_title": {
+                            "type": ["string", "null"],
+                        },
+                        "mission": {
+                            "type": ["string", "null"],
+                        },
+                        "privacy": {
+                            "type": "boolean",
+                        },
+                        "max_seconds": {
+                            "type": ["integer", "null"],
+                            "minimum": 1,
+                        },
+                    },
+                    "required": [
+                        "target",
+                        "window_title",
+                        "mission",
+                        "privacy",
+                        "max_seconds",
+                    ],
+                    "additionalProperties": False,
+                }
+            },
+        ),
+        AtlasTool(
+            name="pc.stop_screen_recording",
+            description=(
+                "Stop the in-progress screen recording "
+                "and verify the file landed on disk with "
+                "real bytes."
+            ),
+            runs_on="pc",
+            handler=stop_screen_recording,
+            permission_level=0,
+            timeout_seconds=30,
+            metadata={
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                }
+            },
+        ),
+        AtlasTool(
+            name="pc.list_recordings",
+            description=(
+                "List every captured screenshot, window "
+                "capture, and recording on the PC, newest "
+                "first."
+            ),
+            runs_on="pc",
+            handler=list_recordings,
+            permission_level=0,
+            timeout_seconds=30,
+            metadata={
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                }
+            },
+        ),
     ]
 
     for tool in tools:
@@ -396,6 +652,41 @@ def register_pc_tools(
         lambda call, result: _verify_pc_action(
             result.output,
             required_data_field="title",
+        ),
+    )
+    verifier.register(
+        "pc.capture_screenshot",
+        lambda call, result: _verify_pc_action(
+            result.output,
+            required_data_field="path",
+        ),
+    )
+    verifier.register(
+        "pc.capture_window",
+        lambda call, result: _verify_pc_action(
+            result.output,
+            required_data_field="path",
+        ),
+    )
+    verifier.register(
+        "pc.start_screen_recording",
+        lambda call, result: _verify_pc_action(
+            result.output,
+            required_data_field="pid",
+        ),
+    )
+    verifier.register(
+        "pc.stop_screen_recording",
+        lambda call, result: _verify_pc_action(
+            result.output,
+            required_data_field="size_bytes",
+        ),
+    )
+    verifier.register(
+        "pc.list_recordings",
+        lambda call, result: _verify_pc_action(
+            result.output,
+            required_data_field="recordings",
         ),
     )
 

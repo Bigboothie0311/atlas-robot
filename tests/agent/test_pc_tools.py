@@ -146,18 +146,23 @@ def test_real_pc_tools_are_registered() -> None:
         tools,
     ) = build_tools()
 
-    assert len(tools) == 7
+    assert len(tools) == 12
     assert [
         tool.name
         for tool in registry.list_tools()
     ] == [
         "pc.active_apps",
         "pc.active_window",
+        "pc.capture_screenshot",
+        "pc.capture_window",
         "pc.download_file",
         "pc.ensure_online",
         "pc.focus_or_open_app",
+        "pc.list_recordings",
         "pc.open_app",
         "pc.search_files",
+        "pc.start_screen_recording",
+        "pc.stop_screen_recording",
     ]
     assert registry.get(
         "pc.ensure_online"
@@ -585,3 +590,211 @@ def test_invalid_tool_arguments_become_error_result() -> None:
         result.error
         == "ValueError: wake_if_needed must be a boolean"
     )
+
+
+def test_capture_screenshot_executes_and_verifies() -> None:
+    (
+        registry,
+        verifier,
+        pc_client,
+        _file_search,
+        _sftp_client,
+        _tools,
+    ) = build_tools()
+    pc_client.action_result = PCActionResult(
+        action="capture_screenshot",
+        ok=True,
+        data={
+            "ok": True,
+            "path": r"C:\Videos\AtlasRecordings\shot.png",
+            "name": "shot.png",
+        },
+        error=None,
+        started_at="start",
+        finished_at="finish",
+        duration_ms=1,
+    )
+    call = ToolCall(
+        tool_name="pc.capture_screenshot",
+        arguments={"mission": "showcase"},
+    )
+
+    result = execute(registry, call)
+    verification = verifier.verify(call, result)
+
+    assert result.status is ResultStatus.SUCCESS
+    assert pc_client.action_arguments == (
+        "capture_screenshot",
+        {"mission": "showcase"},
+    )
+    assert verification.status is VerificationStatus.VERIFIED
+
+
+def test_capture_window_requires_non_empty_title() -> None:
+    (
+        registry,
+        _verifier,
+        _pc_client,
+        _file_search,
+        _sftp_client,
+        _tools,
+    ) = build_tools()
+    call = ToolCall(
+        tool_name="pc.capture_window",
+        arguments={"window_title": "  ", "mission": None},
+    )
+
+    result = execute(registry, call)
+
+    assert result.status is ResultStatus.ERROR
+
+
+def test_start_screen_recording_executes_and_verifies() -> None:
+    (
+        registry,
+        verifier,
+        pc_client,
+        _file_search,
+        _sftp_client,
+        _tools,
+    ) = build_tools()
+    pc_client.action_result = PCActionResult(
+        action="start_recording",
+        ok=True,
+        data={"ok": True, "pid": 4242, "path": r"C:\rec.mp4"},
+        error=None,
+        started_at="start",
+        finished_at="finish",
+        duration_ms=1,
+    )
+    call = ToolCall(
+        tool_name="pc.start_screen_recording",
+        arguments={
+            "target": "full",
+            "window_title": None,
+            "mission": "showcase",
+            "privacy": False,
+            "max_seconds": 30,
+        },
+    )
+
+    result = execute(registry, call)
+    verification = verifier.verify(call, result)
+
+    assert result.status is ResultStatus.SUCCESS
+    assert pc_client.action_arguments == (
+        "start_recording",
+        {
+            "target": "full",
+            "window_title": None,
+            "mission": "showcase",
+            "privacy": False,
+            "max_seconds": 30,
+        },
+    )
+    assert verification.status is VerificationStatus.VERIFIED
+
+
+def test_start_screen_recording_rejects_window_target_without_title() -> None:
+    (
+        registry,
+        _verifier,
+        _pc_client,
+        _file_search,
+        _sftp_client,
+        _tools,
+    ) = build_tools()
+    call = ToolCall(
+        tool_name="pc.start_screen_recording",
+        arguments={
+            "target": "window",
+            "window_title": None,
+            "mission": None,
+            "privacy": False,
+            "max_seconds": None,
+        },
+    )
+
+    result = execute(registry, call)
+
+    assert result.status is ResultStatus.ERROR
+
+
+def test_stop_screen_recording_executes_and_verifies() -> None:
+    (
+        registry,
+        verifier,
+        pc_client,
+        _file_search,
+        _sftp_client,
+        _tools,
+    ) = build_tools()
+    pc_client.action_result = PCActionResult(
+        action="stop_recording",
+        ok=True,
+        data={"ok": True, "size_bytes": 1024, "path": r"C:\rec.mp4"},
+        error=None,
+        started_at="start",
+        finished_at="finish",
+        duration_ms=1,
+    )
+    call = ToolCall(tool_name="pc.stop_screen_recording")
+
+    result = execute(registry, call)
+    verification = verifier.verify(call, result)
+
+    assert result.status is ResultStatus.SUCCESS
+    assert verification.status is VerificationStatus.VERIFIED
+
+
+def test_stop_screen_recording_unverified_without_recording() -> None:
+    (
+        registry,
+        verifier,
+        pc_client,
+        _file_search,
+        _sftp_client,
+        _tools,
+    ) = build_tools()
+    pc_client.action_result = PCActionResult(
+        action="stop_recording",
+        ok=False,
+        data=None,
+        error="no recording is in progress",
+        started_at="start",
+        finished_at="finish",
+        duration_ms=1,
+    )
+    call = ToolCall(tool_name="pc.stop_screen_recording")
+
+    result = execute(registry, call)
+    verification = verifier.verify(call, result)
+
+    assert verification.verified is False
+
+
+def test_list_recordings_executes_and_verifies() -> None:
+    (
+        registry,
+        verifier,
+        pc_client,
+        _file_search,
+        _sftp_client,
+        _tools,
+    ) = build_tools()
+    pc_client.action_result = PCActionResult(
+        action="list_recordings",
+        ok=True,
+        data={"ok": True, "recordings": [{"name": "shot.png"}]},
+        error=None,
+        started_at="start",
+        finished_at="finish",
+        duration_ms=1,
+    )
+    call = ToolCall(tool_name="pc.list_recordings")
+
+    result = execute(registry, call)
+    verification = verifier.verify(call, result)
+
+    assert result.status is ResultStatus.SUCCESS
+    assert verification.status is VerificationStatus.VERIFIED

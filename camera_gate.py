@@ -41,8 +41,14 @@ CAMERA_DEVICE = (
     "/dev/v4l/by-id/"
     "usb-icSpring_icspring_camera_202404260001-video-index0"
 )
+AUDIO_DEVICE = "plughw:CARD=Device,DEV=0"  # SuziePi USB mic, same as voice capture
+
+# Self-showcase clip capture (Phase 11 media pipeline) — bounded so a
+# stuck ffmpeg process can never record indefinitely.
+MAX_CLIP_SECONDS = 120
 
 DATA_DIR = Path("/home/atlas/atlas-robot/data")
+CLIPS_DIR = DATA_DIR / "self_showcase_clips"
 AUTH_STATE_PATH = DATA_DIR / "auth_state.json"
 FACES_DIR = DATA_DIR / "faces" / "authorized"
 MODEL_PATH = DATA_DIR / "face_model.yml"
@@ -313,6 +319,59 @@ def capture_burst(frame_count, directory, sample_fps=None):
         print("Camera burst failed:", type(error).__name__, error, flush=True)
 
     return sorted(Path(directory).glob("frame_*.jpg"))
+
+
+def capture_clip(duration_seconds, mission=None, mute_audio=False):
+    """Records A.T.L.A.S. himself — video from the USB camera, audio
+    from the Pi's mic (unless mute_audio) — for the self-showcase media
+    pipeline. Bounded to MAX_CLIP_SECONDS regardless of what's
+    requested. Returns clip metadata on success or None on failure;
+    callers own uploading the clip to the PC and deleting the local
+    copy — clips are not meant to live on the Pi indefinitely."""
+    seconds = max(1, min(int(duration_seconds), MAX_CLIP_SECONDS))
+    CLIPS_DIR.mkdir(parents=True, exist_ok=True)
+    name = f"clip_{int(time.time())}.mp4"
+    out_path = CLIPS_DIR / name
+
+    command = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+        "-f", "v4l2", "-input_format", "mjpeg",
+        "-video_size", "640x480", "-i", CAMERA_DEVICE,
+    ]
+
+    if not mute_audio:
+        command.extend(["-f", "alsa", "-i", AUDIO_DEVICE])
+
+    command.extend(["-t", str(seconds)])
+
+    if not mute_audio:
+        command.extend([
+            "-map", "0:v", "-map", "1:a",
+            "-c:v", "libx264", "-c:a", "aac",
+        ])
+    else:
+        command.extend(["-c:v", "libx264"])
+
+    command.append(str(out_path))
+
+    try:
+        subprocess.run(command, check=True, timeout=seconds + 20)
+    except (subprocess.SubprocessError, OSError) as error:
+        print("Camera clip capture failed:", type(error).__name__, error, flush=True)
+        return None
+
+    if not out_path.is_file() or out_path.stat().st_size == 0:
+        return None
+
+    return {
+        "path": str(out_path),
+        "name": name,
+        "mission": mission,
+        "duration_seconds": seconds,
+        "has_audio": not mute_audio,
+        "captured_at": time.time(),
+        "size_bytes": out_path.stat().st_size,
+    }
 
 
 def capture_frame(path=str(DATA_DIR / "tmp_capture.jpg")):

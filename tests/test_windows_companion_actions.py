@@ -5,6 +5,7 @@ mocked out — the real companion only ever runs on Windows, but the
 action logic itself is plain Python and testable here.
 """
 import importlib
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -173,6 +174,236 @@ def test_focus_and_active_window_are_whitelisted_actions(companion):
     assert companion.ACTIONS["active_window"] is (
         companion.act_active_window
     )
+
+
+def test_capture_screenshot_saves_file_and_sidecar(companion, monkeypatch, tmp_path):
+    recordings = tmp_path / "recordings"
+    companion.CONFIG = {**companion.CONFIG, "recordings_folder": str(recordings)}
+    monkeypatch.setattr(
+        companion, "act_active_window", lambda _body: {"ok": True, "title": "Chrome"}
+    )
+
+    def fake_powershell_run(command, **kwargs):
+        recordings.mkdir(parents=True, exist_ok=True)
+        # Extract the target path baked into the script (last quoted path).
+        script = command[-1]
+        target = script.rsplit("'", 2)[-2]
+        Path(target).write_bytes(b"fake png bytes")
+        return SimpleNamespace(stdout="", returncode=0)
+
+    monkeypatch.setattr(companion.subprocess, "run", fake_powershell_run)
+
+    result = companion.act_capture_screenshot({"mission": "showcase"})
+
+    assert result["ok"] is True
+    assert result["mission"] == "showcase"
+    assert result["window"] == "Chrome"
+    saved = Path(result["path"])
+    assert saved.is_file()
+    sidecar = Path(str(saved) + ".json")
+    assert sidecar.is_file()
+    assert json.loads(sidecar.read_text())["kind"] == "screenshot"
+
+
+def test_capture_screenshot_refuses_privacy_blocked_window(companion, monkeypatch):
+    monkeypatch.setattr(
+        companion, "act_active_window", lambda _body: {"ok": True, "title": "Gmail - Inbox"}
+    )
+
+    result = companion.act_capture_screenshot({})
+
+    assert result["ok"] is False
+    assert "privacy-blocked" in result["error"]
+
+
+def test_capture_window_refuses_privacy_blocked_title(companion):
+    result = companion.act_capture_window({"window_title": "1Password"})
+
+    assert result == {
+        "ok": False,
+        "error": "privacy-blocked window requested: 1Password",
+    }
+
+
+def test_capture_window_reports_no_match(companion, monkeypatch):
+    monkeypatch.setattr(
+        companion.subprocess,
+        "run",
+        lambda *a, **k: SimpleNamespace(stdout="NO_MATCH\n", returncode=0),
+    )
+
+    result = companion.act_capture_window({"window_title": "Fusion 360"})
+
+    assert result == {
+        "ok": False,
+        "error": "no open window matched 'Fusion 360'",
+    }
+
+
+def test_start_recording_refuses_second_concurrent_recording(companion, monkeypatch, tmp_path):
+    monkeypatch.setattr(companion, "_recording_state_path", lambda: tmp_path / "state.json")
+    companion._save_recording_state({"active": {"pid": 123, "path": "x.mp4"}})
+
+    result = companion.act_start_recording({})
+
+    assert result == {"ok": False, "error": "a recording is already in progress"}
+
+
+def test_start_recording_launches_ffmpeg_and_saves_state(companion, monkeypatch, tmp_path):
+    recordings = tmp_path / "recordings"
+    companion.CONFIG = {**companion.CONFIG, "recordings_folder": str(recordings)}
+    monkeypatch.setattr(companion, "_recording_state_path", lambda: tmp_path / "state.json")
+    monkeypatch.setattr(
+        companion, "act_active_window", lambda _body: {"ok": True, "title": "Desktop"}
+    )
+    launched = []
+
+    class FakeProcess:
+        pid = 4242
+
+    monkeypatch.setattr(
+        companion.subprocess, "Popen", lambda args, **kwargs: launched.append(args) or FakeProcess()
+    )
+
+    result = companion.act_start_recording({"mission": "demo", "max_seconds": 30})
+
+    assert result["ok"] is True
+    assert result["pid"] == 4242
+    assert result["mission"] == "demo"
+    assert result["max_seconds"] == 30
+    assert launched[0][0] == "ffmpeg"
+    state = companion._load_recording_state()
+    assert state["active"]["pid"] == 4242
+
+
+def test_start_recording_caps_max_seconds_to_config_ceiling(companion, monkeypatch, tmp_path):
+    companion.CONFIG = {
+        **companion.CONFIG,
+        "recordings_folder": str(tmp_path / "recordings"),
+        "max_recording_seconds": 60,
+    }
+    monkeypatch.setattr(companion, "_recording_state_path", lambda: tmp_path / "state.json")
+    monkeypatch.setattr(
+        companion, "act_active_window", lambda _body: {"ok": True, "title": "Desktop"}
+    )
+
+    class FakeProcess:
+        pid = 1
+
+    monkeypatch.setattr(companion.subprocess, "Popen", lambda args, **kwargs: FakeProcess())
+
+    result = companion.act_start_recording({"max_seconds": 99999})
+
+    assert result["max_seconds"] == 60
+
+
+def test_stop_recording_verifies_file_and_clears_state(companion, monkeypatch, tmp_path):
+    monkeypatch.setattr(companion, "_recording_state_path", lambda: tmp_path / "state.json")
+    media = tmp_path / "recording.mp4"
+    media.write_bytes(b"video bytes")
+    companion._save_recording_state({
+        "active": {
+            "pid": 999, "path": str(media), "name": "recording.mp4",
+            "mission": None, "target": "full", "window_title": None,
+            "privacy": False, "max_seconds": 30, "started_at": "now",
+        }
+    })
+    monkeypatch.setattr(companion, "_pid_running", lambda pid: False)
+
+    result = companion.act_stop_recording({})
+
+    assert result["ok"] is True
+    assert result["size_bytes"] == len(b"video bytes")
+    assert companion._load_recording_state()["active"] is None
+    assert Path(str(media) + ".json").is_file()
+
+
+def test_stop_recording_kills_process_still_running(companion, monkeypatch, tmp_path):
+    monkeypatch.setattr(companion, "_recording_state_path", lambda: tmp_path / "state.json")
+    media = tmp_path / "recording.mp4"
+    media.write_bytes(b"video bytes")
+    companion._save_recording_state({
+        "active": {"pid": 555, "path": str(media), "name": "recording.mp4"}
+    })
+    monkeypatch.setattr(companion, "_pid_running", lambda pid: True)
+    monkeypatch.setattr(companion.time, "sleep", lambda _seconds: None)
+    killed = []
+    monkeypatch.setattr(
+        companion.subprocess, "run", lambda args, **kwargs: killed.append(args)
+    )
+
+    result = companion.act_stop_recording({})
+
+    assert result["ok"] is True
+    assert killed == [["taskkill", "/PID", "555"]]
+
+
+def test_stop_recording_reports_no_active_recording(companion, monkeypatch, tmp_path):
+    monkeypatch.setattr(companion, "_recording_state_path", lambda: tmp_path / "state.json")
+
+    result = companion.act_stop_recording({})
+
+    assert result == {"ok": False, "error": "no recording is in progress"}
+
+
+def test_list_recordings_returns_sidecars_newest_first(companion, tmp_path):
+    recordings = tmp_path / "recordings"
+    recordings.mkdir()
+    companion.CONFIG = {**companion.CONFIG, "recordings_folder": str(recordings)}
+    (recordings / "a.mp4").write_bytes(b"a")
+    (recordings / "a.mp4.json").write_text(json.dumps({"path": str(recordings / "a.mp4"), "name": "a.mp4"}))
+    (recordings / "b.mp4").write_bytes(b"b")
+    (recordings / "b.mp4.json").write_text(json.dumps({"path": str(recordings / "b.mp4"), "name": "b.mp4"}))
+
+    result = companion.act_list_recordings({})
+
+    assert result["ok"] is True
+    assert {item["name"] for item in result["recordings"]} == {"a.mp4", "b.mp4"}
+    assert all(item["exists"] for item in result["recordings"])
+
+
+def test_list_recordings_empty_folder(companion, tmp_path):
+    companion.CONFIG = {**companion.CONFIG, "recordings_folder": str(tmp_path / "missing")}
+
+    result = companion.act_list_recordings({})
+
+    assert result == {"ok": True, "recordings": []}
+
+
+def test_reconcile_orphaned_recording_finalizes_dead_process(companion, monkeypatch, tmp_path):
+    monkeypatch.setattr(companion, "_recording_state_path", lambda: tmp_path / "state.json")
+    media = tmp_path / "orphan.mp4"
+    media.write_bytes(b"orphaned bytes")
+    companion._save_recording_state({
+        "active": {"pid": 111, "path": str(media), "name": "orphan.mp4"}
+    })
+    monkeypatch.setattr(companion, "_pid_running", lambda pid: False)
+
+    companion._reconcile_orphaned_recording()
+
+    assert companion._load_recording_state()["active"] is None
+    sidecar = json.loads(Path(str(media) + ".json").read_text())
+    assert sidecar["orphaned"] is True
+
+
+def test_reconcile_leaves_genuinely_active_recording_alone(companion, monkeypatch, tmp_path):
+    monkeypatch.setattr(companion, "_recording_state_path", lambda: tmp_path / "state.json")
+    companion._save_recording_state({
+        "active": {"pid": 222, "path": str(tmp_path / "still_going.mp4"), "name": "still_going.mp4"}
+    })
+    monkeypatch.setattr(companion, "_pid_running", lambda pid: True)
+
+    companion._reconcile_orphaned_recording()
+
+    assert companion._load_recording_state()["active"]["pid"] == 222
+
+
+def test_new_capture_actions_are_whitelisted(companion):
+    for action in (
+        "capture_screenshot", "capture_window",
+        "start_recording", "stop_recording", "list_recordings",
+    ):
+        assert action in companion.ACTIONS
 
 
 def test_open_app_still_accepts_legacy_string_paths(companion, monkeypatch):
