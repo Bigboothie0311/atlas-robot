@@ -276,6 +276,32 @@ def test_start_recording_launches_ffmpeg_and_saves_state(companion, monkeypatch,
     assert state["active"]["pid"] == 4242
 
 
+def test_start_recording_uses_broadly_compatible_encoder_flags(companion, monkeypatch, tmp_path):
+    """gdigrab's default codec choice isn't guaranteed to be playable by
+    Windows' stock players -- the command must pin libx264/yuv420p/
+    faststart explicitly rather than relying on ffmpeg's default."""
+    companion.CONFIG = {**companion.CONFIG, "recordings_folder": str(tmp_path / "recordings")}
+    monkeypatch.setattr(companion, "_recording_state_path", lambda: tmp_path / "state.json")
+    monkeypatch.setattr(
+        companion, "act_active_window", lambda _body: {"ok": True, "title": "Desktop"}
+    )
+    launched = []
+
+    class FakeProcess:
+        pid = 1
+
+    monkeypatch.setattr(
+        companion.subprocess, "Popen", lambda args, **kwargs: launched.append(args) or FakeProcess()
+    )
+
+    companion.act_start_recording({})
+
+    command = launched[0]
+    assert "-c:v" in command and command[command.index("-c:v") + 1] == "libx264"
+    assert "-pix_fmt" in command and command[command.index("-pix_fmt") + 1] == "yuv420p"
+    assert "-movflags" in command and command[command.index("-movflags") + 1] == "+faststart"
+
+
 def test_start_recording_caps_max_seconds_to_config_ceiling(companion, monkeypatch, tmp_path):
     companion.CONFIG = {
         **companion.CONFIG,

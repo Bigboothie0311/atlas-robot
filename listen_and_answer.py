@@ -219,13 +219,19 @@ def set_face(expression):
         print("Face update failed:", error)
 
 
-def speak(text):
+def speak(text, play=True):
+    """play=False synthesizes narration to a WAV without playing it over
+    the Pi speaker or touching the HUD "talking" state, and returns the
+    resulting wav_path (same host, so any process on the Pi can read it) —
+    used by the self-showcase content pipeline. A plain speak(text) call
+    right after still plays normally; there's no lingering mute state."""
     response = requests.post(
         f"{HUB}/speak",
-        json={"text": text},
+        json={"text": text, "play": play},
         timeout=45
     )
     response.raise_for_status()
+    return response.json().get("wav_path")
 
 
 def cue_listening():

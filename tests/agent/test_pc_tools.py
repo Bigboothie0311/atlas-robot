@@ -102,6 +102,10 @@ class FakeSFTPClient:
         self.arguments = (remote_path, kwargs)
         return self.transfer_result
 
+    def upload(self, local_path, remote_path):
+        self.arguments = (local_path, remote_path)
+        return self.transfer_result
+
 
 def build_tools():
     registry = ToolRegistry()
@@ -146,7 +150,7 @@ def test_real_pc_tools_are_registered() -> None:
         tools,
     ) = build_tools()
 
-    assert len(tools) == 12
+    assert len(tools) == 13
     assert [
         tool.name
         for tool in registry.list_tools()
@@ -163,6 +167,7 @@ def test_real_pc_tools_are_registered() -> None:
         "pc.search_files",
         "pc.start_screen_recording",
         "pc.stop_screen_recording",
+        "pc.upload_file",
     ]
     assert registry.get(
         "pc.ensure_online"
@@ -278,6 +283,44 @@ def test_verified_download_executes_and_verifies() -> None:
     assert sftp_client.arguments == (
         remote_path,
         {"local_name": None},
+    )
+    assert verification.verified is True
+    assert (
+        verification.evidence["verified"]
+        is True
+    )
+
+
+def test_verified_upload_executes_and_verifies() -> None:
+    (
+        registry,
+        verifier,
+        _pc_client,
+        _file_search,
+        sftp_client,
+        _tools,
+    ) = build_tools()
+    remote_path = (
+        r"C:\Users\wesle\Videos\AtlasRecordings\fixed.mp4"
+    )
+    call = ToolCall(
+        tool_name="pc.upload_file",
+        arguments={
+            "local_path": (
+                "/home/atlas/atlas-staging/incoming/fixed.mp4"
+            ),
+            "remote_path": remote_path,
+        },
+    )
+
+    result = execute(registry, call)
+    verification = verifier.verify(call, result)
+
+    assert result.status is ResultStatus.SUCCESS
+    assert result.output["verified"] is True
+    assert sftp_client.arguments == (
+        "/home/atlas/atlas-staging/incoming/fixed.mp4",
+        remote_path,
     )
     assert verification.verified is True
     assert (

@@ -146,6 +146,12 @@ REGISTRY = [
      "aliases": ["show me my PC screen", "show me the newest screenshot"], "confirm": False, "requires": "pc", "category": "pc"},
     {"id": "pc_screen_recording", "name": "PC screen recording", "description": "records a short screen-capture clip on the PC",
      "aliases": ["record my PC screen", "record a clip of my screen"], "confirm": False, "requires": "pc", "category": "pc"},
+
+    # --- Self-showcase content -------------------------------------
+    {"id": "self_showcase_record", "name": "record a promo Reel", "description": "records a narrated tour of Atlas's own HUD screen (weather radar, self-diagnostics) and edits it into a 9:16 Reel -- this is the real self-recording path: his own screen, not the PC's, since the physical camera can't film Atlas (see the self_record_clip note above) and a PC screen recording would just show the owner's desktop, not Atlas",
+     "aliases": ["make a promo video of yourself", "record yourself a reel", "make an Instagram reel"], "confirm": False, "requires": "none", "category": "content"},
+    {"id": "instagram_publish", "name": "Instagram publish", "description": "publishes an exact finished Reel and caption to the Instagram account",
+     "aliases": ["post that to Instagram", "publish the reel"], "confirm": True, "requires": "none", "category": "content"},
     {"id": "pc_apps", "name": "PC windows", "description": "lists what's open on the PC",
      "aliases": ["what's open on my PC"], "confirm": False, "requires": "pc", "category": "pc"},
     {"id": "pc_health", "name": "PC health", "description": "reports PC CPU, RAM, disk, and uptime",

@@ -7,6 +7,7 @@ from typing import Any
 
 import logbook
 
+from atlas_agent.content_tools import register_content_tools
 from atlas_agent.event_bus import EventBus
 from atlas_agent.executor import ToolExecutor
 from atlas_agent.local_tools import register_local_tools
@@ -106,10 +107,12 @@ def build_pc_agent_runtime(
         port=ssh_port,
     )
 
+    pc_client = PCClient()
+
     register_pc_tools(
         registry,
         verifier,
-        pc_client=PCClient(),
+        pc_client=pc_client,
         file_search=WindowsFileSearch(
             host=normalized_host,
             username=normalized_username,
@@ -126,6 +129,11 @@ def build_pc_agent_runtime(
             Path("/home/atlas/atlas-robot"),
         ),
         mission_store_path=mission_store_path,
+    )
+    register_content_tools(
+        registry,
+        verifier,
+        staging_directory=staging_directory,
     )
 
     if recordings_remote_root is not None:

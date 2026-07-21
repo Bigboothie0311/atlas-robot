@@ -92,6 +92,27 @@ def register_pc_tools(
             )
         )
 
+    def upload_file(
+        local_path: str,
+        remote_path: str,
+    ) -> dict[str, Any]:
+        if not isinstance(local_path, str):
+            raise ValueError(
+                "local_path must be a string"
+            )
+
+        if not isinstance(remote_path, str):
+            raise ValueError(
+                "remote_path must be a string"
+            )
+
+        return asdict(
+            sftp_client.upload(
+                local_path,
+                remote_path,
+            )
+        )
+
     def active_apps() -> dict[str, Any]:
         return asdict(
             pc_client.execute("active_apps")
@@ -340,6 +361,43 @@ def register_pc_tools(
                     "required": [
                         "remote_path",
                         "local_name",
+                    ],
+                    "additionalProperties": False,
+                }
+            },
+        ),
+        AtlasTool(
+            name="pc.upload_file",
+            description=(
+                "Upload a local Pi file to an approved Windows "
+                "path and verify size and SHA-256."
+            ),
+            runs_on="pi",
+            handler=upload_file,
+            permission_level=0,
+            timeout_seconds=300,
+            metadata={
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "local_path": {
+                            "type": "string",
+                            "description": (
+                                "Absolute path of the local file "
+                                "on the Pi to upload."
+                            ),
+                        },
+                        "remote_path": {
+                            "type": "string",
+                            "description": (
+                                "Exact absolute Windows destination "
+                                "path, inside an approved root."
+                            ),
+                        },
+                    },
+                    "required": [
+                        "local_path",
+                        "remote_path",
                     ],
                     "additionalProperties": False,
                 }
@@ -625,6 +683,20 @@ def register_pc_tools(
             ),
             failure_reason=(
                 "The transferred file was not verified."
+            ),
+        ),
+    )
+    verifier.register(
+        "pc.upload_file",
+        lambda call, result: _verify_boolean_flag(
+            result.output,
+            flag="verified",
+            success_reason=(
+                "The uploaded file passed size and "
+                "SHA-256 verification."
+            ),
+            failure_reason=(
+                "The uploaded file was not verified."
             ),
         ),
     )

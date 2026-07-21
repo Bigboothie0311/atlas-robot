@@ -460,7 +460,15 @@ def act_start_recording(body):
         command.extend(["-i", f"title={window_title}"])
     else:
         command.extend(["-i", "desktop"])
-    command.extend(["-t", str(max_seconds), str(out)])
+    # Explicit encoder settings: gdigrab's default codec choice for an
+    # .mp4 container isn't guaranteed to be something Windows' stock
+    # players can decode. libx264/yuv420p/faststart is the safe,
+    # broadly-compatible baseline every player and Instagram's own
+    # upload pipeline expects.
+    command.extend([
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+        "-t", str(max_seconds), str(out),
+    ])
 
     try:
         process = subprocess.Popen(command)

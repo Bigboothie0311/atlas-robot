@@ -1,0 +1,161 @@
+# A.T.L.A.S. V2/V3 — Phase 11/12, Session 1
+
+> ## ⬛ CHECKPOINT — read this block first, every session
+> **This is the newest handoff file as of 2026-07-21.** Check the repo
+> root for a newer `ATLAS_V2_AGENT_HANDOFF_*.md` by date first
+> (`ls -lat *.md`) before trusting this one.
+>
+> - **Branch:** `atlas-v2-agent`. **714 tests passing.**
+> - **Phase 11 (self-showcase edit pipeline) and Phase 12 (Instagram
+>   publish) are DONE and live_verified** — see
+>   `implementation_ledger.py` entries `phase11_showcase_media` and
+>   `phase12_instagram` for full evidence. This closes out the item
+>   `ATLAS_V2_AGENT_HANDOFF_PHASE4_SESSION4.md` left as "Next up."
+> - **Real live proof, not a claim:** a real narrated Reel was recorded,
+>   edited, and published tonight —
+>   https://www.instagram.com/reel/DbDnA9rDk9M/ (media_id
+>   `18059282249759566`). A `dry_run=True` pass proved token scope and
+>   the publish mechanics before the real post ran.
+
+## What got built
+
+- **`content_pipeline.py`** (new, repo root) — `render_narration()` (Piper
+  synth via `robot_hub`'s new `/speak` `play=False` mode, never played
+  aloud), `edit_reel()` (one deterministic ffmpeg pass: mux narration
+  onto the recording, reframe to 1080x1920, `loudnorm`, `-ar 48000`),
+  `build_caption()`.
+- **`instagram_publish.py`** (new, repo root) — the write side of
+  Instagram Graph API publishing. `instagram_stats.py` was always
+  read-only; this is genuinely new.
+- **`atlas_agent/content_tools.py`** (new) — `content.record_self_showcase`
+  (permission_level=0) and `content.publish_to_instagram`
+  (permission_level=2, `CONFIRMATION_REQUIRED` — the only tool in the
+  whole registry at that level). Registered in
+  `runtime_factory.build_pc_agent_runtime()`.
+- **`atlas_agent/pc_tools.py`** — added `pc.upload_file` (mirrors the
+  existing `pc.download_file`, wraps `SFTPClient.upload()`, which
+  existed but wasn't exposed as a tool yet).
+- **`robot_hub.py`** — `/speak` gained a `play` field (default `True`);
+  `play=False` synthesizes without touching the speaker or the HUD
+  "talking" state and returns the wav_path instead of deleting it. No
+  lingering mute state — it's a per-call flag.
+- **`windows-companion/atlas_companion.py`** `act_start_recording` — added
+  explicit `-c:v libx264 -pix_fmt yuv420p -movflags +faststart`. This
+  also fixed a **real bug Wesley hit**: an existing recording
+  (`atlas intro video for instagram.mp4`) wouldn't play on Windows — root
+  cause was the `moov` atom landing at the end of the file (no
+  `+faststart`), not a codec problem. Fixed losslessly in place
+  (`-c copy -movflags +faststart`) and handed back as
+  `atlas intro video for instagram_FIXED.mp4` on the Desktop.
+
+## Two real bugs found only by actually running this live (not from unit tests)
+
+1. **My own local file server didn't support `HEAD` requests.** Instagram's
+   video fetcher needs one; without it, Instagram's container just went to
+   a bare, undiagnosable `ERROR` status with no further detail from the
+   API. Fixed: `_SingleFileHandler` now supports `HEAD` and byte-range
+   `GET` (many fetchers use ranged reads, not one whole-file GET).
+2. **`ffmpeg`'s `loudnorm` filter doesn't preserve the input audio sample
+   rate.** Without pinning `-ar` explicitly downstream of it, the edited
+   reel ended up with an unpinned 96kHz mono track — Instagram silently
+   rejected it (same bare `ERROR`, no detail). Fixed: `-ar 48000` pinned
+   explicitly in `edit_reel()`'s ffmpeg command.
+
+Both are covered by regression tests now (`test_content_pipeline.py`,
+`test_instagram_publish.py`'s `ServeFileLocallyTests`).
+
+## Why Tailscale Funnel, and how it's bounded
+
+Instagram's publish API for this account (`graph.instagram.com`, the
+direct "Instagram API with Instagram Login" product, confirmed live) flatly
+requires a public `video_url` — the resumable/byte-upload path this module
+first tried (`upload_type=resumable`) is rejected outright with "The
+parameter video_url is required." This robot has no public hosting and is
+deliberately never port-forwarded.
+
+`instagram_publish._funnel_video_url()` briefly serves just the one
+video file (random unguessable path, no directory listing) over
+Tailscale Funnel — real public HTTPS via Tailscale's infrastructure, not
+a router port-forward — for exactly the span of container creation +
+processing polling, then tears it down unconditionally in a
+`contextlib.contextmanager`'s `finally`, even on error. Verified live
+that the exposure is genuinely public (not just resolving locally within
+the tailnet via MagicDNS — that gave a false-positive the first time
+this was tested) by forcing a fetch through the real public relay IP,
+and verified it's fully torn down afterward (`tailscale funnel status`
+→ "No serve config").
+
+**One-time setup this required, both now done:**
+- Funnel enabled for the tailnet (owner did this in the Tailscale admin
+  console).
+- `sudo tailscale set --operator=atlas` on the Pi, so funnel commands
+  don't need an interactive sudo prompt.
+
+## Correction, same day: recording the wrong screen
+
+The first version of `content.record_self_showcase` recorded the Windows
+PC's screen (via `pc.start_screen_recording`), reusing the same primitive
+Phase 4 already proved live. **Wesley caught, from actually watching the
+output, that this showed his own Windows desktop, not Atlas** — the
+whole point of self-showcase content is Atlas narrating his own
+features, which only exist on his own HUD, not the PC.
+
+Real fix, same session: `content.record_self_showcase` now records
+**Atlas's own HUD kiosk display** and drives a scripted, narrated tour
+through real HUD states between clips — weather radar open/close,
+self-diagnostics — instead of touching the PC/Windows companion at all
+for recording.
+
+- **`hud_capture.py`** (new) — the kiosk runs on Wayland via `cage`
+  (`atlas-hud.service`), not X11. There's no installed video-capture
+  tool for this wlroots kiosk, so `record_hud_clip()` frame-stitches
+  periodic `grim` (Wayland-native screenshot) stills into an mp4 via
+  ffmpeg's image2 sequence input.
+- **Found a second real bug fixing this**: `atlas_agent/pi_tools.py`'s
+  existing `capture_hud_frame` tool used `scrot` against `DISPLAY=:0`
+  (X11) — confirmed live this silently captured a **solid-black frame,
+  every time**, on this Wayland kiosk. `pi_tools.py` now shares
+  `hud_capture.capture_frame` (grim-based), fixing that tool too.
+- **`content_pipeline.py`** gained `concat_clips()` (ffmpeg concat
+  demuxer, stream copy) to join each tour beat's already-edited clip
+  into one final Reel.
+- **`atlas_agent/content_tools.py`**: `DEFAULT_TOUR` is intro → weather
+  radar → self-diagnostics → outro, each with its own narration line.
+  `_apply_hud_action()` drives the real `/hud/weather_overlay` and
+  `/diagnostics_report` endpoints (reusing `diagnostics.run_structured_checks()`,
+  the same function the real "run diagnostics" voice command uses) — not
+  fakes. `/hud/recording` is flipped around the whole tour, finally
+  giving that dormant HUD indicator (built in an earlier Phase 4 session,
+  noted then as "unused until self-recording is voice-reachable again")
+  something real to fire for.
+- `register_content_tools()` no longer takes `pc_client`/`sftp_client` —
+  this feature has zero PC/Windows-companion dependency now.
+
+**Live-verified the fix is real, not just "it ran without erroring":**
+produced a 17.5s, 1080x1920 Reel; sampled 6 frames spread across the
+timeline and confirmed they're all visually distinct (different MD5
+hashes, tens of thousands of distinct colors each) — ruling out both the
+old failure modes (frozen single frame, solid black) — plus a full
+ffmpeg decode pass with zero errors.
+
+## Known follow-up, not blocking
+
+- `DEFAULT_TOUR` only covers weather radar + self-diagnostics. Adding
+  more beats (e.g. status report, capability list, printer status) is a
+  one-line addition to the tuple in `atlas_agent/content_tools.py` — no
+  architecture change needed. Callers can also pass a fully custom
+  `beats` list to `content.record_self_showcase` already.
+- Frame rate for HUD clips is a fixed 2fps (`hud_capture.CAPTURE_FPS`) —
+  fine for mostly-static panel content; would look choppy for anything
+  with real motion/animation on the HUD.
+- No background music / branding watermark — deliberately out of scope
+  (copyright risk for music; no branding asset exists in the repo; not
+  asked for).
+
+## Scope note
+
+This is the practical MVP of Phase 11/12 (narrate → record → mux →
+caption → publish), not the full aspirational Phase 11 spec from the
+master mission doc (automatic evidence-clip scoring across HUD/Graphify/
+coding sessions, animated captions, picture-in-picture, background-audio
+ducking). Those remain not started.

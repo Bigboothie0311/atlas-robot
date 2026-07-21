@@ -1370,12 +1370,20 @@ def wake_pc():
     return jsonify({"ok": True, "message": message})
 
 
-def _speak_text(text):
-    """Synthesizes and plays text aloud. Raises on failure. Shared by the
-    /speak route and the proactive watcher thread, so both go through the
-    same state/expression handling and the same piper_lock. Playback can be
-    cut short by POST /interrupt (e.g. a barge-in wake word) — that's a
-    normal early return, not a failure."""
+def _speak_text(text, play=True):
+    """Synthesizes text via Piper and, by default, plays it aloud. Raises
+    on failure. Shared by the /speak route and the proactive watcher
+    thread, so both go through the same state/expression handling and the
+    same piper_lock. Playback can be cut short by POST /interrupt (e.g. a
+    barge-in wake word) — that's a normal early return, not a failure.
+
+    play=False synthesizes to a WAV without touching the speaker or the
+    HUD "talking" state, and returns the WAV path instead of deleting it
+    — the caller owns cleanup. Used for narration that needs to exist as
+    audio (e.g. muxed into a self-showcase recording) without being heard
+    out loud in the room. There's no lingering mute state to reset
+    afterward: it's a per-call flag, so the very next normal speak() call
+    plays aloud as usual."""
     global _current_playback_process, _playback_was_interrupted
 
     if piper_voice is None:
@@ -1406,6 +1414,9 @@ def _speak_text(text):
                     wav_file,
                     syn_config=SynthesisConfig(volume=volume)
                 )
+
+            if not play:
+                return wav_path
 
             # Only flip to "talking" once synthesis is actually done and
             # playback is about to start — synthesis alone measured 1.3s+
@@ -1448,12 +1459,13 @@ def _speak_text(text):
                     "valid with 'aplay -l'"
                 )
     finally:
-        with state_lock:
-            robot_state["speaking"] = False
-            robot_state["expression"] = previous_expression
+        if play:
+            with state_lock:
+                robot_state["speaking"] = False
+                robot_state["expression"] = previous_expression
 
-        if wav_path and os.path.exists(wav_path):
-            os.remove(wav_path)
+            if wav_path and os.path.exists(wav_path):
+                os.remove(wav_path)
 
 
 CHIME_PATH = "/home/atlas/atlas-robot/data/chime.wav"
@@ -1630,6 +1642,7 @@ def interrupt():
 def speak():
     data = request.get_json(silent=True) or {}
     text = str(data.get("text", "")).strip()
+    play = bool(data.get("play", True))
 
     if not text:
         return jsonify({
@@ -1638,12 +1651,13 @@ def speak():
         }), 400
 
     try:
-        _speak_text(text)
+        wav_path = _speak_text(text, play=play)
 
         return jsonify({
             "ok": True,
             "spoken": text,
-            "voice": PIPER_MODEL
+            "voice": PIPER_MODEL,
+            "wav_path": wav_path if not play else None
         })
 
     except Exception as error:

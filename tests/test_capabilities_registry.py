@@ -26,3 +26,17 @@ def test_instruction_summary_mentions_recording():
     summary = capabilities.instruction_summary()
     assert "self-recording clip" not in summary
     assert "PC screen recording" in summary
+
+
+def test_self_showcase_and_instagram_publish_are_listed():
+    ids = {entry["id"] for entry in capabilities.REGISTRY}
+    assert "self_showcase_record" in ids
+    assert "instagram_publish" in ids
+
+
+def test_instagram_publish_requires_confirmation():
+    entry = next(
+        entry for entry in capabilities.REGISTRY
+        if entry["id"] == "instagram_publish"
+    )
+    assert entry["confirm"] is True

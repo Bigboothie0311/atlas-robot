@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import os
-import subprocess
 import time
 from collections.abc import Callable
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
+import hud_capture
 from atlas_agent.sftp_client import SFTPClient
 from atlas_agent.tool_registry import ToolRegistry
 from atlas_agent.tools import AtlasTool
@@ -15,27 +14,21 @@ from atlas_agent.verifier import (
     VerificationCheck,
 )
 
-HUD_DISPLAY = ":0"
-
 HudFrameHandler = Callable[[Path], bool]
 
 
 def _capture_hud_frame_file(out_path: Path) -> bool:
-    """Grabs a still of the kiosk's own X display via scrot. Degrades to
-    a plain False (never raises) so a missing scrot install or headless
-    kiosk just fails this one capture rather than crashing the agent."""
-    env = {**os.environ, "DISPLAY": HUD_DISPLAY}
+    """Grabs a still of the kiosk's own Wayland display via grim.
+    Degrades to a plain False (never raises) so a missing grim install
+    or headless kiosk just fails this one capture rather than crashing
+    the agent.
 
-    try:
-        subprocess.run(
-            ["scrot", "--overwrite", str(out_path)],
-            env=env, check=True, timeout=15,
-        )
-    except (subprocess.SubprocessError, OSError) as error:
-        print("HUD frame capture failed:", type(error).__name__, error, flush=True)
-        return False
-
-    return out_path.is_file() and out_path.stat().st_size > 0
+    Previously used scrot against DISPLAY=:0 (X11) -- confirmed live
+    2026-07-21 that silently produced a solid-black frame every time,
+    since this kiosk runs on Wayland via `cage` (atlas-hud.service), not
+    X11. grim is the Wayland-native equivalent and captures the kiosk's
+    real content correctly; see hud_capture.py, which this now shares."""
+    return hud_capture.capture_frame(out_path)
 
 
 def register_pi_capture_tools(

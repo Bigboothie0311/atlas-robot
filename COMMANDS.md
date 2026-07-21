@@ -124,6 +124,23 @@ spoken version of this list.
 | "find me videos showing how to …" | YouTube search, fullscreen, no Shorts | Local |
 | "how's my PC" / "clean up my PC" | Health report / temp cleanup | Local |
 
+## Self-showcase content
+| Say | Does | Cost |
+|-----|------|------|
+| "make a promo video of yourself" / "record yourself a reel" / "make an Instagram reel" | Records a narrated tour of **Atlas's own HUD screen** — opens the weather radar, runs and shows self-diagnostics, narrates each (rendered silently, never spoken aloud — normal speech resumes right after) — and edits it into a 9:16 Reel with a draft caption. Doesn't publish anything. | Local |
+| "make a video where you say ..." / "record a reel about ..." (custom script) | Not stuck to the default weather/diagnostics tour — describe any narration lines, in any order, and Atlas records and edits exactly that script instead. | Local |
+| "post that to Instagram" / "publish the reel" | Publishes an exact finished Reel + caption to the account. Public and irreversible — always confirms the exact media and caption first. | Local |
+
+> The physical camera faces the room, not Atlas, so "record yourself" means
+> a narrated recording of his own HUD kiosk display, not literal
+> self-video — see the `self_record_clip` note in `capabilities.py`. A PC
+> screen recording was tried first and rejected: it showed the owner's
+> Windows desktop, not Atlas. Publishing briefly exposes just the one
+> finished video file over Tailscale Funnel (not a port-forward) so
+> Instagram's servers can fetch it, and tears that exposure back down
+> immediately after — nothing stays publicly reachable outside that one
+> request.
+
 ## Emergency
 | Say | Does | Cost |
 |-----|------|------|
