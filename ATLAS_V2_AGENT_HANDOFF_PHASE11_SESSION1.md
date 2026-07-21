@@ -5,17 +5,32 @@
 > root for a newer `ATLAS_V2_AGENT_HANDOFF_*.md` by date first
 > (`ls -lat *.md`) before trusting this one.
 >
-> - **Branch:** `atlas-v2-agent`. **714 tests passing.**
+> - **Branch:** `atlas-v2-agent`. **300 tests passing** (`./venv/bin/python
+>   -m unittest discover -s tests -p "test_*.py"` — this repo's own
+>   `venv/`, not system Python, which is missing `psutil` and others).
 > - **Phase 11 (self-showcase edit pipeline) and Phase 12 (Instagram
 >   publish) are DONE and live_verified** — see
 >   `implementation_ledger.py` entries `phase11_showcase_media` and
 >   `phase12_instagram` for full evidence. This closes out the item
->   `ATLAS_V2_AGENT_HANDOFF_PHASE4_SESSION4.md` left as "Next up."
+>   `ATLAS_V2_AGENT_HANDOFF_PHASE4_SESSION4.md` left as "Next up." All of
+>   Phase 11/12's files were sitting uncommitted until this session —
+>   now committed (`9724ef4`).
 > - **Real live proof, not a claim:** a real narrated Reel was recorded,
 >   edited, and published tonight —
 >   https://www.instagram.com/reel/DbDnA9rDk9M/ (media_id
 >   `18059282249759566`). A `dry_run=True` pass proved token scope and
 >   the publish mechanics before the real post ran.
+> - **Session 1 continuation, same day:** the first real Instagram post
+>   above got cut off mid-sentence — `content_pipeline.CAPTION_MAX_LENGTH`
+>   was an arbitrary `200`, nowhere close to Instagram's real 2200-char
+>   cap. Fixed (see "Follow-up fixes" below). Also clarified that
+>   `content.record_self_showcase`'s `beats` param already lets a caller
+>   hand it a fully custom narration script instead of the default tour
+>   — that capability existed in the code but nothing surfaced it in the
+>   tool description or `COMMANDS.md`, so it read as fixed-script only.
+>   Fixed both. **Evaluated `github.com/calesthio/OpenMontage`** (Wesley's
+>   ask: "let him edit videos in a not-so-shitty way") — verdict below,
+>   not adopted.
 
 ## What got built
 
@@ -159,3 +174,64 @@ caption → publish), not the full aspirational Phase 11 spec from the
 master mission doc (automatic evidence-clip scoring across HUD/Graphify/
 coding sessions, animated captions, picture-in-picture, background-audio
 ducking). Those remain not started.
+
+## Same-day follow-up: caption length, custom scripts, OpenMontage
+
+Three things from Wesley after the first real post went up.
+
+**1. Caption got cut off mid-sentence on the live Reel.**
+`content_pipeline.CAPTION_MAX_LENGTH` was `200` — an arbitrary v1
+placeholder, not Instagram's actual limit (2200 characters). Raised to
+`2200` in `content_pipeline.py`. `tests/test_content_pipeline.py`'s
+truncation test bumped its fixture past the new threshold (`"x" * 3000`,
+was `500`) so it still actually exercises truncation instead of silently
+passing without ever hitting the new limit.
+
+**2. "Make sure he has full capabilities — custom videos, not some
+predetermined script."** This mostly already worked and wasn't
+discoverable: `content.record_self_showcase`'s `beats` param has always
+accepted a fully custom list of `{narration, action}` overriding
+`DEFAULT_TOUR` entirely — arbitrary narration text, arbitrary order,
+arbitrary length. Nothing said so anywhere a caller (or Wesley, reading
+`COMMANDS.md`) would see it, so it read as fixed-script. Fixed by
+rewriting the tool description, the `beats`/`action` JSON-schema
+descriptions in `atlas_agent/content_tools.py`, and adding a row to
+`COMMANDS.md`'s Self-showcase content table. No behavior changed, only
+what's documented as possible. Also documented (wasn't before) that an
+unrecognized `action` string never errors — it's best-effort, the HUD
+just stays on whatever it was already showing for that beat.
+
+**3. Evaluated `github.com/calesthio/OpenMontage`** (cloned to
+`/tmp/.../scratchpad/OpenMontage` for inspection, not vendored in) —
+Wesley's ask was "let him edit videos in a not-so-shitty way." **Verdict:
+don't adopt it, at least not wholesale.** It's a full agentic *video
+production* framework: an LLM coding agent (Claude Code/Cursor/etc.)
+drives it to generate videos from prompts or reference clips, using
+paid image/video/TTS provider APIs (fal.ai, Veo, Kling, OpenAI, ...),
+composed and rendered through Remotion (a Node.js/React video-rendering
+engine), with its own web UI ("Backlot"), pipeline/schema system, and
+skills directory. None of that matches this project's actual constraints:
+- Everything here is deliberately free and local (Piper TTS, plain
+  ffmpeg, no paid generation APIs) — see [[feedback_outbound_calls_policy]]
+  in memory. OpenMontage's whole value proposition assumes paid
+  generation providers.
+- It'd add a Node.js/Remotion runtime dependency to a Raspberry Pi that's
+  already resource-constrained enough that HUD capture runs at a fixed
+  2fps (`hud_capture.CAPTURE_FPS`).
+- It has no "record my own live screen" input mode at all — its inputs
+  are text prompts, reference videos to remix, or AI-generated/stock
+  footage. Atlas's whole self-showcase premise (his own real HUD,
+  narrating his own real features) doesn't map onto what it's built to
+  do.
+
+**What's actually worth borrowing, not built yet (needs a decision
+before doing it, since it's new scope, not a bugfix):** two ideas from
+OpenMontage's output quality that would genuinely make the Reels look
+less "shitty" without adopting any of its stack — both doable in plain
+ffmpeg, already a dependency:
+- Burned-in captions per beat (ffmpeg `drawtext`/subtitle filter),
+  instead of narration-only audio with no on-screen text.
+- Crossfade transitions between tour beats in `concat_clips()` instead
+  of the current hard cuts (would need to move off the pure stream-copy
+  concat demuxer to an `xfade`-based filter graph, i.e. a real
+  re-encode, not just a copy).
