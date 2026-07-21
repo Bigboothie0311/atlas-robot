@@ -23,6 +23,15 @@ REQUEST_TIMEOUT_SECONDS = 45
 FFMPEG_TIMEOUT_SECONDS = 300
 REEL_WIDTH = 1080
 REEL_HEIGHT = 1920
+# Pinned explicitly in edit_reel()'s output -- confirmed live: mixing a
+# 24fps HUD clip (hud_capture.CAPTURE_FPS) with a 30fps PC screen-
+# recording clip (windows-companion/atlas_companion.py's gdigrab capture)
+# in the same Reel produced non-monotonic DTS on decode after
+# concat_clips()'s stream-copy concat, since that assumes every input
+# segment already shares the same frame rate/timebase. Every beat's clip
+# gets re-encoded here regardless of source, so forcing one consistent
+# output rate here is what actually makes that assumption true.
+REEL_FRAME_RATE = 24
 # Instagram's actual caption cap is 2200 characters -- 200 was an
 # arbitrary placeholder that truncated real narration lines mid-sentence
 # well before the platform's own limit kicked in.
@@ -83,6 +92,14 @@ def edit_reel(video_path, narration_wav_path, out_path) -> str:
         ),
         "-map", "[v]", "-map", "[a]",
         "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        # -r alone (just relabeling the muxer's declared rate) still let
+        # one non-monotonic-DTS warning through on decode when mixing a
+        # 24fps HUD clip with a 30fps PC-recording clip -- confirmed
+        # live. -fps_mode cfr forces ffmpeg to actually duplicate/drop
+        # frames to real, evenly-spaced constant-frame-rate timestamps
+        # rather than just relabeling them; combined with -r, that
+        # cleared the warning entirely on the same mixed-source clip.
+        "-fps_mode", "cfr", "-r", str(REEL_FRAME_RATE),
         # loudnorm's internal true-peak limiting resamples for its own
         # analysis and doesn't reliably preserve the input rate on
         # output -- confirmed live: without pinning -ar, this produced
@@ -120,9 +137,17 @@ def edit_reel(video_path, narration_wav_path, out_path) -> str:
 
 
 def concat_clips(clip_paths, out_path) -> str:
-    """Concatenates already-edited, uniformly-encoded clips (same codec/
-    resolution -- each produced by edit_reel) into one final video via
-    ffmpeg's concat demuxer with a stream copy, no re-encode needed."""
+    """Concatenates already-edited clips (each produced by edit_reel)
+    into one final video via ffmpeg's concat demuxer, re-encoding rather
+    than stream-copying. Stream-copy (-c copy) was the original
+    approach and is fine when every clip shares one source's exact
+    timebase, but confirmed live: mixing clips from different real
+    sources (a 24fps HUD recording and a 30fps PC screen recording) fed
+    to -c copy produced non-monotonic DTS on decode -- pinning fps in
+    edit_reel() alone didn't fully clear it, only actually re-encoding
+    the joined stream here did. This Pi has CPU headroom to spare for
+    it (confirmed live: well under half its 4 cores' capacity even
+    mid-recording -- see hud_capture.py)."""
     if not clip_paths:
         raise ContentPipelineError("no clips to concatenate")
 
@@ -136,7 +161,10 @@ def concat_clips(clip_paths, out_path) -> str:
     command = [
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
         "-f", "concat", "-safe", "0", "-i", list_path,
-        "-c", "copy", str(out_path),
+        "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        "-fps_mode", "cfr", "-r", str(REEL_FRAME_RATE),
+        "-c:a", "aac", "-ar", "48000",
+        str(out_path),
     ]
 
     try:

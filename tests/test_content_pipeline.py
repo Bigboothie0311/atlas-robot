@@ -75,6 +75,14 @@ class EditReelTests(unittest.TestCase):
         # pinned explicitly downstream of it.
         self.assertIn("-ar", command)
         self.assertEqual(command[command.index("-ar") + 1], "48000")
+        # Pinned so concat_clips()'s stream-copy concat can safely mix
+        # differently-sourced clips (e.g. 24fps HUD + 30fps PC screen
+        # recording) without producing non-monotonic DTS on decode.
+        self.assertIn("-r", command)
+        self.assertEqual(
+            command[command.index("-r") + 1],
+            str(content_pipeline.REEL_FRAME_RATE),
+        )
 
     @mock.patch.object(content_pipeline.subprocess, "run")
     def test_raises_on_ffmpeg_failure(self, run):
@@ -100,7 +108,9 @@ class ConcatClipsTests(unittest.TestCase):
     @mock.patch.object(content_pipeline.Path, "is_file", return_value=True)
     @mock.patch.object(content_pipeline.Path, "stat")
     @mock.patch.object(content_pipeline.subprocess, "run")
-    def test_builds_concat_command_with_stream_copy(self, run, stat, _is_file):
+    def test_builds_concat_command_re_encoding_at_a_fixed_frame_rate(
+        self, run, stat, _is_file
+    ):
         stat.return_value = mock.Mock(st_size=1234)
 
         result = content_pipeline.concat_clips(
@@ -112,8 +122,17 @@ class ConcatClipsTests(unittest.TestCase):
         self.assertEqual(command[0], "ffmpeg")
         self.assertIn("-f", command)
         self.assertIn("concat", command)
-        self.assertIn("-c", command)
-        self.assertIn("copy", command)
+        # Re-encodes rather than stream-copying -- confirmed live that
+        # -c copy produced non-monotonic DTS when clips came from
+        # different real sources (24fps HUD + 30fps PC recording).
+        self.assertNotIn("copy", command)
+        self.assertIn("-fps_mode", command)
+        self.assertIn("cfr", command)
+        self.assertIn("-r", command)
+        self.assertEqual(
+            command[command.index("-r") + 1],
+            str(content_pipeline.REEL_FRAME_RATE),
+        )
 
     def test_raises_on_empty_clip_list(self):
         with self.assertRaises(content_pipeline.ContentPipelineError):

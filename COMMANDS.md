@@ -127,15 +127,19 @@ spoken version of this list.
 ## Self-showcase content
 | Say | Does | Cost |
 |-----|------|------|
-| "make a promo video of yourself" / "record yourself a reel" / "make an Instagram reel" | Records a narrated tour of **Atlas's own HUD screen** — opens the weather radar, runs and shows self-diagnostics, narrates each (rendered silently, never spoken aloud — normal speech resumes right after) — and edits it into a 9:16 Reel with a draft caption. Doesn't publish anything. | Local |
-| "make a video where you say ..." / "record a reel about ..." (custom script) | Not stuck to the default weather/diagnostics tour — describe any narration lines, in any order, and Atlas records and edits exactly that script instead. | Local |
+| "make a promo video of yourself" / "record yourself a reel" / "make an Instagram reel" | Records a narrated, varied tour of **Atlas's own HUD screen** — weather radar and self-diagnostics always show up, phrasing and a few extra feature beats are randomized each time so it's not the same script and clip twice in a row — narrated (rendered silently, never spoken aloud — normal speech resumes right after) — and edits it into a 9:16 Reel with a draft caption. Doesn't publish anything. | Local |
+| "make a video where you say ..." / "record a reel about ..." (custom script) | Not stuck to the default tour — describe any narration lines, in any order, and Atlas records and edits exactly that script instead. | Local |
+| (sometimes, randomly, part of the default tour; or ask directly) show what he can do on the PC | Can hop over to a real clip of the **Windows PC's own screen** for a beat or two — opening a YouTube video, opening an app — then hop back to his own HUD, and stitch both sources into one final Reel. Requires the PC connection to be configured. | Local |
 | "post that to Instagram" / "publish the reel" | Publishes an exact finished Reel + caption to the account. Public and irreversible — always confirms the exact media and caption first. | Local |
 
 > The physical camera faces the room, not Atlas, so "record yourself" means
-> a narrated recording of his own HUD kiosk display, not literal
-> self-video — see the `self_record_clip` note in `capabilities.py`. A PC
-> screen recording was tried first and rejected: it showed the owner's
-> Windows desktop, not Atlas. Publishing briefly exposes just the one
+> a narrated recording of his own HUD kiosk display by default, not literal
+> self-video — see the `self_record_clip` note in `capabilities.py`. Using
+> a PC screen recording as a *stand-in* for "record yourself" was tried
+> first and rejected: it showed the owner's Windows desktop, not Atlas.
+> Separately, individual beats can still deliberately splice in a real PC
+> screen clip alongside the HUD ones — that's an intentional additional
+> source, not the same mistake. Publishing briefly exposes just the one
 > finished video file over Tailscale Funnel (not a port-forward) so
 > Instagram's servers can fetch it, and tears that exposure back down
 > immediately after — nothing stays publicly reachable outside that one

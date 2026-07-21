@@ -3,16 +3,29 @@ own HUD, edit it into a Reel, and (only with explicit confirmation)
 publish it to Instagram.
 
 content.record_self_showcase records Atlas's own screen -- the physical
-HUD kiosk on the Pi (see hud_capture.py) -- not the Windows PC's screen.
-Confirmed live 2026-07-21: recording the PC screen shows the owner's
-desktop, not Atlas; the whole point of self-showcase content is Atlas
-narrating his own features (weather radar, self-diagnostics, ...), which
-only exist on his own HUD. It drives a varied "tour" of real HUD states
-between narrated clips -- randomized phrasing and beat selection by
-default (see _build_default_tour()) so repeated recordings don't produce
-the same video twice, or a fully custom script via 'beats' -- edits each
-with content_pipeline.edit_reel, and concatenates them. Nothing it does
-is public or destructive, so it stays at permission_level=0.
+HUD kiosk on the Pi (see hud_capture.py) -- by default, not the Windows
+PC's screen. Confirmed live 2026-07-21: recording the PC screen as a
+stand-in for "record yourself" shows the owner's desktop, not Atlas;
+the whole point of self-showcase content is Atlas narrating his own
+features (weather radar, self-diagnostics, ...), which only exist on
+his own HUD. That's still the default and still what most beats use.
+
+Separately (added the same day, once that mistake was already fixed):
+individual beats can be flagged "source": "pc" to deliberately splice in
+a real clip of the Windows PC's own screen -- e.g. Atlas opening a
+YouTube video or an app, via pc.start_screen_recording's underlying
+primitive (_record_pc_demo_clip) -- mixed into the same tour and
+stitched into the same final Reel by concat_clips(). This is not the
+old mistake: it's an explicitly-flagged, additional clip source
+alongside the HUD, not a replacement for it, and only available when
+this runtime was actually built with a PC connection (pc_client/
+sftp_client both non-None). It drives a varied "tour" of real states
+between narrated clips -- randomized phrasing, beat selection, and
+whether a PC demo beat appears at all, by default (see
+_build_default_tour()), so repeated recordings don't produce the same
+video twice -- or a fully custom script via 'beats' -- edits each with
+content_pipeline.edit_reel, and concatenates them. Nothing it does is
+public or destructive, so it stays at permission_level=0.
 
 content.publish_to_instagram is the one tool in this codebase that uses
 PermissionLevel.CONFIRMATION_REQUIRED: it's the step the safety model
@@ -119,17 +132,78 @@ EXTRA_BEATS: tuple[dict[str, str], ...] = (
 )
 MAX_EXTRA_BEATS = 2
 
+# Beats with "source": "pc" record the Windows PC's own screen instead
+# of the HUD (via pc.start_screen_recording's underlying primitive) --
+# a deliberate hop over to show real PC control (opening a video,
+# opening an app), then back to the HUD for whatever beat follows.
+# This is NOT the old mistake of recording the PC screen as a stand-in
+# for "record yourself" (see the module docstring) -- it's an
+# additional, explicitly-flagged clip source mixed into the same tour,
+# stitched into the same final Reel by concat_clips() either way.
+PC_DEMO_BEATS: tuple[dict[str, Any], ...] = (
+    {
+        "narration": (
+            "I can drive my own PC too -- here I'm pulling up a video "
+            "on YouTube."
+        ),
+        "source": "pc",
+        "pc_action": {
+            "type": "youtube_search",
+            "query": "raspberry pi home automation projects",
+        },
+    },
+    {
+        "narration": (
+            "And I can pull up whatever's useful on the PC, not just "
+            "watch my own screen."
+        ),
+        "source": "pc",
+        "pc_action": {
+            "type": "youtube_search",
+            "query": "robotics project builds",
+        },
+    },
+)
+# open_app is a real, supported pc_action for custom 'beats' -- it's
+# just not in this default pool. It only launches apps from the PC
+# companion's own approved_apps whitelist (act_open_app in
+# atlas_companion.py), which is owner-configured per machine and not
+# discoverable from here; confirmed live that a plausible-sounding
+# guess ("notepad") isn't actually in it on this PC and just silently
+# no-ops (best-effort, same as an unrecognized HUD action -- doesn't
+# error, just doesn't change the display for that beat). youtube_search
+# has no such whitelist dependency, so it's what the automatic default
+# tour uses; a caller who knows a real approved app name can still pass
+# open_app explicitly via a custom 'beats' list.
+MAX_PC_DEMO_BEATS = 1
+PC_DEMO_PROBABILITY = 0.5
 
-def _build_default_tour() -> tuple[dict[str, str], ...]:
+
+def _build_default_tour(
+    *, pc_demo_available: bool = False
+) -> tuple[dict[str, Any], ...]:
     """Builds one varied instance of the default tour: randomized
     intro/outro phrasing, the always-on weather + diagnostics beats
-    (with randomized phrasing too), and a random subset of extra
-    beats -- so consecutive "record a promo video" calls don't
-    produce the same script and clip twice in a row."""
+    (with randomized phrasing too), a random subset of extra HUD
+    beats, and -- only when this runtime actually has a PC connection
+    (pc_demo_available) -- a coin-flip chance of hopping over to a PC
+    demo beat before hopping back to the HUD for the outro. None of
+    this is deterministic: consecutive "record a promo video" calls
+    shouldn't produce the same script, beat selection, or clip mix
+    twice in a row."""
     extra = random.sample(
         EXTRA_BEATS,
         k=random.randint(0, min(MAX_EXTRA_BEATS, len(EXTRA_BEATS))),
     )
+
+    pc_demo: tuple[dict[str, Any], ...] = ()
+    if pc_demo_available and random.random() < PC_DEMO_PROBABILITY:
+        pc_demo = tuple(
+            random.sample(
+                PC_DEMO_BEATS,
+                k=min(MAX_PC_DEMO_BEATS, len(PC_DEMO_BEATS)),
+            )
+        )
 
     return (
         {"narration": random.choice(INTRO_LINES), "action": "idle"},
@@ -142,6 +216,7 @@ def _build_default_tour() -> tuple[dict[str, str], ...]:
             "action": "diagnostics",
         },
         *extra,
+        *pc_demo,
         {"narration": random.choice(OUTRO_LINES), "action": "idle"},
     )
 
@@ -197,11 +272,102 @@ def _set_recording_indicator(active: bool) -> None:
         print(f"HUD recording indicator failed: {error}", flush=True)
 
 
+class PcDemoCaptureError(RuntimeError):
+    pass
+
+
+def _perform_pc_action(pc_client: Any, pc_action: dict[str, Any] | None) -> None:
+    """Drives one real action on the PC during a "source": "pc" beat --
+    best-effort, like _apply_hud_action: an unrecognized or missing
+    action just leaves the desktop showing whatever it already was
+    rather than aborting the whole recording."""
+    if not isinstance(pc_action, dict):
+        return
+
+    action_type = pc_action.get("type")
+
+    try:
+        if action_type == "youtube_search":
+            import pc_control
+
+            pc_control.youtube_search(str(pc_action.get("query", "")))
+        elif action_type == "open_app":
+            pc_client.execute(
+                "open_app", {"app": str(pc_action.get("app", ""))}
+            )
+    except Exception as error:
+        print(
+            f"PC demo action '{action_type}' failed during "
+            f"self-showcase recording: {error}",
+            flush=True,
+        )
+
+
+def _record_pc_demo_clip(
+    pc_client: Any,
+    sftp_client: Any,
+    pc_action: dict[str, Any] | None,
+    clip_seconds: float,
+    mission: str | None,
+) -> str:
+    """Records a real clip of the Windows PC's own screen: starts a PC
+    screen recording (the same primitive pc.start_screen_recording
+    wraps), performs the beat's PC action so the actual demo -- opening
+    a video, opening an app -- gets captured live, waits out the clip's
+    duration, stops the recording, and downloads the finished file.
+    Raises PcDemoCaptureError with a clear reason on any failure --
+    start, stop, or download -- never silently returns a bad path."""
+    start_result = pc_client.execute(
+        "start_recording",
+        {
+            "target": "full",
+            "mission": mission,
+            "privacy": False,
+            "max_seconds": max(
+                1, round(clip_seconds) + RECORDING_BUFFER_SECONDS
+            ),
+        },
+    )
+    start_data = start_result.data or {}
+    if not start_result.ok or not start_data.get("ok"):
+        raise PcDemoCaptureError(
+            "could not start the PC screen recording: "
+            f"{start_result.error or start_data.get('error')}"
+        )
+
+    _perform_pc_action(pc_client, pc_action)
+    time.sleep(clip_seconds)
+
+    stop_result = pc_client.execute("stop_recording")
+    stop_data = stop_result.data or {}
+    if not stop_result.ok or not stop_data.get("ok"):
+        raise PcDemoCaptureError(
+            "could not stop the PC screen recording: "
+            f"{stop_result.error or stop_data.get('error')}"
+        )
+
+    remote_path = stop_data.get("path")
+    if not remote_path:
+        raise PcDemoCaptureError(
+            "PC recording stopped but reported no file path"
+        )
+
+    download_result = sftp_client.download(remote_path)
+    if not getattr(download_result, "verified", False):
+        raise PcDemoCaptureError(
+            "downloaded PC recording failed size/hash verification"
+        )
+
+    return str(download_result.local_path)
+
+
 def register_content_tools(
     registry: ToolRegistry,
     verifier: ResultVerifier,
     *,
     staging_directory: str | Path,
+    pc_client: Any = None,
+    sftp_client: Any = None,
 ) -> list[AtlasTool]:
     staging_path = Path(staging_directory)
 
@@ -227,7 +393,11 @@ def register_content_tools(
                 "default tour"
             )
 
-        tour = beats if beats else _build_default_tour()
+        tour = beats if beats else _build_default_tour(
+            pc_demo_available=(
+                pc_client is not None and sftp_client is not None
+            )
+        )
         staging_path.mkdir(parents=True, exist_ok=True)
 
         clip_paths: list[str] = []
@@ -238,6 +408,7 @@ def register_content_tools(
             for index, beat in enumerate(tour):
                 narration_text = beat["narration"]
                 action = beat.get("action", "idle")
+                source = beat.get("source", "hud")
 
                 try:
                     wav_path = content_pipeline.render_narration(
@@ -246,25 +417,49 @@ def register_content_tools(
                 except content_pipeline.ContentPipelineError as error:
                     return {"ok": False, "error": str(error)}
 
-                _apply_hud_action(action)
-                time.sleep(HUD_ACTION_SETTLE_SECONDS)
-
                 clip_seconds = (
                     _wav_duration_seconds(wav_path)
                     + RECORDING_BUFFER_SECONDS
                 )
-                raw_clip_path = (
-                    staging_path
-                    / f"hud_raw_{index}_{int(time.time())}.mp4"
-                )
 
-                try:
-                    hud_capture.record_hud_clip(
-                        clip_seconds, raw_clip_path
+                if source == "pc":
+                    if pc_client is None or sftp_client is None:
+                        Path(wav_path).unlink(missing_ok=True)
+                        return {
+                            "ok": False,
+                            "error": (
+                                "This beat asked for a PC demo clip, "
+                                "but this runtime wasn't configured "
+                                "with a PC connection."
+                            ),
+                        }
+                    try:
+                        raw_clip_path = _record_pc_demo_clip(
+                            pc_client,
+                            sftp_client,
+                            beat.get("pc_action"),
+                            clip_seconds,
+                            mission,
+                        )
+                    except PcDemoCaptureError as error:
+                        Path(wav_path).unlink(missing_ok=True)
+                        return {"ok": False, "error": str(error)}
+                else:
+                    _apply_hud_action(action)
+                    time.sleep(HUD_ACTION_SETTLE_SECONDS)
+
+                    raw_clip_path = (
+                        staging_path
+                        / f"hud_raw_{index}_{int(time.time())}.mp4"
                     )
-                except hud_capture.HudCaptureError as error:
-                    Path(wav_path).unlink(missing_ok=True)
-                    return {"ok": False, "error": str(error)}
+
+                    try:
+                        hud_capture.record_hud_clip(
+                            clip_seconds, raw_clip_path
+                        )
+                    except hud_capture.HudCaptureError as error:
+                        Path(wav_path).unlink(missing_ok=True)
+                        return {"ok": False, "error": str(error)}
 
                 beat_clip_path = (
                     staging_path
@@ -350,19 +545,24 @@ def register_content_tools(
         AtlasTool(
             name="content.record_self_showcase",
             description=(
-                "Records a narrated tour of Atlas's own HUD screen and "
-                "edits it into a 9:16 Reel, returning the finished "
+                "Records a narrated tour of Atlas's own HUD screen -- "
+                "and, when a PC connection is configured, optionally "
+                "hops over to a real clip of the Windows PC's own "
+                "screen for one or more beats (opening a YouTube video, "
+                "opening an app) before hopping back -- then edits "
+                "everything into one 9:16 Reel, returning the finished "
                 "local video path and a draft caption. Does not "
                 "publish anything. With no 'beats', runs a varied "
                 "default tour -- weather radar and self-diagnostics "
-                "always show up, phrasing and a few extra real "
-                "feature beats (system status, printer, gaming PC) "
-                "are randomized so repeated calls don't produce the "
-                "same script and clip twice in a row. Not a fixed "
+                "always show up on the HUD, phrasing, a few extra real "
+                "HUD feature beats (system status, printer, gaming PC), "
+                "and whether a PC demo beat appears at all are all "
+                "randomized, so repeated calls don't produce the same "
+                "script, beat mix, or clip twice in a row. Not a fixed "
                 "script either way: pass 'beats' with any narration "
-                "lines, in any order, any length, to record a fully "
-                "custom video saying and showing whatever is asked "
-                "for instead."
+                "lines, in any order, any length, mixing HUD and PC "
+                "beats however wanted, to record a fully custom video "
+                "saying and showing whatever is asked for instead."
             ),
             runs_on="pi",
             handler=record_self_showcase,
@@ -379,20 +579,33 @@ def register_content_tools(
                             "type": ["array", "null"],
                             "description": (
                                 "A fully custom script overriding the "
-                                "default weather/diagnostics tour -- "
-                                "any number of beats, any narration "
-                                "text, in any order. Each item: "
-                                "{narration: str, action: str}. "
-                                "'action' drives a real HUD state for "
-                                "that beat's clip: 'weather_open' / "
-                                "'weather_close' opens/closes the "
-                                "weather radar, 'diagnostics' runs and "
-                                "shows self-diagnostics, 'idle' (or "
-                                "any other/omitted value) leaves the "
-                                "HUD showing whatever it's currently "
-                                "on -- unrecognized actions never "
-                                "error, they just don't change the "
-                                "display for that beat."
+                                "default tour -- any number of beats, "
+                                "any narration text, in any order. "
+                                "Each item: {narration: str, action: "
+                                "str, source: 'hud'|'pc', pc_action: "
+                                "object}. 'source' (default 'hud') "
+                                "picks which screen that beat's clip "
+                                "comes from. For source='hud': "
+                                "'action' drives a real HUD state -- "
+                                "'weather_open'/'weather_close' opens/"
+                                "closes the weather radar, "
+                                "'diagnostics' runs and shows "
+                                "self-diagnostics, 'idle' (or any "
+                                "other/omitted value) leaves the HUD "
+                                "showing whatever it's currently on; "
+                                "unrecognized actions never error, "
+                                "they just don't change the display. "
+                                "For source='pc': records a real clip "
+                                "of the Windows PC's own screen instead "
+                                "-- requires this runtime to have a PC "
+                                "connection configured, otherwise this "
+                                "beat fails with a clear error. "
+                                "'pc_action' optionally drives one real "
+                                "action on the PC during that clip: "
+                                "{type: 'youtube_search', query: str} "
+                                "or {type: 'open_app', app: str}; "
+                                "omitted or unrecognized just records "
+                                "the PC screen as-is."
                             ),
                         },
                     },

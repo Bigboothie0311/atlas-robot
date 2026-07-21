@@ -265,6 +265,261 @@ def test_record_self_showcase_reports_hud_capture_failure(tmp_path, monkeypatch)
     assert not narration_wav.exists()
 
 
+class FakePCActionResult:
+    def __init__(self, ok, data=None, error=None):
+        self.ok = ok
+        self.data = data
+        self.error = error
+
+
+class FakeDownloadResult:
+    def __init__(self, local_path, verified=True):
+        self.local_path = local_path
+        self.verified = verified
+
+
+def test_record_pc_demo_clip_orchestrates_start_action_stop_download(
+    tmp_path, monkeypatch
+):
+    from atlas_agent.content_tools import _record_pc_demo_clip
+    import atlas_agent.content_tools as content_tools_module
+
+    calls = []
+
+    class FakePCClient:
+        def execute(self, action, arguments=None):
+            calls.append((action, arguments))
+            if action == "start_recording":
+                return FakePCActionResult(True, {"ok": True})
+            if action == "stop_recording":
+                return FakePCActionResult(
+                    True,
+                    {
+                        "ok": True,
+                        "path": r"C:\Users\wesle\Videos\AtlasRecordings\r.mp4",
+                    },
+                )
+            if action == "open_app":
+                return FakePCActionResult(True, {"ok": True})
+            raise AssertionError(f"unexpected action {action}")
+
+    class FakeSFTPClient:
+        def download(self, remote_path):
+            calls.append(("download", remote_path))
+            local = tmp_path / "downloaded.mp4"
+            local.write_bytes(b"pc clip bytes")
+            return FakeDownloadResult(str(local))
+
+    monkeypatch.setattr(content_tools_module.time, "sleep", lambda _s: None)
+
+    result_path = _record_pc_demo_clip(
+        FakePCClient(),
+        FakeSFTPClient(),
+        {"type": "open_app", "app": "notepad"},
+        2.0,
+        "promo-reel",
+    )
+
+    assert Path(result_path).is_file()
+    action_calls = [c for c in calls if c[0] != "download"]
+    assert action_calls[0][0] == "start_recording"
+    assert action_calls[1] == ("open_app", {"app": "notepad"})
+    assert action_calls[2][0] == "stop_recording"
+    assert calls[-1][0] == "download"
+    assert calls[-1][1] == r"C:\Users\wesle\Videos\AtlasRecordings\r.mp4"
+
+
+def test_record_pc_demo_clip_uses_youtube_search_action(tmp_path, monkeypatch):
+    from atlas_agent.content_tools import _record_pc_demo_clip
+    import atlas_agent.content_tools as content_tools_module
+    import pc_control
+
+    searched = {}
+
+    def fake_youtube_search(query):
+        searched["query"] = query
+        return "opened"
+
+    monkeypatch.setattr(pc_control, "youtube_search", fake_youtube_search)
+    monkeypatch.setattr(content_tools_module.time, "sleep", lambda _s: None)
+
+    class FakePCClient:
+        def execute(self, action, arguments=None):
+            if action == "start_recording":
+                return FakePCActionResult(True, {"ok": True})
+            if action == "stop_recording":
+                return FakePCActionResult(
+                    True, {"ok": True, "path": r"C:\path\r.mp4"}
+                )
+            raise AssertionError(f"unexpected action {action}")
+
+    class FakeSFTPClient:
+        def download(self, remote_path):
+            local = tmp_path / "downloaded.mp4"
+            local.write_bytes(b"pc clip bytes")
+            return FakeDownloadResult(str(local))
+
+    _record_pc_demo_clip(
+        FakePCClient(),
+        FakeSFTPClient(),
+        {"type": "youtube_search", "query": "raspberry pi robots"},
+        2.0,
+        None,
+    )
+
+    assert searched["query"] == "raspberry pi robots"
+
+
+def test_record_pc_demo_clip_raises_on_start_failure(monkeypatch):
+    from atlas_agent.content_tools import (
+        PcDemoCaptureError,
+        _record_pc_demo_clip,
+    )
+    import atlas_agent.content_tools as content_tools_module
+
+    monkeypatch.setattr(content_tools_module.time, "sleep", lambda _s: None)
+
+    class FakePCClient:
+        def execute(self, action, arguments=None):
+            return FakePCActionResult(
+                False, {}, error="a recording is already in progress"
+            )
+
+    import pytest
+
+    with pytest.raises(PcDemoCaptureError, match="already in progress"):
+        _record_pc_demo_clip(FakePCClient(), object(), None, 2.0, None)
+
+
+def test_build_default_tour_never_includes_pc_beat_when_unavailable():
+    tours = [_build_default_tour(pc_demo_available=False) for _ in range(30)]
+
+    for tour in tours:
+        assert all(beat.get("source", "hud") == "hud" for beat in tour)
+
+
+def test_build_default_tour_sometimes_includes_pc_beat_when_available():
+    tours = [_build_default_tour(pc_demo_available=True) for _ in range(60)]
+
+    has_pc_beat = [
+        any(beat.get("source") == "pc" for beat in tour) for tour in tours
+    ]
+    assert any(has_pc_beat), "never once included a PC demo beat in 60 tries"
+    assert not all(has_pc_beat), "always included a PC demo beat -- not random"
+
+
+def test_record_self_showcase_stitches_hud_and_pc_clips(tmp_path, monkeypatch):
+    from atlas_agent.content_tools import register_content_tools
+    import atlas_agent.content_tools as content_tools_module
+
+    registry = ToolRegistry()
+    verifier = ResultVerifier()
+
+    class FakePCClient:
+        def execute(self, action, arguments=None):
+            if action == "start_recording":
+                return FakePCActionResult(True, {"ok": True})
+            if action == "stop_recording":
+                return FakePCActionResult(
+                    True, {"ok": True, "path": r"C:\path\r.mp4"}
+                )
+            return FakePCActionResult(True, {"ok": True})
+
+    class FakeSFTPClient:
+        def download(self, remote_path):
+            local = tmp_path / "pc_downloaded.mp4"
+            local.write_bytes(b"pc clip bytes")
+            return FakeDownloadResult(str(local))
+
+    register_content_tools(
+        registry,
+        verifier,
+        staging_directory=tmp_path,
+        pc_client=FakePCClient(),
+        sftp_client=FakeSFTPClient(),
+    )
+
+    narration_counter = {"n": 0}
+
+    def fake_render_narration(text):
+        narration_counter["n"] += 1
+        wav_path = tmp_path / f"narration_{narration_counter['n']}.wav"
+        _write_wav(wav_path)
+        return str(wav_path)
+
+    monkeypatch.setattr(
+        content_pipeline, "render_narration", fake_render_narration
+    )
+
+    def fake_record_hud_clip(duration, out_path, **kwargs):
+        Path(out_path).write_bytes(b"raw hud clip")
+        return str(out_path)
+
+    monkeypatch.setattr(hud_capture, "record_hud_clip", fake_record_hud_clip)
+
+    def fake_edit_reel(video_path, narration_wav_path, out_path):
+        Path(out_path).write_bytes(b"edited beat")
+        return str(out_path)
+
+    monkeypatch.setattr(content_pipeline, "edit_reel", fake_edit_reel)
+
+    concat_inputs = []
+
+    def fake_concat_clips(clip_paths, out_path):
+        concat_inputs.extend(clip_paths)
+        Path(out_path).write_bytes(b"final reel")
+        return str(out_path)
+
+    monkeypatch.setattr(content_pipeline, "concat_clips", fake_concat_clips)
+    monkeypatch.setattr(content_tools_module.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(
+        content_tools_module.requests, "post", lambda *a, **k: mock.Mock(ok=True)
+    )
+
+    call = ToolCall(
+        tool_name="content.record_self_showcase",
+        arguments={
+            "mission": "promo-reel",
+            "beats": [
+                {"narration": "Here's my HUD.", "action": "idle"},
+                {
+                    "narration": "Now watch me drive the PC.",
+                    "source": "pc",
+                    "pc_action": {"type": "open_app", "app": "notepad"},
+                },
+                {"narration": "And back to my own screen.", "action": "idle"},
+            ],
+        },
+    )
+
+    result = execute(registry, call)
+
+    assert result.output["ok"] is True
+    assert len(concat_inputs) == 3
+
+
+def test_record_self_showcase_rejects_pc_beat_without_pc_connection(tmp_path):
+    registry, _verifier, _tools = build_tools(tmp_path)
+
+    call = ToolCall(
+        tool_name="content.record_self_showcase",
+        arguments={
+            "mission": None,
+            "beats": [
+                {
+                    "narration": "Try to show the PC.",
+                    "source": "pc",
+                }
+            ],
+        },
+    )
+
+    result = execute(registry, call)
+
+    assert result.output["ok"] is False
+    assert "PC connection" in result.output["error"]
+
+
 def test_publish_to_instagram_requires_confirmation(tmp_path):
     registry, _verifier, _tools = build_tools(tmp_path)
     call = ToolCall(

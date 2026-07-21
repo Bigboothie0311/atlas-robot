@@ -134,6 +134,8 @@ def build_pc_agent_runtime(
         registry,
         verifier,
         staging_directory=staging_directory,
+        pc_client=pc_client,
+        sftp_client=sftp_client,
     )
 
     if recordings_remote_root is not None:
