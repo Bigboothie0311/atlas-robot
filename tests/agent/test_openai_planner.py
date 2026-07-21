@@ -589,3 +589,356 @@ def test_routes_explicit_pi_text_file_read_without_api_call():
         "max_lines": 200,
         "max_chars": 12_000,
     }
+
+
+SEARCH_FILES_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "root": {"type": "string"},
+        "query": {"type": "string"},
+        "extensions": {
+            "type": ["array", "null"],
+            "items": {"type": "string"},
+        },
+        "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+        },
+    },
+    "required": [
+        "root",
+        "query",
+        "extensions",
+        "limit",
+    ],
+    "additionalProperties": False,
+}
+
+
+SEARCH_TEXT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "root": {"type": "string"},
+        "query": {"type": "string"},
+        "extensions": {
+            "type": ["array", "null"],
+            "items": {"type": "string"},
+        },
+        "case_sensitive": {"type": "boolean"},
+        "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+        },
+    },
+    "required": [
+        "root",
+        "query",
+        "extensions",
+        "case_sensitive",
+        "limit",
+    ],
+    "additionalProperties": False,
+}
+
+
+SERVICE_LOGS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "service": {"type": "string"},
+        "minutes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1440,
+        },
+        "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500,
+        },
+    },
+    "required": ["service", "minutes", "limit"],
+    "additionalProperties": False,
+}
+
+
+SERVICE_STATUS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "service": {"type": "string"},
+    },
+    "required": ["service"],
+    "additionalProperties": False,
+}
+
+
+def test_routes_pi_search_files_without_api_call():
+    client = FakeClient(
+        [
+            make_plan_call(
+                [
+                    {
+                        "tool": "pc.search_files",
+                        "description": (
+                            "Incorrectly search Windows."
+                        ),
+                        "arguments": {
+                            "query": "Instagram",
+                            "extensions": None,
+                            "limit": 20,
+                        },
+                    }
+                ]
+            )
+        ]
+    )
+    generator = OpenAIPlanGenerator(
+        client=client,
+        model="gpt-test",
+    )
+
+    result = generator.generate(
+        (
+            "Hey Atlas, search your project for "
+            "files named Instagram."
+        ),
+        [
+            make_tool(
+                "pc.search_files",
+                parameters=SEARCH_SCHEMA,
+            ),
+            make_tool(
+                "pi.search_files",
+                parameters=SEARCH_FILES_SCHEMA,
+            ),
+        ],
+    )
+
+    assert client.responses.calls == []
+    assert result.response_id is None
+    assert result.input_tokens == 0
+    assert result.output_tokens == 0
+    assert len(result.proposal.steps) == 1
+    assert result.proposal.steps[0].tool == (
+        "pi.search_files"
+    )
+    assert result.proposal.steps[0].arguments == {
+        "root": "/home/atlas/atlas-robot",
+        "query": "Instagram",
+        "extensions": None,
+        "limit": 50,
+    }
+
+
+def test_routes_pi_search_text_without_api_call():
+    client = FakeClient(
+        [
+            make_plan_call(
+                [
+                    {
+                        "tool": "pc.search_files",
+                        "description": (
+                            "Incorrectly search Windows."
+                        ),
+                        "arguments": {
+                            "query": "atlas-wake.service",
+                            "extensions": None,
+                            "limit": 20,
+                        },
+                    }
+                ]
+            )
+        ]
+    )
+    generator = OpenAIPlanGenerator(
+        client=client,
+        model="gpt-test",
+    )
+
+    result = generator.generate(
+        "Search your code for atlas-wake.service.",
+        [
+            make_tool(
+                "pc.search_files",
+                parameters=SEARCH_SCHEMA,
+            ),
+            make_tool(
+                "pi.search_text",
+                parameters=SEARCH_TEXT_SCHEMA,
+            ),
+        ],
+    )
+
+    assert client.responses.calls == []
+    assert result.response_id is None
+    assert result.input_tokens == 0
+    assert result.output_tokens == 0
+    assert len(result.proposal.steps) == 1
+    assert result.proposal.steps[0].tool == (
+        "pi.search_text"
+    )
+    assert result.proposal.steps[0].arguments == {
+        "root": "/home/atlas/atlas-robot",
+        "query": "atlas-wake.service",
+        "extensions": None,
+        "case_sensitive": False,
+        "limit": 50,
+    }
+
+
+def test_routes_pi_read_service_logs_without_api_call():
+    client = FakeClient([])
+    generator = OpenAIPlanGenerator(
+        client=client,
+        model="gpt-test",
+    )
+
+    result = generator.generate(
+        (
+            "Read your wake logs from the last "
+            "ten minutes."
+        ),
+        [
+            make_tool(
+                "pi.read_service_logs",
+                parameters=SERVICE_LOGS_SCHEMA,
+            ),
+        ],
+    )
+
+    assert client.responses.calls == []
+    assert result.response_id is None
+    assert result.input_tokens == 0
+    assert result.output_tokens == 0
+    assert len(result.proposal.steps) == 1
+    assert result.proposal.steps[0].tool == (
+        "pi.read_service_logs"
+    )
+    assert result.proposal.steps[0].arguments == {
+        "service": "atlas-wake.service",
+        "minutes": 10,
+        "limit": 200,
+    }
+
+
+def test_routes_pi_get_service_status_without_api_call():
+    client = FakeClient([])
+    generator = OpenAIPlanGenerator(
+        client=client,
+        model="gpt-test",
+    )
+
+    result = generator.generate(
+        "Is your wake service running?",
+        [
+            make_tool(
+                "pi.get_service_status",
+                parameters=SERVICE_STATUS_SCHEMA,
+            ),
+        ],
+    )
+
+    assert client.responses.calls == []
+    assert result.response_id is None
+    assert result.input_tokens == 0
+    assert result.output_tokens == 0
+    assert len(result.proposal.steps) == 1
+    assert result.proposal.steps[0].tool == (
+        "pi.get_service_status"
+    )
+    assert result.proposal.steps[0].arguments == {
+        "service": "atlas-wake.service",
+    }
+
+
+def test_ambiguous_multi_service_status_falls_through_to_planning():
+    client = FakeClient(
+        [
+            make_plan_call(
+                [
+                    {
+                        "tool": "pi.get_service_status",
+                        "description": (
+                            "Check the robot hub status."
+                        ),
+                        "arguments": {
+                            "service": "atlas-robot.service",
+                        },
+                    }
+                ]
+            )
+        ]
+    )
+    generator = OpenAIPlanGenerator(
+        client=client,
+        model="gpt-test",
+    )
+
+    result = generator.generate(
+        (
+            "Check whether your robot hub and HUD "
+            "are active."
+        ),
+        [
+            make_tool(
+                "pi.get_service_status",
+                parameters=SERVICE_STATUS_SCHEMA,
+            ),
+        ],
+    )
+
+    assert len(client.responses.calls) == 1
+    assert result.response_id == "response-123"
+    assert result.proposal.steps[0].tool == (
+        "pi.get_service_status"
+    )
+
+
+def test_windows_video_request_not_hijacked_by_new_rules():
+    client = FakeClient(
+        [
+            make_plan_call(
+                [
+                    {
+                        "tool": "pc.search_files",
+                        "description": (
+                            "Search Windows for the video."
+                        ),
+                        "arguments": {
+                            "query": "atlas",
+                            "extensions": None,
+                            "limit": 20,
+                        },
+                    }
+                ]
+            )
+        ]
+    )
+    generator = OpenAIPlanGenerator(
+        client=client,
+        model="gpt-test",
+    )
+
+    result = generator.generate(
+        "Find my Atlas video on the PC.",
+        [
+            make_tool(
+                "pc.search_files",
+                parameters=SEARCH_SCHEMA,
+            ),
+            make_tool(
+                "pi.search_files",
+                parameters=SEARCH_FILES_SCHEMA,
+            ),
+            make_tool(
+                "pi.search_text",
+                parameters=SEARCH_TEXT_SCHEMA,
+            ),
+        ],
+    )
+
+    assert len(client.responses.calls) == 1
+    assert result.proposal.steps[0].tool == (
+        "pc.search_files"
+    )

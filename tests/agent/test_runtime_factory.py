@@ -15,6 +15,10 @@ EXPECTED_PC_TOOLS = {
     "pc.open_app",
     "pi.list_directory",
     "pi.read_text_file",
+    "pi.search_files",
+    "pi.search_text",
+    "pi.read_service_logs",
+    "pi.get_service_status",
 }
 
 

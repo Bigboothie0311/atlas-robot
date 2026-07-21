@@ -12,6 +12,105 @@ from atlas_agent.tools import AtlasTool
 
 SUBMIT_PLAN_TOOL_NAME = "submit_agent_plan"
 
+_TEXT_SEARCH_PATTERNS = (
+    re.compile(
+        r"search\s+(?:your\s+)?code\s+for\s+"
+        r"([A-Za-z0-9_./\\-]+)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"references?\s+to\s+([A-Za-z0-9_./\\-]+)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"where\s+([A-Za-z0-9_./\\-]+)\s+is\s+used",
+        re.IGNORECASE,
+    ),
+)
+_FILENAME_TOKEN_PATTERN = re.compile(
+    r"\b([A-Za-z0-9_-]+\.[A-Za-z]{1,8})\b"
+)
+_NAMED_FILE_PATTERN = re.compile(
+    r"\bnamed\s+([A-Za-z0-9_.-]+)",
+    re.IGNORECASE,
+)
+_FILE_IN_NAME_PATTERN = re.compile(
+    r"\bwith\s+([A-Za-z0-9_.-]+)\s+in\s+the\s+name\b",
+    re.IGNORECASE,
+)
+_SERVICE_ALIASES: dict[str, set[str]] = {
+    "atlas-wake.service": {"wake"},
+    "atlas-robot.service": {"robot"},
+    "atlas-hud.service": {"hud"},
+    "atlas-hub.service": {"hub"},
+    "graphify-mcp.service": {"graphify"},
+}
+_EXPLICIT_SERVICE_PATTERN = re.compile(
+    r"\b(atlas-(?:wake|robot|hud|hub)\.service"
+    r"|graphify-mcp\.service)\b",
+    re.IGNORECASE,
+)
+_NUMBER_WORDS = {
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "fifteen": 15,
+    "twenty": 20,
+    "thirty": 30,
+    "sixty": 60,
+}
+
+
+def _match_single_service(
+    goal: str,
+    words: set[str],
+) -> str | None:
+    matched = {
+        service
+        for service, aliases in _SERVICE_ALIASES.items()
+        if aliases & words
+    }
+
+    explicit = _EXPLICIT_SERVICE_PATTERN.search(goal)
+
+    if explicit is not None:
+        matched.add(explicit.group(1).lower())
+
+    if len(matched) == 1:
+        return next(iter(matched))
+
+    return None
+
+
+def _extract_minutes(
+    normalized: str,
+    words: set[str],
+) -> int:
+    digit_match = re.search(
+        r"(\d+)\s*minutes?",
+        normalized,
+    )
+
+    if digit_match:
+        return max(
+            1,
+            min(1440, int(digit_match.group(1))),
+        )
+
+    if "minute" in normalized:
+        for word, value in _NUMBER_WORDS.items():
+            if word in words:
+                return value
+
+    return 10
+
 
 class OpenAIPlanningError(RuntimeError):
     """Raised when the model does not return a usable tool plan."""
@@ -293,73 +392,266 @@ class OpenAIPlanGenerator:
                 output_tokens=0,
             )
 
-        if "pi.list_directory" not in available_tools:
-            return None
-
-        names_project_folder = (
+        mentions_atlas_project = (
             "/home/atlas/atlas-robot" in normalized
             or (
                 "atlas" in words
                 and "project" in words
-                and bool(
-                    words
-                    & {
-                        "folder",
-                        "directory",
-                    }
-                )
             )
         )
-        requests_listing = (
-            bool(
+
+        if "pi.list_directory" in available_tools:
+            names_project_folder = (
+                mentions_atlas_project
+                and (
+                    "/home/atlas/atlas-robot" in normalized
+                    or bool(
+                        words
+                        & {
+                            "folder",
+                            "directory",
+                        }
+                    )
+                )
+            )
+            requests_listing = (
+                bool(
+                    words
+                    & {
+                        "list",
+                        "show",
+                        "contents",
+                    }
+                )
+                or (
+                    "files" in words
+                    and bool(
+                        words
+                        & {
+                            "folder",
+                            "directory",
+                        }
+                    )
+                )
+            )
+
+            if names_project_folder and requests_listing:
+                return PlanGenerationResult(
+                    proposal=PlanProposal(
+                        goal=goal,
+                        steps=(
+                            PlanStepProposal(
+                                tool="pi.list_directory",
+                                description=(
+                                    "List the immediate "
+                                    "contents of the local "
+                                    "A.T.L.A.S. project "
+                                    "folder."
+                                ),
+                                arguments={
+                                    "path": (
+                                        "/home/atlas/atlas-robot"
+                                    ),
+                                    "limit": 200,
+                                },
+                            ),
+                        ),
+                    ),
+                    response_id=None,
+                    input_tokens=0,
+                    output_tokens=0,
+                )
+
+        if "pi.search_text" in available_tools:
+            text_query = None
+
+            for pattern in _TEXT_SEARCH_PATTERNS:
+                match = pattern.search(goal)
+
+                if match is not None:
+                    text_query = match.group(
+                        1
+                    ).rstrip(".,;:!?")
+                    break
+
+            if text_query:
+                return PlanGenerationResult(
+                    proposal=PlanProposal(
+                        goal=goal,
+                        steps=(
+                            PlanStepProposal(
+                                tool="pi.search_text",
+                                description=(
+                                    "Search the approved "
+                                    "Raspberry Pi project for "
+                                    "the requested text."
+                                ),
+                                arguments={
+                                    "root": (
+                                        "/home/atlas/atlas-robot"
+                                    ),
+                                    "query": text_query,
+                                    "extensions": None,
+                                    "case_sensitive": False,
+                                    "limit": 50,
+                                },
+                            ),
+                        ),
+                    ),
+                    response_id=None,
+                    input_tokens=0,
+                    output_tokens=0,
+                )
+
+        if (
+            "pi.search_files" in available_tools
+            and mentions_atlas_project
+            and bool(
                 words
                 & {
-                    "list",
-                    "show",
-                    "contents",
+                    "find",
+                    "search",
+                    "locate",
                 }
             )
-            or (
-                "files" in words
-                and bool(
-                    words
-                    & {
-                        "folder",
-                        "directory",
-                    }
-                )
+        ):
+            file_query = None
+            filename_match = _FILENAME_TOKEN_PATTERN.search(
+                goal
             )
+            named_match = _NAMED_FILE_PATTERN.search(goal)
+            in_name_match = (
+                _FILE_IN_NAME_PATTERN.search(goal)
+            )
+
+            if filename_match is not None:
+                file_query = filename_match.group(1)
+            elif named_match is not None:
+                file_query = named_match.group(1)
+            elif in_name_match is not None:
+                file_query = in_name_match.group(1)
+
+            if file_query:
+                file_query = file_query.rstrip(
+                    ".,;:!?"
+                )
+                extensions = (
+                    [".py"]
+                    if (
+                        "python" in words
+                        and "files" in words
+                    )
+                    else None
+                )
+
+                return PlanGenerationResult(
+                    proposal=PlanProposal(
+                        goal=goal,
+                        steps=(
+                            PlanStepProposal(
+                                tool="pi.search_files",
+                                description=(
+                                    "Search the approved "
+                                    "Raspberry Pi project for "
+                                    "matching filenames."
+                                ),
+                                arguments={
+                                    "root": (
+                                        "/home/atlas/atlas-robot"
+                                    ),
+                                    "query": file_query,
+                                    "extensions": extensions,
+                                    "limit": 50,
+                                },
+                            ),
+                        ),
+                    ),
+                    response_id=None,
+                    input_tokens=0,
+                    output_tokens=0,
+                )
+
+        mentions_logs = bool(
+            words
+            & {
+                "logs",
+                "log",
+            }
+        )
+        matched_service = _match_single_service(
+            goal,
+            words,
         )
 
-        if not (
-            names_project_folder
-            and requests_listing
+        if (
+            "pi.read_service_logs" in available_tools
+            and mentions_logs
+            and matched_service is not None
         ):
-            return None
+            minutes = _extract_minutes(normalized, words)
 
-        return PlanGenerationResult(
-            proposal=PlanProposal(
-                goal=goal,
-                steps=(
-                    PlanStepProposal(
-                        tool="pi.list_directory",
-                        description=(
-                            "List the immediate contents of "
-                            "the local A.T.L.A.S. project folder."
-                        ),
-                        arguments={
-                            "path": (
-                                "/home/atlas/atlas-robot"
+            return PlanGenerationResult(
+                proposal=PlanProposal(
+                    goal=goal,
+                    steps=(
+                        PlanStepProposal(
+                            tool="pi.read_service_logs",
+                            description=(
+                                "Read recent logs for the "
+                                "requested approved "
+                                "A.T.L.A.S. service."
                             ),
-                            "limit": 200,
-                        },
+                            arguments={
+                                "service": matched_service,
+                                "minutes": minutes,
+                                "limit": 200,
+                            },
+                        ),
                     ),
                 ),
-            ),
-            response_id=None,
-            input_tokens=0,
-            output_tokens=0,
-        )
+                response_id=None,
+                input_tokens=0,
+                output_tokens=0,
+            )
+
+        if (
+            "pi.get_service_status" in available_tools
+            and not mentions_logs
+            and matched_service is not None
+            and bool(
+                words
+                & {
+                    "running",
+                    "active",
+                    "status",
+                    "healthy",
+                    "up",
+                }
+            )
+        ):
+            return PlanGenerationResult(
+                proposal=PlanProposal(
+                    goal=goal,
+                    steps=(
+                        PlanStepProposal(
+                            tool="pi.get_service_status",
+                            description=(
+                                "Check the current status of "
+                                "the requested approved "
+                                "A.T.L.A.S. service."
+                            ),
+                            arguments={
+                                "service": matched_service,
+                            },
+                        ),
+                    ),
+                ),
+                response_id=None,
+                input_tokens=0,
+                output_tokens=0,
+            )
+
+        return None
 
     def _find_plan_call(
         self,

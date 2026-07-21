@@ -291,6 +291,206 @@ class AgentVoiceController:
             )
 
         if (
+            tool_name == "pi.search_files"
+            and isinstance(output, dict)
+        ):
+            entries = output.get("entries")
+            count = output.get("count")
+            truncated = output.get("truncated")
+
+            if isinstance(entries, list):
+                names = [
+                    item.get("relative_path")
+                    for item in entries
+                    if isinstance(item, dict)
+                    and isinstance(
+                        item.get("relative_path"), str
+                    )
+                    and item.get("relative_path")
+                ]
+                total = (
+                    count
+                    if isinstance(count, int)
+                    else len(names)
+                )
+                noun = "file" if total == 1 else "files"
+
+                if not names:
+                    return (
+                        "I didn't find any matching files "
+                        "in the Atlas project."
+                    )
+
+                maximum_spoken_names = 10
+                spoken_names = ", ".join(
+                    names[:maximum_spoken_names]
+                )
+                remaining = total - len(
+                    names[:maximum_spoken_names]
+                )
+                extra = (
+                    f", plus {remaining} more"
+                    if remaining > 0
+                    else ""
+                )
+                continuation = (
+                    " There may be more matches beyond "
+                    "what I searched."
+                    if truncated is True
+                    else ""
+                )
+
+                return (
+                    f"I found {total} matching {noun} in "
+                    f"the Atlas project: {spoken_names}"
+                    f"{extra}.{continuation}"
+                )
+
+        if (
+            tool_name == "pi.search_text"
+            and isinstance(output, dict)
+        ):
+            matches = output.get("matches")
+            count = output.get("count")
+            truncated = output.get("truncated")
+
+            if isinstance(matches, list):
+                if not matches:
+                    return (
+                        "I didn't find any matching text "
+                        "in the Atlas project."
+                    )
+
+                total = (
+                    count
+                    if isinstance(count, int)
+                    else len(matches)
+                )
+                noun = "line" if total == 1 else "lines"
+                maximum_spoken_matches = 5
+                spoken_matches = []
+
+                for match in matches[
+                    :maximum_spoken_matches
+                ]:
+                    if not isinstance(match, dict):
+                        continue
+
+                    relative_path = match.get(
+                        "relative_path"
+                    )
+                    line_number = match.get(
+                        "line_number"
+                    )
+                    line = match.get("line")
+
+                    if (
+                        isinstance(relative_path, str)
+                        and isinstance(line_number, int)
+                        and isinstance(line, str)
+                    ):
+                        spoken_matches.append(
+                            f"{relative_path} line "
+                            f"{line_number}: {line.strip()}"
+                        )
+
+                remaining = total - len(spoken_matches)
+                extra = (
+                    f" I found {remaining} more matches "
+                    "I didn't read aloud."
+                    if remaining > 0
+                    else ""
+                )
+                continuation = (
+                    " There may be more matches beyond "
+                    "what I searched."
+                    if truncated is True and remaining <= 0
+                    else ""
+                )
+                joined = "; ".join(spoken_matches)
+
+                return (
+                    f"I found {total} matching {noun} in "
+                    f"the Atlas project. {joined}."
+                    f"{extra}{continuation}"
+                )
+
+        if (
+            tool_name == "pi.read_service_logs"
+            and isinstance(output, dict)
+        ):
+            service = output.get("service")
+            lines = output.get("lines")
+            count = output.get("count")
+
+            service_label = self._service_spoken_label(
+                service
+            )
+
+            if (
+                not isinstance(lines, list)
+                or not lines
+            ):
+                return (
+                    f"I checked the {service_label}, and "
+                    "there were no recent log lines."
+                )
+
+            total = (
+                count
+                if isinstance(count, int)
+                else len(lines)
+            )
+            maximum_spoken_lines = 5
+            excerpt_lines = [
+                line.strip()
+                for line in lines[-maximum_spoken_lines:]
+                if isinstance(line, str)
+            ]
+            excerpt = " ".join(excerpt_lines)
+
+            return (
+                f"I checked {total} recent log lines for "
+                f"the {service_label}. Here is the "
+                f"latest: {excerpt}"
+            )
+
+        if (
+            tool_name == "pi.get_service_status"
+            and isinstance(output, dict)
+        ):
+            service = output.get("service")
+            active_state = output.get("active_state")
+            sub_state = output.get("sub_state")
+
+            service_label = self._service_spoken_label(
+                service
+            )
+
+            if not (
+                isinstance(active_state, str)
+                and isinstance(sub_state, str)
+            ):
+                return (
+                    f"I checked the {service_label}, but "
+                    "its status was incomplete."
+                )
+
+            if (
+                active_state == "active"
+                and sub_state == "running"
+            ):
+                return (
+                    f"The {service_label} is active "
+                    "and running."
+                )
+
+            return (
+                f"The {service_label} is {active_state}, "
+                f"with substate {sub_state}."
+            )
+
+        if (
             tool_name == "pc.ensure_online"
             and isinstance(output, dict)
         ):
@@ -335,6 +535,21 @@ class AgentVoiceController:
             f"Done. I completed and verified "
             f"all {step_count} {noun}."
         )
+
+    @staticmethod
+    def _service_spoken_label(service: Any) -> str:
+        if not isinstance(service, str) or not service:
+            return "requested A.T.L.A.S. service"
+
+        short_name = service
+
+        if short_name.endswith(".service"):
+            short_name = short_name[: -len(".service")]
+
+        if short_name.startswith("atlas-"):
+            short_name = short_name[len("atlas-"):]
+
+        return f"A.T.L.A.S. {short_name} service"
 
     def _confirmation_summary(
         self,

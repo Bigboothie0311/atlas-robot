@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -37,6 +38,86 @@ _SENSITIVE_NAME_MARKERS = {
     "private_key",
     "refresh_token",
 }
+_EXCLUDED_DIRECTORY_NAMES = {
+    ".git",
+    "venv",
+    ".venv",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    "node_modules",
+    "graphify-out",
+    ".superpowers",
+    "archive",
+    "data",
+    "tools",
+    "models",
+    "voices",
+}
+_MAX_SEARCH_LINE_CHARS = 300
+_SUBPROCESS_TIMEOUT_SECONDS = 10
+_ALLOWED_SERVICES = {
+    "atlas-wake.service",
+    "atlas-robot.service",
+    "atlas-hud.service",
+    "atlas-hub.service",
+    "graphify-mcp.service",
+}
+
+
+def _normalize_extensions(
+    extensions: list[str] | None,
+) -> set[str] | None:
+    if extensions is None:
+        return None
+
+    if not isinstance(extensions, list):
+        raise ValueError(
+            "extensions must be a list of strings or null"
+        )
+
+    normalized: set[str] = set()
+
+    for extension in extensions:
+        if (
+            not isinstance(extension, str)
+            or not extension.strip()
+        ):
+            raise ValueError(
+                "extensions must contain non-empty strings"
+            )
+
+        cleaned = extension.strip().casefold()
+
+        if not cleaned.startswith("."):
+            cleaned = f".{cleaned}"
+
+        normalized.add(cleaned)
+
+    return normalized or None
+
+
+def _iter_tree(directory: Path) -> Iterable[Path]:
+    try:
+        children = sorted(
+            directory.iterdir(),
+            key=lambda item: item.name.casefold(),
+        )
+    except OSError:
+        return
+
+    for child in children:
+        if child.is_symlink():
+            continue
+
+        if child.is_dir():
+            if child.name in _EXCLUDED_DIRECTORY_NAMES:
+                continue
+
+            yield from _iter_tree(child)
+        elif child.is_file():
+            yield child
 
 
 def register_local_tools(
@@ -277,6 +358,380 @@ def register_local_tools(
             ),
         }
 
+    def search_files(
+        root: str,
+        query: str,
+        extensions: list[str] | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        if (
+            not isinstance(query, str)
+            or not query.strip()
+        ):
+            raise ValueError(
+                "query must be a non-empty string"
+            )
+
+        if not isinstance(limit, int):
+            raise ValueError(
+                "limit must be an integer"
+            )
+
+        if not 1 <= limit <= 200:
+            raise ValueError(
+                "limit must be between 1 and 200"
+            )
+
+        normalized_extensions = _normalize_extensions(
+            extensions
+        )
+        resolved_root = resolve_approved_path(root)
+
+        if not resolved_root.exists():
+            raise FileNotFoundError(
+                f"Directory does not exist: {resolved_root}"
+            )
+
+        if not resolved_root.is_dir():
+            raise NotADirectoryError(
+                f"Path is not a directory: {resolved_root}"
+            )
+
+        query_lower = query.casefold()
+        collected: list[Path] = []
+
+        for candidate in _iter_tree(resolved_root):
+            if _is_sensitive_path(candidate):
+                continue
+
+            if (
+                normalized_extensions is not None
+                and candidate.suffix.casefold()
+                not in normalized_extensions
+            ):
+                continue
+
+            if query_lower not in candidate.name.casefold():
+                continue
+
+            collected.append(candidate)
+
+            if len(collected) > limit:
+                break
+
+        truncated = len(collected) > limit
+        selected = collected[:limit]
+
+        entries = [
+            {
+                "name": path.name,
+                "path": str(path),
+                "relative_path": str(
+                    path.relative_to(resolved_root)
+                ),
+                "type": "file",
+                "size": path.stat().st_size,
+            }
+            for path in selected
+        ]
+
+        return {
+            "root": str(resolved_root),
+            "query": query,
+            "entries": entries,
+            "count": len(entries),
+            "truncated": truncated,
+        }
+
+    def search_text(
+        root: str,
+        query: str,
+        extensions: list[str] | None = None,
+        case_sensitive: bool = False,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        if not isinstance(query, str) or not query:
+            raise ValueError(
+                "query must be a non-empty string"
+            )
+
+        if not isinstance(case_sensitive, bool):
+            raise ValueError(
+                "case_sensitive must be a boolean"
+            )
+
+        if not isinstance(limit, int):
+            raise ValueError(
+                "limit must be an integer"
+            )
+
+        if not 1 <= limit <= 200:
+            raise ValueError(
+                "limit must be between 1 and 200"
+            )
+
+        normalized_extensions = _normalize_extensions(
+            extensions
+        )
+        resolved_root = resolve_approved_path(root)
+
+        if not resolved_root.exists():
+            raise FileNotFoundError(
+                f"Directory does not exist: {resolved_root}"
+            )
+
+        if not resolved_root.is_dir():
+            raise NotADirectoryError(
+                f"Path is not a directory: {resolved_root}"
+            )
+
+        search_query = (
+            query if case_sensitive else query.casefold()
+        )
+        matches: list[dict[str, Any]] = []
+        files_scanned = 0
+        truncated = False
+
+        for candidate in _iter_tree(resolved_root):
+            if _is_sensitive_path(candidate):
+                continue
+
+            if (
+                normalized_extensions is not None
+                and candidate.suffix.casefold()
+                not in normalized_extensions
+            ):
+                continue
+
+            try:
+                size = candidate.stat().st_size
+            except OSError:
+                continue
+
+            if size > _MAX_TEXT_FILE_BYTES:
+                continue
+
+            try:
+                raw = candidate.read_bytes()
+            except OSError:
+                continue
+
+            if b"\x00" in raw:
+                continue
+
+            try:
+                text = raw.decode("utf-8-sig")
+            except UnicodeDecodeError:
+                continue
+
+            files_scanned += 1
+            relative_path = str(
+                candidate.relative_to(resolved_root)
+            )
+
+            for line_number, line in enumerate(
+                text.splitlines(),
+                start=1,
+            ):
+                haystack = (
+                    line
+                    if case_sensitive
+                    else line.casefold()
+                )
+
+                if search_query not in haystack:
+                    continue
+
+                bounded_line = (
+                    line[:_MAX_SEARCH_LINE_CHARS]
+                    if len(line) > _MAX_SEARCH_LINE_CHARS
+                    else line
+                )
+
+                matches.append(
+                    {
+                        "path": str(candidate),
+                        "relative_path": relative_path,
+                        "line_number": line_number,
+                        "line": bounded_line,
+                    }
+                )
+
+                if len(matches) >= limit:
+                    truncated = True
+                    break
+
+            if truncated:
+                break
+
+        return {
+            "root": str(resolved_root),
+            "query": query,
+            "matches": matches,
+            "count": len(matches),
+            "truncated": truncated,
+            "files_scanned": files_scanned,
+        }
+
+    def read_service_logs(
+        service: str,
+        minutes: int = 10,
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        if (
+            not isinstance(service, str)
+            or service not in _ALLOWED_SERVICES
+        ):
+            raise ValueError(
+                "service must be one of the approved "
+                "A.T.L.A.S. services"
+            )
+
+        if not isinstance(minutes, int):
+            raise ValueError(
+                "minutes must be an integer"
+            )
+
+        if not 1 <= minutes <= 1440:
+            raise ValueError(
+                "minutes must be between 1 and 1440"
+            )
+
+        if not isinstance(limit, int):
+            raise ValueError(
+                "limit must be an integer"
+            )
+
+        if not 1 <= limit <= 500:
+            raise ValueError(
+                "limit must be between 1 and 500"
+            )
+
+        args = [
+            "journalctl",
+            "-u",
+            service,
+            "--since",
+            f"{minutes} minutes ago",
+            "--no-pager",
+            "-o",
+            "short-iso",
+            "-n",
+            str(limit),
+        ]
+
+        try:
+            completed = subprocess.run(
+                args,
+                capture_output=True,
+                text=True,
+                timeout=_SUBPROCESS_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"journalctl timed out for {service}"
+            ) from exc
+
+        if completed.returncode != 0:
+            raise RuntimeError(
+                f"journalctl failed for {service}: "
+                f"{completed.stderr.strip()}"
+            )
+
+        raw_lines = [
+            line
+            for line in completed.stdout.splitlines()
+            if line
+        ]
+        bounded_lines = raw_lines[:limit]
+
+        return {
+            "service": service,
+            "minutes": minutes,
+            "lines": bounded_lines,
+            "count": len(bounded_lines),
+            "truncated": len(raw_lines) > len(bounded_lines),
+        }
+
+    def get_service_status(
+        service: str,
+    ) -> dict[str, Any]:
+        if (
+            not isinstance(service, str)
+            or service not in _ALLOWED_SERVICES
+        ):
+            raise ValueError(
+                "service must be one of the approved "
+                "A.T.L.A.S. services"
+            )
+
+        args = [
+            "systemctl",
+            "show",
+            service,
+            "--no-pager",
+            "--property="
+            "Id,Description,LoadState,ActiveState,"
+            "SubState,MainPID",
+        ]
+
+        try:
+            completed = subprocess.run(
+                args,
+                capture_output=True,
+                text=True,
+                timeout=_SUBPROCESS_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"systemctl show timed out for {service}"
+            ) from exc
+
+        if completed.returncode != 0:
+            raise RuntimeError(
+                f"systemctl show failed for {service}: "
+                f"{completed.stderr.strip()}"
+            )
+
+        properties: dict[str, str] = {}
+
+        for line in completed.stdout.splitlines():
+            if "=" not in line:
+                continue
+
+            key, _, value = line.partition("=")
+            properties[key] = value
+
+        load_state = properties.get("LoadState", "")
+        active_state = properties.get("ActiveState", "")
+        sub_state = properties.get("SubState", "")
+        description = properties.get("Description", "")
+        main_pid_raw = properties.get("MainPID", "")
+
+        if not load_state or not active_state or not sub_state:
+            raise RuntimeError(
+                "systemctl show returned incomplete "
+                f"status for {service}"
+            )
+
+        main_pid = (
+            int(main_pid_raw)
+            if main_pid_raw.isdigit()
+            and main_pid_raw != "0"
+            else None
+        )
+
+        return {
+            "service": service,
+            "description": description,
+            "load_state": load_state,
+            "active_state": active_state,
+            "sub_state": sub_state,
+            "main_pid": main_pid,
+        }
+
     roots_text = ", ".join(str(root) for root in roots)
 
     tools = [
@@ -380,6 +835,224 @@ def register_local_tools(
                 }
             },
         ),
+        AtlasTool(
+            name="pi.search_files",
+            description=(
+                "Find files by filename inside an approved "
+                "Raspberry Pi root. Use this for local Pi "
+                "and A.T.L.A.S. project filename searches "
+                "instead of pc.search_files. Approved roots: "
+                f"{roots_text}."
+            ),
+            runs_on="pi",
+            handler=search_files,
+            permission_level=0,
+            timeout_seconds=15,
+            metadata={
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "root": {
+                            "type": "string",
+                            "description": (
+                                "Exact absolute Raspberry Pi "
+                                "directory to search inside."
+                            ),
+                        },
+                        "query": {
+                            "type": "string",
+                            "description": (
+                                "Filename substring to match, "
+                                "case-insensitively."
+                            ),
+                        },
+                        "extensions": {
+                            "type": ["array", "null"],
+                            "items": {
+                                "type": "string",
+                            },
+                            "description": (
+                                "Optional list of file "
+                                "extensions to keep, such as "
+                                "['.py']. Null for no filter."
+                            ),
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 200,
+                            "description": (
+                                "Maximum number of matching "
+                                "files to return."
+                            ),
+                        },
+                    },
+                    "required": [
+                        "root",
+                        "query",
+                        "extensions",
+                        "limit",
+                    ],
+                    "additionalProperties": False,
+                }
+            },
+        ),
+        AtlasTool(
+            name="pi.search_text",
+            description=(
+                "Search approved Raspberry Pi text files for "
+                "an exact substring and return matching lines. "
+                "Read-only and skips sensitive, binary, and "
+                f"oversized files. Approved roots: {roots_text}."
+            ),
+            runs_on="pi",
+            handler=search_text,
+            permission_level=0,
+            timeout_seconds=20,
+            metadata={
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "root": {
+                            "type": "string",
+                            "description": (
+                                "Exact absolute Raspberry Pi "
+                                "directory to search inside."
+                            ),
+                        },
+                        "query": {
+                            "type": "string",
+                            "description": (
+                                "Literal text to search for."
+                            ),
+                        },
+                        "extensions": {
+                            "type": ["array", "null"],
+                            "items": {
+                                "type": "string",
+                            },
+                            "description": (
+                                "Optional list of file "
+                                "extensions to keep, such as "
+                                "['.py']. Null for no filter."
+                            ),
+                        },
+                        "case_sensitive": {
+                            "type": "boolean",
+                            "description": (
+                                "Whether the text search is "
+                                "case-sensitive."
+                            ),
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 200,
+                            "description": (
+                                "Maximum number of matching "
+                                "lines to return."
+                            ),
+                        },
+                    },
+                    "required": [
+                        "root",
+                        "query",
+                        "extensions",
+                        "case_sensitive",
+                        "limit",
+                    ],
+                    "additionalProperties": False,
+                }
+            },
+        ),
+        AtlasTool(
+            name="pi.read_service_logs",
+            description=(
+                "Read bounded recent journalctl logs for an "
+                "approved A.T.L.A.S. systemd service. "
+                "Read-only. Approved services: "
+                + ", ".join(sorted(_ALLOWED_SERVICES))
+                + "."
+            ),
+            runs_on="pi",
+            handler=read_service_logs,
+            permission_level=0,
+            timeout_seconds=20,
+            metadata={
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "service": {
+                            "type": "string",
+                            "enum": sorted(
+                                _ALLOWED_SERVICES
+                            ),
+                            "description": (
+                                "The approved systemd service "
+                                "unit name."
+                            ),
+                        },
+                        "minutes": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 1440,
+                            "description": (
+                                "How many minutes of recent "
+                                "logs to read."
+                            ),
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 500,
+                            "description": (
+                                "Maximum number of log lines "
+                                "to return."
+                            ),
+                        },
+                    },
+                    "required": [
+                        "service",
+                        "minutes",
+                        "limit",
+                    ],
+                    "additionalProperties": False,
+                }
+            },
+        ),
+        AtlasTool(
+            name="pi.get_service_status",
+            description=(
+                "Report the current systemd status of an "
+                "approved A.T.L.A.S. service. Read-only. "
+                "Approved services: "
+                + ", ".join(sorted(_ALLOWED_SERVICES))
+                + "."
+            ),
+            runs_on="pi",
+            handler=get_service_status,
+            permission_level=0,
+            timeout_seconds=15,
+            metadata={
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "service": {
+                            "type": "string",
+                            "enum": sorted(
+                                _ALLOWED_SERVICES
+                            ),
+                            "description": (
+                                "The approved systemd service "
+                                "unit name."
+                            ),
+                        },
+                    },
+                    "required": ["service"],
+                    "additionalProperties": False,
+                }
+            },
+        ),
     ]
 
     for tool in tools:
@@ -392,6 +1065,22 @@ def register_local_tools(
     verifier.register(
         "pi.read_text_file",
         _verify_text_file_read,
+    )
+    verifier.register(
+        "pi.search_files",
+        _verify_file_search,
+    )
+    verifier.register(
+        "pi.search_text",
+        _verify_text_search,
+    )
+    verifier.register(
+        "pi.read_service_logs",
+        _verify_service_logs,
+    )
+    verifier.register(
+        "pi.get_service_status",
+        _verify_service_status,
     )
 
     return tools
@@ -543,5 +1232,256 @@ def _verify_text_file_read(
             "total_lines": total_lines,
             "char_count": char_count,
             "truncated": truncated,
+        },
+    )
+
+
+def _verify_file_search(
+    call: Any,
+    result: Any,
+) -> VerificationCheck:
+    output = result.output
+
+    if not isinstance(output, dict):
+        return VerificationCheck(
+            verified=False,
+            reason=(
+                "File search output was not an object."
+            ),
+        )
+
+    root = output.get("root")
+    query = output.get("query")
+    entries = output.get("entries")
+    count = output.get("count")
+    truncated = output.get("truncated")
+
+    valid_entries = (
+        isinstance(entries, list)
+        and all(
+            isinstance(entry, dict)
+            and isinstance(entry.get("name"), str)
+            and isinstance(entry.get("path"), str)
+            and isinstance(
+                entry.get("relative_path"), str
+            )
+            and entry.get("type") == "file"
+            and (
+                entry.get("size") is None
+                or isinstance(entry.get("size"), int)
+            )
+            for entry in entries
+        )
+    )
+
+    verified = (
+        isinstance(root, str)
+        and bool(root)
+        and isinstance(query, str)
+        and bool(query)
+        and valid_entries
+        and isinstance(count, int)
+        and count == len(entries)
+        and isinstance(truncated, bool)
+    )
+
+    return VerificationCheck(
+        verified=verified,
+        reason=(
+            "The Raspberry Pi file search was returned "
+            "successfully."
+            if verified
+            else "The Raspberry Pi file search result "
+            "was malformed."
+        ),
+        evidence={
+            "root": root,
+            "query": query,
+            "count": (
+                count if isinstance(count, int) else 0
+            ),
+            "truncated": truncated,
+        },
+    )
+
+
+def _verify_text_search(
+    call: Any,
+    result: Any,
+) -> VerificationCheck:
+    output = result.output
+
+    if not isinstance(output, dict):
+        return VerificationCheck(
+            verified=False,
+            reason=(
+                "Text search output was not an object."
+            ),
+        )
+
+    root = output.get("root")
+    query = output.get("query")
+    matches = output.get("matches")
+    count = output.get("count")
+    truncated = output.get("truncated")
+    files_scanned = output.get("files_scanned")
+
+    valid_matches = (
+        isinstance(matches, list)
+        and all(
+            isinstance(match, dict)
+            and isinstance(match.get("path"), str)
+            and isinstance(
+                match.get("relative_path"), str
+            )
+            and isinstance(match.get("line_number"), int)
+            and match.get("line_number") >= 1
+            and isinstance(match.get("line"), str)
+            for match in matches
+        )
+    )
+
+    verified = (
+        isinstance(root, str)
+        and bool(root)
+        and isinstance(query, str)
+        and bool(query)
+        and valid_matches
+        and isinstance(count, int)
+        and count == len(matches)
+        and isinstance(truncated, bool)
+        and (
+            files_scanned is None
+            or (
+                isinstance(files_scanned, int)
+                and files_scanned >= 0
+            )
+        )
+    )
+
+    return VerificationCheck(
+        verified=verified,
+        reason=(
+            "The Raspberry Pi text search was returned "
+            "successfully."
+            if verified
+            else "The Raspberry Pi text search result "
+            "was malformed."
+        ),
+        evidence={
+            "root": root,
+            "query": query,
+            "count": (
+                count if isinstance(count, int) else 0
+            ),
+            "truncated": truncated,
+        },
+    )
+
+
+def _verify_service_logs(
+    call: Any,
+    result: Any,
+) -> VerificationCheck:
+    output = result.output
+
+    if not isinstance(output, dict):
+        return VerificationCheck(
+            verified=False,
+            reason=(
+                "Service log output was not an object."
+            ),
+        )
+
+    service = output.get("service")
+    minutes = output.get("minutes")
+    lines = output.get("lines")
+    count = output.get("count")
+    truncated = output.get("truncated")
+
+    verified = (
+        isinstance(service, str)
+        and service in _ALLOWED_SERVICES
+        and isinstance(minutes, int)
+        and minutes >= 1
+        and isinstance(lines, list)
+        and all(
+            isinstance(line, str) for line in lines
+        )
+        and isinstance(count, int)
+        and count == len(lines)
+        and isinstance(truncated, bool)
+    )
+
+    return VerificationCheck(
+        verified=verified,
+        reason=(
+            "The A.T.L.A.S. service logs were returned "
+            "successfully."
+            if verified
+            else "The A.T.L.A.S. service log result "
+            "was malformed."
+        ),
+        evidence={
+            "service": service,
+            "count": (
+                count if isinstance(count, int) else 0
+            ),
+            "truncated": truncated,
+        },
+    )
+
+
+def _verify_service_status(
+    call: Any,
+    result: Any,
+) -> VerificationCheck:
+    output = result.output
+
+    if not isinstance(output, dict):
+        return VerificationCheck(
+            verified=False,
+            reason=(
+                "Service status output was not an object."
+            ),
+        )
+
+    service = output.get("service")
+    load_state = output.get("load_state")
+    active_state = output.get("active_state")
+    sub_state = output.get("sub_state")
+    main_pid = output.get("main_pid")
+
+    verified = (
+        isinstance(service, str)
+        and service in _ALLOWED_SERVICES
+        and isinstance(load_state, str)
+        and bool(load_state)
+        and isinstance(active_state, str)
+        and bool(active_state)
+        and isinstance(sub_state, str)
+        and bool(sub_state)
+        and (
+            main_pid is None
+            or (
+                isinstance(main_pid, int)
+                and main_pid >= 0
+            )
+        )
+    )
+
+    return VerificationCheck(
+        verified=verified,
+        reason=(
+            "The A.T.L.A.S. service status was returned "
+            "successfully."
+            if verified
+            else "The A.T.L.A.S. service status result "
+            "was malformed."
+        ),
+        evidence={
+            "service": service,
+            "active_state": active_state,
+            "sub_state": sub_state,
         },
     )

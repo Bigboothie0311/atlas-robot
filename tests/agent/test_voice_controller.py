@@ -407,3 +407,356 @@ def test_pi_text_file_read_speaks_bounded_content():
         "Here is the text: Wake phrase: Hey Atlas.\n"
         "Service: active."
     )
+
+
+def test_pi_search_files_speaks_matching_names():
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.COMPLETED,
+        confirmation_call_id=None,
+        error=None,
+        steps=(
+            make_step(
+                tool_name="pi.search_files",
+                output={
+                    "root": "/home/atlas/atlas-robot",
+                    "query": "planner",
+                    "entries": [
+                        {
+                            "name": "openai_planner.py",
+                            "path": (
+                                "/home/atlas/atlas-robot/"
+                                "atlas_agent/"
+                                "openai_planner.py"
+                            ),
+                            "relative_path": (
+                                "atlas_agent/"
+                                "openai_planner.py"
+                            ),
+                            "type": "file",
+                            "size": 100,
+                        },
+                        {
+                            "name": "test_openai_planner.py",
+                            "path": (
+                                "/home/atlas/atlas-robot/"
+                                "tests/agent/"
+                                "test_openai_planner.py"
+                            ),
+                            "relative_path": (
+                                "tests/agent/"
+                                "test_openai_planner.py"
+                            ),
+                            "type": "file",
+                            "size": 200,
+                        },
+                    ],
+                    "count": 2,
+                    "truncated": False,
+                },
+            ),
+        ),
+    )
+    controller = AgentVoiceController(
+        FakeBundle(
+            FakeRuntime(
+                result=make_result(workflow)
+            )
+        )
+    )
+
+    response = controller.handle_goal(
+        "Find openai_planner.py in your project."
+    )
+
+    assert response.ok is True
+    assert response.text == (
+        "I found 2 matching files in the Atlas "
+        "project: atlas_agent/openai_planner.py, "
+        "tests/agent/test_openai_planner.py."
+    )
+
+
+def test_pi_search_files_speaks_empty_result():
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.COMPLETED,
+        confirmation_call_id=None,
+        error=None,
+        steps=(
+            make_step(
+                tool_name="pi.search_files",
+                output={
+                    "root": "/home/atlas/atlas-robot",
+                    "query": "nonexistent",
+                    "entries": [],
+                    "count": 0,
+                    "truncated": False,
+                },
+            ),
+        ),
+    )
+    controller = AgentVoiceController(
+        FakeBundle(
+            FakeRuntime(
+                result=make_result(workflow)
+            )
+        )
+    )
+
+    response = controller.handle_goal(
+        "Find nonexistent.py in your project."
+    )
+
+    assert response.text == (
+        "I didn't find any matching files in the "
+        "Atlas project."
+    )
+
+
+def test_pi_search_text_speaks_matching_lines():
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.COMPLETED,
+        confirmation_call_id=None,
+        error=None,
+        steps=(
+            make_step(
+                tool_name="pi.search_text",
+                output={
+                    "root": "/home/atlas/atlas-robot",
+                    "query": "pc.open_app",
+                    "matches": [
+                        {
+                            "path": (
+                                "/home/atlas/atlas-robot/"
+                                "atlas_agent/"
+                                "voice_controller.py"
+                            ),
+                            "relative_path": (
+                                "atlas_agent/"
+                                "voice_controller.py"
+                            ),
+                            "line_number": 322,
+                            "line": (
+                                'if tool_name == '
+                                '"pc.open_app":'
+                            ),
+                        },
+                    ],
+                    "count": 1,
+                    "truncated": False,
+                    "files_scanned": 42,
+                },
+            ),
+        ),
+    )
+    controller = AgentVoiceController(
+        FakeBundle(
+            FakeRuntime(
+                result=make_result(workflow)
+            )
+        )
+    )
+
+    response = controller.handle_goal(
+        "Search your code for pc.open_app."
+    )
+
+    assert response.ok is True
+    assert response.text == (
+        "I found 1 matching line in the Atlas "
+        "project. atlas_agent/voice_controller.py "
+        'line 322: if tool_name == "pc.open_app":.'
+    )
+
+
+def test_pi_search_text_speaks_empty_result():
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.COMPLETED,
+        confirmation_call_id=None,
+        error=None,
+        steps=(
+            make_step(
+                tool_name="pi.search_text",
+                output={
+                    "root": "/home/atlas/atlas-robot",
+                    "query": "nonexistent_symbol",
+                    "matches": [],
+                    "count": 0,
+                    "truncated": False,
+                    "files_scanned": 10,
+                },
+            ),
+        ),
+    )
+    controller = AgentVoiceController(
+        FakeBundle(
+            FakeRuntime(
+                result=make_result(workflow)
+            )
+        )
+    )
+
+    response = controller.handle_goal(
+        "Search your code for nonexistent_symbol."
+    )
+
+    assert response.text == (
+        "I didn't find any matching text in the "
+        "Atlas project."
+    )
+
+
+def test_pi_read_service_logs_speaks_bounded_excerpt():
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.COMPLETED,
+        confirmation_call_id=None,
+        error=None,
+        steps=(
+            make_step(
+                tool_name="pi.read_service_logs",
+                output={
+                    "service": "atlas-wake.service",
+                    "minutes": 10,
+                    "lines": [
+                        "2026-07-20T10:00:00 wake ready",
+                        "2026-07-20T10:00:05 heard hey atlas",
+                    ],
+                    "count": 2,
+                    "truncated": False,
+                },
+            ),
+        ),
+    )
+    controller = AgentVoiceController(
+        FakeBundle(
+            FakeRuntime(
+                result=make_result(workflow)
+            )
+        )
+    )
+
+    response = controller.handle_goal(
+        "Read your wake logs."
+    )
+
+    assert response.ok is True
+    assert response.text == (
+        "I checked 2 recent log lines for the "
+        "A.T.L.A.S. wake service. Here is the "
+        "latest: 2026-07-20T10:00:00 wake ready "
+        "2026-07-20T10:00:05 heard hey atlas"
+    )
+
+
+def test_pi_read_service_logs_speaks_empty_result():
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.COMPLETED,
+        confirmation_call_id=None,
+        error=None,
+        steps=(
+            make_step(
+                tool_name="pi.read_service_logs",
+                output={
+                    "service": "atlas-robot.service",
+                    "minutes": 10,
+                    "lines": [],
+                    "count": 0,
+                    "truncated": False,
+                },
+            ),
+        ),
+    )
+    controller = AgentVoiceController(
+        FakeBundle(
+            FakeRuntime(
+                result=make_result(workflow)
+            )
+        )
+    )
+
+    response = controller.handle_goal(
+        "Read the robot service logs."
+    )
+
+    assert response.text == (
+        "I checked the A.T.L.A.S. robot service, and "
+        "there were no recent log lines."
+    )
+
+
+def test_pi_get_service_status_speaks_active_running():
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.COMPLETED,
+        confirmation_call_id=None,
+        error=None,
+        steps=(
+            make_step(
+                tool_name="pi.get_service_status",
+                output={
+                    "service": "atlas-wake.service",
+                    "description": (
+                        "A.T.L.A.S. Wake Word Listener"
+                    ),
+                    "load_state": "loaded",
+                    "active_state": "active",
+                    "sub_state": "running",
+                    "main_pid": 1234,
+                },
+            ),
+        ),
+    )
+    controller = AgentVoiceController(
+        FakeBundle(
+            FakeRuntime(
+                result=make_result(workflow)
+            )
+        )
+    )
+
+    response = controller.handle_goal(
+        "Is your wake service running?"
+    )
+
+    assert response.ok is True
+    assert response.text == (
+        "The A.T.L.A.S. wake service is active and "
+        "running."
+    )
+
+
+def test_pi_get_service_status_speaks_failed_state_truthfully():
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.COMPLETED,
+        confirmation_call_id=None,
+        error=None,
+        steps=(
+            make_step(
+                tool_name="pi.get_service_status",
+                output={
+                    "service": "atlas-wake.service",
+                    "description": (
+                        "A.T.L.A.S. Wake Word Listener"
+                    ),
+                    "load_state": "loaded",
+                    "active_state": "failed",
+                    "sub_state": "failed",
+                    "main_pid": None,
+                },
+            ),
+        ),
+    )
+    controller = AgentVoiceController(
+        FakeBundle(
+            FakeRuntime(
+                result=make_result(workflow)
+            )
+        )
+    )
+
+    response = controller.handle_goal(
+        "Is your wake service running?"
+    )
+
+    assert response.text == (
+        "The A.T.L.A.S. wake service is failed, with "
+        "substate failed."
+    )
