@@ -81,6 +81,20 @@
 >   round 4" below. This is the first time "ready" was verified by
 >   actually running the previously-failing goal through the real
 >   planner and the real executor, not by inference.
+> - **Round 5, same day: the recording actually worked, the voice loop
+>   just didn't wait for it.** Wesley tried again, got "I was unable to
+>   generate an answer" -- but a real, valid Reel (`reel_1784676131.mp4`)
+>   was sitting finished in `/home/atlas/atlas-staging/incoming/`
+>   seconds later. `ask_and_speak_streaming()`'s consumer only waited
+>   30s for the next streamed sentence, far short of
+>   `content.record_self_showcase`'s own registered 300s timeout, so it
+>   gave up and reported failure while the recording finished orphaned
+>   in the background. Raised to 320s
+>   (`SENTENCE_STREAM_IDLE_TIMEOUT_SECONDS`). **Not re-verified live this
+>   round** (can't practically re-run a 300+s wait to prove a timeout
+>   fix) -- see "Same day, round 5" below, including a loose end: that
+>   Reel is still sitting there unpublished, and the goal it came from
+>   explicitly said not to publish yet.
 
 ## What got built
 
@@ -564,3 +578,55 @@ failure mode can't silently come back.
 diagnosed at the correct layer, fixed, and re-run successfully end to
 end through the real planner and real executor — not re-asserted from
 inference. `atlas-wake.service` restarted again to load this.
+
+## Same day, round 5: recording actually worked, voice loop said it didn't
+
+Wesley tried it again after round 4's restart. Result: "no clue if it
+actually worked... nothing opened on my computer and there is no file
+on my comp or Instagram." Real transcript in journalctl showed
+`Sentence stream timed out waiting for the next chunk.` → `A.T.L.A.S.:
+I was unable to generate an answer.` — a third distinct failure mode,
+not a repeat of rounds 3/4.
+
+**Checked whether the recording actually happened anyway before
+assuming another bug in the pipeline itself:** `ls -la
+/home/atlas/atlas-staging/incoming/` showed `reel_1784676131.mp4`,
+created seconds *after* the "unable to generate an answer" timestamp.
+ffprobe/decode: real, clean, 1080x1920, 24fps, 24.4s. **It worked.** The
+recording pipeline is not the bug this round.
+
+**Root cause:** `listen_and_answer.ask_and_speak_streaming()`'s consumer
+loop was `sentence_queue.get(timeout=30)` -- gives up on the whole turn
+if 30 seconds pass with no new streamed sentence. `content.
+record_self_showcase` runs synchronously inside the model's tool-call
+handling and produces zero streamed text while it's running, and it's
+registered with `timeout_seconds=300` -- the longest of any agent tool,
+because a real recording (narration synthesis + HUD/PC capture + ffmpeg
+edit, per beat) genuinely takes far longer than 30 seconds. The
+producer thread doing the real work is a daemon thread, so when the
+consumer gave up at 30s, the recording kept running orphaned in the
+background, finished successfully a bit later, and nobody was told.
+
+**Fix:** raised the consumer's patience to a new
+`SENTENCE_STREAM_IDLE_TIMEOUT_SECONDS = 320` (just above the longest
+registered agent tool timeout) instead of the hardcoded `30`.
+
+**Loose end, not yet resolved:** the mission goal for this exact
+attempt said "save the finished video ready for Instagram publishing.
+Do not publish it yet" (`data/agent_missions.json`), so the real
+finished file (`reel_1784676131.mp4`, since renamed/moved or already
+handled -- check `/home/atlas/atlas-staging/incoming/` for the current
+one) was sitting there unpublished and unreported when this round ended.
+Whoever picks this up next: check whether Wesley already knows about it
+or wants it published before assuming a fresh recording is needed.
+
+**Not yet verified live this round** (unlike rounds 2-4): fixing a
+30-second timeout by raising it to 320 seconds can't be practically
+re-verified by actually waiting out a live 300+-second tool call in an
+agent session the way earlier rounds' fixes were. Confirmed correct by
+reading the code path directly (the exact literal timeout value, the
+exact tool's registered ceiling, the exact orphaned-daemon-thread
+mechanism) and by the real evidence above (file timestamp after the
+"failed" message), not by a fresh live run. If this exact "no clue if it
+worked" symptom recurs, don't re-diagnose from scratch -- re-check
+whether a file actually landed in staging first, the way this round did.
