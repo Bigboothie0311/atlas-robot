@@ -84,10 +84,16 @@ TOOLS = [
         "description": (
             "Use Atlas's autonomous runtime for a concrete owner-requested "
             "action that requires real tools, multi-step execution, and "
-            "verification, such as finding or copying a file on the PC, "
-            "checking visible PC apps, or opening an approved app. Do not "
-            "use this for ordinary questions, explanations, weather, or "
-            "Atlas diagnostics."
+            "verification -- such as finding or copying a file on the PC, "
+            "checking visible PC apps, opening an approved app, recording "
+            "a narrated self-showcase video of Atlas's own HUD screen "
+            "('record a video of yourself', 'make a promo video', 'make "
+            "an Instagram reel', ...), or publishing a finished video to "
+            "Instagram. This is the ONLY path to those recording/"
+            "publishing capabilities -- do not answer them with "
+            "run_atlas_diagnostic_or_repair, which cannot record or "
+            "publish anything. Do not use this for ordinary questions, "
+            "explanations, weather, or Atlas diagnostics."
         ),
         "parameters": {
             "type": "object",
@@ -117,7 +123,9 @@ TOOLS = [
             "connections, check storage, review recent errors, check its "
             "tool versions, or list what it can do — these are real "
             "capabilities available here, in every conversation, so call "
-            "this instead of saying you don't have access to them."
+            "this instead of saying you don't have access to them. Not "
+            "for recording or publishing a video, even though that's "
+            "also a real capability -- use run_atlas_agent for that."
         ),
         "parameters": {
             "type": "object",
