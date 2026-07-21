@@ -7,6 +7,7 @@ from typing import Any
 
 from atlas_agent.event_bus import EventBus
 from atlas_agent.executor import ToolExecutor
+from atlas_agent.local_tools import register_local_tools
 from atlas_agent.mission_store import MissionStore
 from atlas_agent.openai_planner import OpenAIPlanGenerator
 from atlas_agent.pc_client import PCClient
@@ -110,6 +111,13 @@ def build_pc_agent_runtime(
             staging_directory=staging_directory,
             approved_remote_roots=roots,
             port=ssh_port,
+        ),
+    )
+    register_local_tools(
+        registry,
+        verifier,
+        approved_roots=(
+            Path("/home/atlas/atlas-robot"),
         ),
     )
 

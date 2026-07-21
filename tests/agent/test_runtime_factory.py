@@ -13,6 +13,7 @@ EXPECTED_PC_TOOLS = {
     "pc.download_file",
     "pc.active_apps",
     "pc.open_app",
+    "pi.list_directory",
 }
 
 

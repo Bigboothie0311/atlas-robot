@@ -157,16 +157,77 @@ class AgentVoiceController:
             tool_name == "pc.search_files"
             and isinstance(output, list)
         ):
+            names = [
+                item.get("name")
+                for item in output
+                if isinstance(item, dict)
+                and isinstance(item.get("name"), str)
+                and item.get("name")
+            ]
             count = len(output)
-            noun = (
-                "file"
-                if count == 1
-                else "files"
-            )
+            noun = "file" if count == 1 else "files"
+
+            if names:
+                spoken_names = ", ".join(names[:10])
+                remaining = count - len(names[:10])
+                extra = (
+                    f", plus {remaining} more"
+                    if remaining > 0
+                    else ""
+                )
+                return (
+                    f"I found {count} matching {noun} "
+                    "in the approved Windows folders: "
+                    f"{spoken_names}{extra}."
+                )
+
             return (
                 f"I found {count} matching {noun} "
                 "in the approved Windows folders."
             )
+
+        if (
+            tool_name == "pi.list_directory"
+            and isinstance(output, dict)
+        ):
+            entries = output.get("entries")
+            path = output.get("path")
+            total_count = output.get("total_count")
+
+            if isinstance(entries, list):
+                names = [
+                    item.get("name")
+                    for item in entries
+                    if isinstance(item, dict)
+                    and isinstance(item.get("name"), str)
+                    and item.get("name")
+                ]
+                count = (
+                    total_count
+                    if isinstance(total_count, int)
+                    else len(names)
+                )
+                noun = "item" if count == 1 else "items"
+
+                if names:
+                    spoken_names = ", ".join(names[:20])
+                    remaining = count - len(names[:20])
+                    extra = (
+                        f", plus {remaining} more"
+                        if remaining > 0
+                        else ""
+                    )
+                    location = (
+                        Path(path).name
+                        if isinstance(path, str) and path
+                        else "that folder"
+                    )
+                    return (
+                        f"I found {count} {noun} in "
+                        f"{location}: {spoken_names}{extra}."
+                    )
+
+                return "That Raspberry Pi folder is empty."
 
         if (
             tool_name == "pc.ensure_online"

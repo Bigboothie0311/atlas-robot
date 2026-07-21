@@ -258,3 +258,103 @@ def test_runtime_exception_becomes_safe_spoken_failure():
     controller.close()
 
     assert bundle.closed is True
+
+
+
+def test_pi_directory_listing_speaks_actual_names():
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.COMPLETED,
+        confirmation_call_id=None,
+        error=None,
+        steps=(
+            make_step(
+                tool_name="pi.list_directory",
+                output={
+                    "path": "/home/atlas/atlas-robot",
+                    "entries": [
+                        {
+                            "name": "atlas_agent",
+                            "path": (
+                                "/home/atlas/atlas-robot/"
+                                "atlas_agent"
+                            ),
+                            "type": "directory",
+                            "size": None,
+                        },
+                        {
+                            "name": "robot_hub.py",
+                            "path": (
+                                "/home/atlas/atlas-robot/"
+                                "robot_hub.py"
+                            ),
+                            "type": "file",
+                            "size": 100,
+                        },
+                    ],
+                    "count": 2,
+                    "total_count": 2,
+                    "truncated": False,
+                },
+            ),
+        ),
+    )
+    controller = AgentVoiceController(
+        FakeBundle(
+            FakeRuntime(
+                result=make_result(workflow)
+            )
+        )
+    )
+
+    response = controller.handle_goal(
+        "List the files in the Atlas robot project folder."
+    )
+
+    assert response.ok is True
+    assert response.text == (
+        "I found 2 items in atlas-robot: "
+        "atlas_agent, robot_hub.py."
+    )
+
+
+def test_windows_search_speaks_matching_names():
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.COMPLETED,
+        confirmation_call_id=None,
+        error=None,
+        steps=(
+            make_step(
+                tool_name="pc.search_files",
+                output=[
+                    {
+                        "name": "ATLAS.f3d",
+                        "path": (
+                            r"C:\Users\wesle\ATLAS.f3d"
+                        ),
+                    },
+                    {
+                        "name": "ATLAS.stl",
+                        "path": (
+                            r"C:\Users\wesle\ATLAS.stl"
+                        ),
+                    },
+                ],
+            ),
+        ),
+    )
+    controller = AgentVoiceController(
+        FakeBundle(
+            FakeRuntime(
+                result=make_result(workflow)
+            )
+        )
+    )
+
+    response = controller.handle_goal(
+        "Find my Atlas files on the PC."
+    )
+
+    assert response.text == (
+        "I found 2 matching files in the approved "
+        "Windows folders: ATLAS.f3d, ATLAS.stl."
+    )
