@@ -369,6 +369,24 @@ class OpenAIPlanGenerator:
             )
         )
 
+        # A self-showcase/Instagram goal inherently mentions "HUD" (the
+        # whole feature is Atlas narrating his own HUD) and commonly
+        # "status"/"diagnostics" (self-diagnostics is a real tour beat)
+        # -- confirmed live 2026-07-21: those words alone were enough to
+        # trip the get_service_status and run_diagnostics shortcuts
+        # below on a real, well-formed recording goal, hijacking it into
+        # a cheap status/diagnostics check and never reaching the real
+        # planner (so content.record_self_showcase never even got
+        # considered). None of the shortcuts below have a legitimate
+        # reason to fire on a goal that's actually about recording or
+        # publishing media, so skip all of them and fall through to the
+        # real planner whenever one of these words is present.
+        if words & {
+            "reel", "showcase", "record", "recording",
+            "publish", "publishing",
+        }:
+            return None
+
         explicit_file_match = re.search(
             r"(?P<path>/home/atlas/atlas-robot"
             r"(?:/[A-Za-z0-9._-]+)+)",

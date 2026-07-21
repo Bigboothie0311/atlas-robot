@@ -607,6 +607,49 @@ def register_content_tools(
                                 "omitted or unrecognized just records "
                                 "the PC screen as-is."
                             ),
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "narration": {
+                                        "type": "string",
+                                    },
+                                    "action": {
+                                        "type": ["string", "null"],
+                                    },
+                                    "source": {
+                                        "type": ["string", "null"],
+                                    },
+                                    "pc_action": {
+                                        "type": ["object", "null"],
+                                        "properties": {
+                                            "type": {
+                                                "type": [
+                                                    "string", "null",
+                                                ],
+                                            },
+                                            "query": {
+                                                "type": [
+                                                    "string", "null",
+                                                ],
+                                            },
+                                            "app": {
+                                                "type": [
+                                                    "string", "null",
+                                                ],
+                                            },
+                                        },
+                                        "required": [
+                                            "type", "query", "app",
+                                        ],
+                                        "additionalProperties": False,
+                                    },
+                                },
+                                "required": [
+                                    "narration", "action",
+                                    "source", "pc_action",
+                                ],
+                                "additionalProperties": False,
+                            },
                         },
                     },
                     "required": ["mission", "beats"],

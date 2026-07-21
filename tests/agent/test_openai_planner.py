@@ -1493,6 +1493,131 @@ def test_hud_status_question_not_hijacked_by_recovery():
     )
 
 
+RECORD_SELF_SHOWCASE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "mission": {"type": ["string", "null"]},
+        "beats": {"type": ["array", "null"]},
+    },
+    "required": ["mission", "beats"],
+    "additionalProperties": False,
+}
+
+
+def test_self_showcase_recording_goal_not_hijacked_by_service_status():
+    """Confirmed live 2026-07-21: this exact real goal previously got
+    hijacked by the get_service_status deterministic shortcut, purely
+    because it mentions "HUD" and "status" -- every self-showcase goal
+    naturally does, since that's the whole feature -- so the request
+    never reached the real planner and content.record_self_showcase
+    never even got considered."""
+    client = FakeClient(
+        [
+            make_plan_call(
+                [
+                    {
+                        "tool": "content.record_self_showcase",
+                        "description": (
+                            "Record and edit the self-showcase Reel."
+                        ),
+                        "arguments": {
+                            "mission": None,
+                            "beats": None,
+                        },
+                    }
+                ]
+            )
+        ]
+    )
+    generator = OpenAIPlanGenerator(
+        client=client,
+        model="gpt-test",
+    )
+
+    result = generator.generate(
+        (
+            "Record a narrated Instagram Reel showcasing Atlas's own "
+            "tactical HUD screen, using the real self-recording path. "
+            "Include a polished tour of the weather radar HUD and a "
+            "self-diagnostics/status readout, edit it into a vertical "
+            "9:16 Reel, and save the finished video without publishing "
+            "it."
+        ),
+        [
+            make_tool(
+                "content.record_self_showcase",
+                parameters=RECORD_SELF_SHOWCASE_SCHEMA,
+            ),
+            make_tool(
+                "pi.get_service_status",
+                parameters=SERVICE_STATUS_SCHEMA,
+            ),
+            make_tool(
+                "pi.run_diagnostics",
+                parameters=RUN_DIAGNOSTICS_SCHEMA,
+            ),
+        ],
+    )
+
+    assert len(client.responses.calls) == 1
+    assert result.proposal.steps[0].tool == (
+        "content.record_self_showcase"
+    )
+
+
+def test_diagnostics_word_in_showcase_goal_not_hijacked():
+    """Confirmed live 2026-07-21: a goal mentioning "self-diagnostics"
+    as part of the showcase tour got hijacked by the run_diagnostics
+    shortcut for the same reason -- the word alone was enough."""
+    client = FakeClient(
+        [
+            make_plan_call(
+                [
+                    {
+                        "tool": "content.record_self_showcase",
+                        "description": (
+                            "Record and edit the self-showcase Reel."
+                        ),
+                        "arguments": {
+                            "mission": None,
+                            "beats": None,
+                        },
+                    }
+                ]
+            )
+        ]
+    )
+    generator = OpenAIPlanGenerator(
+        client=client,
+        model="gpt-test",
+    )
+
+    result = generator.generate(
+        (
+            "Record a narrated promotional Instagram Reel of Atlas's "
+            "own HUD screen using the real self-recording path, "
+            "including the weather radar and self-diagnostics "
+            "showcase, edit it into a 9:16 Reel, and save the finished "
+            "video ready for Instagram publishing. Do not publish it."
+        ),
+        [
+            make_tool(
+                "content.record_self_showcase",
+                parameters=RECORD_SELF_SHOWCASE_SCHEMA,
+            ),
+            make_tool(
+                "pi.run_diagnostics",
+                parameters=RUN_DIAGNOSTICS_SCHEMA,
+            ),
+        ],
+    )
+
+    assert len(client.responses.calls) == 1
+    assert result.proposal.steps[0].tool == (
+        "content.record_self_showcase"
+    )
+
+
 FOCUS_OR_OPEN_APP_SCHEMA = {
     "type": "object",
     "properties": {
