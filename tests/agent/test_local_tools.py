@@ -5,8 +5,13 @@ from atlas_agent import local_tools
 from atlas_agent.local_tools import (
     register_local_tools,
 )
+from atlas_agent.mission_store import MissionStore
 from atlas_agent.results import ResultStatus
-from atlas_agent.tasks import ToolCall
+from atlas_agent.tasks import (
+    AtlasTask,
+    TaskStatus,
+    ToolCall,
+)
 from atlas_agent.tool_registry import ToolRegistry
 from atlas_agent.verifier import (
     ResultVerifier,
@@ -21,8 +26,33 @@ def build_tools(tmp_path):
         registry,
         verifier,
         approved_roots=[tmp_path],
+        mission_store_path=(
+            tmp_path / "agent_missions.json"
+        ),
     )
     return registry, verifier, tools
+
+
+def save_missions(tmp_path, tasks):
+    MissionStore(
+        tmp_path / "agent_missions.json"
+    ).save(tasks)
+
+
+def make_mission(
+    goal,
+    status,
+    updated_at,
+    metadata=None,
+):
+    return AtlasTask(
+        goal=goal,
+        source="voice",
+        status=status,
+        created_at="2026-07-19T00:00:00+00:00",
+        updated_at=updated_at,
+        metadata=dict(metadata or {}),
+    )
 
 
 def execute(registry, call):
@@ -41,7 +71,7 @@ def test_pi_directory_tool_lists_names_and_verifies(
         tmp_path
     )
 
-    assert len(tools) == 7
+    assert len(tools) == 9
     assert registry.get(
         "pi.list_directory"
     ).runs_on == "pi"
@@ -936,4 +966,299 @@ def test_pi_get_upgrade_status_blocked_scope_lists_items(
     assert result.status is ResultStatus.SUCCESS
     assert result.output["count"] == 1
     assert result.output["items"][0]["feature_id"] == "phase7_gmail_agent"
+    assert verification.status is VerificationStatus.VERIFIED
+
+
+def test_pi_get_mission_history_rejects_unknown_scope(tmp_path):
+    registry, _verifier, _tools = build_tools(tmp_path)
+    call = ToolCall(
+        tool_name="pi.get_mission_history",
+        arguments={"scope": "everything", "limit": 5},
+    )
+
+    result = execute(registry, call)
+
+    assert result.status is ResultStatus.ERROR
+    assert "ValueError" in result.error
+
+
+def test_pi_get_mission_history_rejects_bad_limit(tmp_path):
+    registry, _verifier, _tools = build_tools(tmp_path)
+    call = ToolCall(
+        tool_name="pi.get_mission_history",
+        arguments={"scope": "recent", "limit": 0},
+    )
+
+    result = execute(registry, call)
+
+    assert result.status is ResultStatus.ERROR
+    assert "ValueError" in result.error
+
+
+def test_pi_get_mission_history_empty_store_and_verifies(tmp_path):
+    registry, verifier, _tools = build_tools(tmp_path)
+    call = ToolCall(
+        tool_name="pi.get_mission_history",
+        arguments={"scope": "recent", "limit": 5},
+    )
+
+    result = execute(registry, call)
+    verification = verifier.verify(call, result)
+
+    assert result.status is ResultStatus.SUCCESS
+    assert result.output["missions"] == []
+    assert result.output["count"] == 0
+    assert result.output["total_count"] == 0
+    assert verification.status is VerificationStatus.VERIFIED
+
+
+def test_pi_get_mission_history_last_scope_returns_newest(tmp_path):
+    save_missions(
+        tmp_path,
+        [
+            make_mission(
+                "List the project folder",
+                TaskStatus.COMPLETED,
+                "2026-07-19T10:00:00+00:00",
+            ),
+            make_mission(
+                "Check the wake service",
+                TaskStatus.COMPLETED,
+                "2026-07-19T12:00:00+00:00",
+            ),
+        ],
+    )
+
+    registry, verifier, _tools = build_tools(tmp_path)
+    call = ToolCall(
+        tool_name="pi.get_mission_history",
+        arguments={"scope": "last", "limit": 5},
+    )
+
+    result = execute(registry, call)
+    verification = verifier.verify(call, result)
+
+    assert result.status is ResultStatus.SUCCESS
+    assert result.output["count"] == 1
+    assert result.output["total_count"] == 2
+    assert result.output["missions"][0]["goal"] == (
+        "Check the wake service"
+    )
+    assert result.output["missions"][0]["status"] == "completed"
+    assert verification.status is VerificationStatus.VERIFIED
+
+
+def test_pi_get_mission_history_failed_scope_filters_and_notes(
+    tmp_path,
+):
+    save_missions(
+        tmp_path,
+        [
+            make_mission(
+                "List the project folder",
+                TaskStatus.COMPLETED,
+                "2026-07-19T10:00:00+00:00",
+            ),
+            make_mission(
+                "Read the hub logs",
+                TaskStatus.FAILED,
+                "2026-07-19T11:00:00+00:00",
+                metadata={
+                    "recovery_reason": (
+                        "Task was interrupted before completion."
+                    ),
+                },
+            ),
+            make_mission(
+                "Check the printer",
+                TaskStatus.CANCELLED,
+                "2026-07-19T12:00:00+00:00",
+            ),
+        ],
+    )
+
+    registry, verifier, _tools = build_tools(tmp_path)
+    call = ToolCall(
+        tool_name="pi.get_mission_history",
+        arguments={"scope": "failed", "limit": 5},
+    )
+
+    result = execute(registry, call)
+    verification = verifier.verify(call, result)
+
+    assert result.status is ResultStatus.SUCCESS
+    assert result.output["count"] == 2
+    assert result.output["total_count"] == 3
+    assert [
+        mission["goal"]
+        for mission in result.output["missions"]
+    ] == ["Check the printer", "Read the hub logs"]
+    assert result.output["missions"][1]["note"] == (
+        "Task was interrupted before completion."
+    )
+    assert verification.status is VerificationStatus.VERIFIED
+
+
+def test_pi_get_mission_history_recent_scope_respects_limit(
+    tmp_path,
+):
+    save_missions(
+        tmp_path,
+        [
+            make_mission(
+                f"Mission {index}",
+                TaskStatus.COMPLETED,
+                f"2026-07-19T1{index}:00:00+00:00",
+            )
+            for index in range(4)
+        ],
+    )
+
+    registry, verifier, _tools = build_tools(tmp_path)
+    call = ToolCall(
+        tool_name="pi.get_mission_history",
+        arguments={"scope": "recent", "limit": 2},
+    )
+
+    result = execute(registry, call)
+    verification = verifier.verify(call, result)
+
+    assert result.status is ResultStatus.SUCCESS
+    assert result.output["count"] == 2
+    assert result.output["total_count"] == 4
+    assert [
+        mission["goal"]
+        for mission in result.output["missions"]
+    ] == ["Mission 3", "Mission 2"]
+    assert verification.status is VerificationStatus.VERIFIED
+
+
+def test_pi_explain_last_failure_rejects_bad_window(tmp_path):
+    registry, _verifier, _tools = build_tools(tmp_path)
+    call = ToolCall(
+        tool_name="pi.explain_last_failure",
+        arguments={"window": 0},
+    )
+
+    result = execute(registry, call)
+
+    assert result.status is ResultStatus.ERROR
+    assert "ValueError" in result.error
+
+
+def test_pi_explain_last_failure_reports_no_evidence(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        local_tools.logbook,
+        "read_interactions",
+        lambda window: [],
+    )
+    monkeypatch.setattr(
+        local_tools.logbook,
+        "read_incidents",
+        lambda limit: [],
+    )
+
+    registry, verifier, _tools = build_tools(tmp_path)
+    call = ToolCall(
+        tool_name="pi.explain_last_failure",
+        arguments={"window": 25},
+    )
+
+    result = execute(registry, call)
+    verification = verifier.verify(call, result)
+
+    assert result.status is ResultStatus.SUCCESS
+    assert result.output["evidence_found"] is False
+    assert result.output["failed_mission"] is None
+    assert result.output["last_error_interaction"] is None
+    assert result.output["recent_incidents"] == []
+    assert verification.status is VerificationStatus.VERIFIED
+
+
+def test_pi_explain_last_failure_collects_real_evidence(
+    tmp_path,
+    monkeypatch,
+):
+    save_missions(
+        tmp_path,
+        [
+            make_mission(
+                "List the project folder",
+                TaskStatus.COMPLETED,
+                "2026-07-19T10:00:00+00:00",
+            ),
+            make_mission(
+                "Read the hub logs",
+                TaskStatus.FAILED,
+                "2026-07-19T11:00:00+00:00",
+                metadata={
+                    "recovery_reason": (
+                        "Task was interrupted before completion."
+                    ),
+                },
+            ),
+        ],
+    )
+    monkeypatch.setattr(
+        local_tools.logbook,
+        "read_interactions",
+        lambda window: [
+            {
+                "ts": 1000.0,
+                "transcript": "read the hub logs",
+                "intent": "agent_goal",
+                "errors": ["TimeoutError: planner timed out"],
+                "outcome": "error",
+            },
+            {
+                "ts": 1001.0,
+                "transcript": "what time is it",
+                "intent": "local",
+                "errors": [],
+                "outcome": "ok",
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        local_tools.logbook,
+        "read_incidents",
+        lambda limit: [
+            {
+                "ts": 900.0,
+                "component": "hud",
+                "cause": "the HUD kiosk was not active",
+                "action": "restarted atlas-hud.service",
+                "verification": "service now active",
+                "resolved": True,
+            },
+        ],
+    )
+
+    registry, verifier, _tools = build_tools(tmp_path)
+    call = ToolCall(
+        tool_name="pi.explain_last_failure",
+        arguments={"window": 25},
+    )
+
+    result = execute(registry, call)
+    verification = verifier.verify(call, result)
+
+    assert result.status is ResultStatus.SUCCESS
+    assert result.output["evidence_found"] is True
+    assert result.output["failed_mission"]["goal"] == (
+        "Read the hub logs"
+    )
+    assert result.output["failed_mission"]["note"] == (
+        "Task was interrupted before completion."
+    )
+    assert result.output["last_error_interaction"]["errors"] == [
+        "TimeoutError: planner timed out"
+    ]
+    assert result.output["incident_count"] == 1
+    assert result.output["recent_incidents"][0]["component"] == (
+        "hud"
+    )
     assert verification.status is VerificationStatus.VERIFIED

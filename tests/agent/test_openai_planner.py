@@ -1096,3 +1096,193 @@ def test_upgrade_status_not_hijacked_without_tool_available():
     assert result.proposal.steps[0].tool == (
         "pi.get_service_status"
     )
+
+
+MISSION_HISTORY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "scope": {
+            "type": "string",
+            "enum": ["last", "recent", "failed"],
+        },
+        "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20,
+        },
+    },
+    "required": ["scope", "limit"],
+    "additionalProperties": False,
+}
+
+EXPLAIN_FAILURE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "window": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50,
+        },
+    },
+    "required": ["window"],
+    "additionalProperties": False,
+}
+
+
+def test_routes_pi_get_mission_history_last_scope():
+    client = FakeClient([])
+    generator = OpenAIPlanGenerator(
+        client=client,
+        model="gpt-test",
+    )
+
+    result = generator.generate(
+        "What was your last mission?",
+        [
+            make_tool(
+                "pi.get_mission_history",
+                parameters=MISSION_HISTORY_SCHEMA,
+            ),
+        ],
+    )
+
+    assert client.responses.calls == []
+    assert result.response_id is None
+    assert len(result.proposal.steps) == 1
+    assert result.proposal.steps[0].tool == (
+        "pi.get_mission_history"
+    )
+    assert result.proposal.steps[0].arguments == {
+        "scope": "last",
+        "limit": 5,
+    }
+
+
+def test_routes_pi_get_mission_history_recent_scope():
+    client = FakeClient([])
+    generator = OpenAIPlanGenerator(
+        client=client,
+        model="gpt-test",
+    )
+
+    result = generator.generate(
+        "Show me your recent mission history",
+        [
+            make_tool(
+                "pi.get_mission_history",
+                parameters=MISSION_HISTORY_SCHEMA,
+            ),
+        ],
+    )
+
+    assert client.responses.calls == []
+    assert result.proposal.steps[0].arguments == {
+        "scope": "recent",
+        "limit": 5,
+    }
+
+
+def test_routes_pi_get_mission_history_failed_scope():
+    client = FakeClient([])
+    generator = OpenAIPlanGenerator(
+        client=client,
+        model="gpt-test",
+    )
+
+    result = generator.generate(
+        "Did any recent missions fail?",
+        [
+            make_tool(
+                "pi.get_mission_history",
+                parameters=MISSION_HISTORY_SCHEMA,
+            ),
+        ],
+    )
+
+    assert client.responses.calls == []
+    assert result.proposal.steps[0].arguments == {
+        "scope": "failed",
+        "limit": 5,
+    }
+
+
+def test_routes_pi_explain_last_failure_from_why_question():
+    client = FakeClient([])
+    generator = OpenAIPlanGenerator(
+        client=client,
+        model="gpt-test",
+    )
+
+    result = generator.generate(
+        "Check your logs and tell me why the last command failed",
+        [
+            make_tool(
+                "pi.explain_last_failure",
+                parameters=EXPLAIN_FAILURE_SCHEMA,
+            ),
+            make_tool(
+                "pi.get_mission_history",
+                parameters=MISSION_HISTORY_SCHEMA,
+            ),
+        ],
+    )
+
+    assert client.responses.calls == []
+    assert result.response_id is None
+    assert len(result.proposal.steps) == 1
+    assert result.proposal.steps[0].tool == (
+        "pi.explain_last_failure"
+    )
+    assert result.proposal.steps[0].arguments == {
+        "window": 25,
+    }
+
+
+def test_routes_pi_explain_last_failure_over_mission_history():
+    client = FakeClient([])
+    generator = OpenAIPlanGenerator(
+        client=client,
+        model="gpt-test",
+    )
+
+    result = generator.generate(
+        "Why did the last mission fail?",
+        [
+            make_tool(
+                "pi.explain_last_failure",
+                parameters=EXPLAIN_FAILURE_SCHEMA,
+            ),
+            make_tool(
+                "pi.get_mission_history",
+                parameters=MISSION_HISTORY_SCHEMA,
+            ),
+        ],
+    )
+
+    assert client.responses.calls == []
+    assert result.proposal.steps[0].tool == (
+        "pi.explain_last_failure"
+    )
+
+
+def test_routes_pi_explain_last_failure_what_went_wrong():
+    client = FakeClient([])
+    generator = OpenAIPlanGenerator(
+        client=client,
+        model="gpt-test",
+    )
+
+    result = generator.generate(
+        "What went wrong earlier?",
+        [
+            make_tool(
+                "pi.explain_last_failure",
+                parameters=EXPLAIN_FAILURE_SCHEMA,
+            ),
+        ],
+    )
+
+    assert client.responses.calls == []
+    assert result.proposal.steps[0].tool == (
+        "pi.explain_last_failure"
+    )

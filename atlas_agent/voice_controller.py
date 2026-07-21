@@ -11,6 +11,17 @@ from atlas_agent.workflow import (
     WorkflowStatus,
 )
 
+_MISSION_STATUS_PHRASES = {
+    "queued": "is queued",
+    "running": "is still running",
+    "waiting_confirmation": (
+        "is waiting for confirmation"
+    ),
+    "completed": "completed",
+    "failed": "failed",
+    "cancelled": "was cancelled",
+}
+
 
 @dataclass(frozen=True, slots=True)
 class AgentVoiceResponse:
@@ -553,6 +564,174 @@ class AgentVoiceController:
                 f"{total} upgrade items are {scope}: "
                 f"{'; '.join(titles)}{extra}."
             )
+
+        if (
+            tool_name == "pi.get_mission_history"
+            and isinstance(output, dict)
+        ):
+            scope = output.get("scope")
+            missions = output.get("missions")
+
+            if not isinstance(missions, list):
+                return (
+                    "I checked my mission history, but the "
+                    "result was incomplete."
+                )
+
+            if not missions:
+                if scope == "failed":
+                    return (
+                        "No recorded missions have failed."
+                    )
+
+                return "I have no recorded missions yet."
+
+            descriptions = []
+            maximum_spoken_missions = 3
+
+            for mission in missions[
+                :maximum_spoken_missions
+            ]:
+                if not isinstance(mission, dict):
+                    continue
+
+                goal_text = mission.get("goal")
+                status = mission.get("status")
+
+                if not (
+                    isinstance(goal_text, str)
+                    and isinstance(status, str)
+                ):
+                    continue
+
+                status_phrase = (
+                    _MISSION_STATUS_PHRASES.get(
+                        status,
+                        f"is {status}",
+                    )
+                )
+                descriptions.append(
+                    f"{goal_text}, which {status_phrase}"
+                )
+
+            if not descriptions:
+                return (
+                    "I checked my mission history, but the "
+                    "result was incomplete."
+                )
+
+            if scope == "last":
+                return (
+                    "My last recorded mission was: "
+                    f"{descriptions[0]}."
+                )
+
+            total = output.get("count")
+            total = (
+                total
+                if isinstance(total, int)
+                else len(descriptions)
+            )
+            remaining_count = total - len(descriptions)
+            extra = (
+                f", plus {remaining_count} more"
+                if remaining_count > 0
+                else ""
+            )
+            label = (
+                "failed missions"
+                if scope == "failed"
+                else "recent missions"
+            )
+
+            return (
+                f"I have {total} recorded {label}: "
+                f"{'; '.join(descriptions)}{extra}."
+            )
+
+        if (
+            tool_name == "pi.explain_last_failure"
+            and isinstance(output, dict)
+        ):
+            if output.get("evidence_found") is not True:
+                return (
+                    "I checked my mission history and "
+                    "logs, and I found no recorded "
+                    "failure to explain."
+                )
+
+            parts = []
+            failed_mission = output.get("failed_mission")
+
+            if isinstance(
+                failed_mission, dict
+            ) and isinstance(
+                failed_mission.get("goal"), str
+            ):
+                sentence = (
+                    "My last failed mission was: "
+                    f"{failed_mission['goal']}."
+                )
+                note = failed_mission.get("note")
+
+                if isinstance(note, str) and note:
+                    sentence += (
+                        f" The recorded reason is: {note}"
+                    )
+
+                parts.append(sentence)
+
+            interaction = output.get(
+                "last_error_interaction"
+            )
+
+            if isinstance(interaction, dict):
+                errors = interaction.get("errors")
+
+                if (
+                    isinstance(errors, list)
+                    and errors
+                    and isinstance(errors[0], str)
+                ):
+                    parts.append(
+                        "The last logged error was: "
+                        f"{errors[0]}."
+                    )
+
+            incidents = output.get("recent_incidents")
+
+            if isinstance(incidents, list) and incidents:
+                unresolved = [
+                    incident
+                    for incident in incidents
+                    if isinstance(incident, dict)
+                    and incident.get("resolved") is False
+                ]
+
+                if unresolved:
+                    latest = unresolved[0]
+                    component = latest.get("component")
+                    verification = latest.get(
+                        "verification"
+                    )
+
+                    if isinstance(
+                        component, str
+                    ) and isinstance(verification, str):
+                        parts.append(
+                            "My latest unresolved "
+                            f"incident is {component}: "
+                            f"{verification}."
+                        )
+
+            if not parts:
+                return (
+                    "I found recorded incident evidence, "
+                    "but no failed mission or logged "
+                    "error to explain."
+                )
+
+            return " ".join(parts)
 
         if (
             tool_name == "pc.ensure_online"

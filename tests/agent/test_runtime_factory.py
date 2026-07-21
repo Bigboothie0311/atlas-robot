@@ -20,6 +20,8 @@ EXPECTED_PC_TOOLS = {
     "pi.read_service_logs",
     "pi.get_service_status",
     "pi.get_upgrade_status",
+    "pi.get_mission_history",
+    "pi.explain_last_failure",
 }
 
 

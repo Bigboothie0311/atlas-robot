@@ -692,6 +692,111 @@ class OpenAIPlanGenerator:
                 output_tokens=0,
             )
 
+        mentions_failure = bool(
+            words
+            & {
+                "fail",
+                "failed",
+                "failing",
+                "failure",
+                "failures",
+                "wrong",
+            }
+        )
+        asks_for_explanation = (
+            "why" in words
+            or (
+                "what" in words
+                and bool(
+                    words
+                    & {
+                        "wrong",
+                        "happened",
+                    }
+                )
+            )
+        )
+
+        if (
+            "pi.explain_last_failure" in available_tools
+            and mentions_failure
+            and asks_for_explanation
+        ):
+            return PlanGenerationResult(
+                proposal=PlanProposal(
+                    goal=goal,
+                    steps=(
+                        PlanStepProposal(
+                            tool="pi.explain_last_failure",
+                            description=(
+                                "Explain the most recent "
+                                "recorded failure from real "
+                                "mission and log evidence."
+                            ),
+                            arguments={"window": 25},
+                        ),
+                    ),
+                ),
+                response_id=None,
+                input_tokens=0,
+                output_tokens=0,
+            )
+
+        mentions_missions = bool(
+            words & {"mission", "missions"}
+        )
+
+        if (
+            "pi.get_mission_history" in available_tools
+            and mentions_missions
+            and bool(
+                words
+                & {
+                    "history",
+                    "last",
+                    "latest",
+                    "recent",
+                    "previous",
+                    "earlier",
+                    "failed",
+                    "failures",
+                }
+            )
+        ):
+            if words & {"failed", "failures", "fail"}:
+                scope = "failed"
+            elif words & {
+                "last",
+                "latest",
+                "previous",
+            }:
+                scope = "last"
+            else:
+                scope = "recent"
+
+            return PlanGenerationResult(
+                proposal=PlanProposal(
+                    goal=goal,
+                    steps=(
+                        PlanStepProposal(
+                            tool="pi.get_mission_history",
+                            description=(
+                                "Report recorded A.T.L.A.S. "
+                                "missions from the mission "
+                                "store."
+                            ),
+                            arguments={
+                                "scope": scope,
+                                "limit": 5,
+                            },
+                        ),
+                    ),
+                ),
+                response_id=None,
+                input_tokens=0,
+                output_tokens=0,
+            )
+
         return None
 
     def _find_plan_call(

@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Any
 
 import implementation_ledger
+import logbook
+from atlas_agent.mission_store import MissionStore
 from atlas_agent.tool_registry import ToolRegistry
 from atlas_agent.tools import AtlasTool
 from atlas_agent.verifier import (
@@ -19,6 +21,22 @@ _UPGRADE_STATUS_SCOPES = (
     "remaining",
     "blocked",
 )
+
+_MISSION_HISTORY_SCOPES = (
+    "last",
+    "recent",
+    "failed",
+)
+_FAILED_TASK_STATUSES = {
+    "failed",
+    "cancelled",
+}
+_DEFAULT_MISSION_STORE_PATH = Path(
+    "/home/atlas/atlas-robot/data/agent_missions.json"
+)
+_MAX_SPOKEN_ERROR_CHARS = 300
+_MAX_FAILURE_ERRORS = 3
+_MAX_RECENT_INCIDENTS = 5
 
 
 _MAX_TEXT_FILE_BYTES = 1_048_576
@@ -133,6 +151,7 @@ def register_local_tools(
     verifier: ResultVerifier,
     *,
     approved_roots: Iterable[str | Path],
+    mission_store_path: str | Path | None = None,
 ) -> list[AtlasTool]:
     roots = tuple(
         dict.fromkeys(
@@ -778,6 +797,165 @@ def register_local_tools(
             "count": len(entries),
         }
 
+    mission_store = MissionStore(
+        Path(mission_store_path).expanduser()
+        if mission_store_path is not None
+        else _DEFAULT_MISSION_STORE_PATH
+    )
+
+    def _load_missions_newest_first() -> list[Any]:
+        tasks = mission_store.load(
+            recover_interrupted=False,
+        )
+        return sorted(
+            tasks,
+            key=lambda task: task.updated_at,
+            reverse=True,
+        )
+
+    def _mission_entry(task: Any) -> dict[str, Any]:
+        note = task.metadata.get("recovery_reason")
+
+        return {
+            "goal": task.goal,
+            "source": task.source,
+            "status": task.status.value,
+            "created_at": task.created_at,
+            "updated_at": task.updated_at,
+            "note": (
+                note
+                if isinstance(note, str) and note
+                else None
+            ),
+        }
+
+    def get_mission_history(
+        scope: str,
+        limit: int = 5,
+    ) -> dict[str, Any]:
+        if scope not in _MISSION_HISTORY_SCOPES:
+            raise ValueError(
+                "scope must be one of "
+                f"{', '.join(_MISSION_HISTORY_SCOPES)}"
+            )
+
+        if not isinstance(limit, int):
+            raise ValueError("limit must be an integer")
+
+        if not 1 <= limit <= 20:
+            raise ValueError(
+                "limit must be between 1 and 20"
+            )
+
+        missions = _load_missions_newest_first()
+
+        if scope == "failed":
+            selected = [
+                task
+                for task in missions
+                if task.status.value
+                in _FAILED_TASK_STATUSES
+            ][:limit]
+        elif scope == "last":
+            selected = missions[:1]
+        else:
+            selected = missions[:limit]
+
+        return {
+            "scope": scope,
+            "missions": [
+                _mission_entry(task)
+                for task in selected
+            ],
+            "count": len(selected),
+            "total_count": len(missions),
+        }
+
+    def explain_last_failure(
+        window: int = 25,
+    ) -> dict[str, Any]:
+        if not isinstance(window, int):
+            raise ValueError(
+                "window must be an integer"
+            )
+
+        if not 1 <= window <= 50:
+            raise ValueError(
+                "window must be between 1 and 50"
+            )
+
+        failed_mission = None
+
+        for task in _load_missions_newest_first():
+            if (
+                task.status.value
+                in _FAILED_TASK_STATUSES
+            ):
+                failed_mission = _mission_entry(task)
+                break
+
+        last_error_interaction = None
+
+        for record in reversed(
+            logbook.read_interactions(window)
+        ):
+            errors = record.get("errors")
+
+            if (
+                not isinstance(errors, list)
+                or not errors
+            ):
+                continue
+
+            last_error_interaction = {
+                "transcript": record.get("transcript"),
+                "intent": record.get("intent"),
+                "errors": [
+                    str(error)[:_MAX_SPOKEN_ERROR_CHARS]
+                    for error in errors[
+                        :_MAX_FAILURE_ERRORS
+                    ]
+                ],
+                "outcome": record.get("outcome"),
+                "timestamp": record.get("ts"),
+            }
+            break
+
+        recent_incidents = [
+            {
+                "component": incident.get("component"),
+                "cause": incident.get("cause"),
+                "action": incident.get("action"),
+                "verification": incident.get(
+                    "verification"
+                ),
+                "resolved": incident.get("resolved"),
+                "timestamp": incident.get("ts"),
+            }
+            for incident in reversed(
+                logbook.read_incidents(
+                    _MAX_RECENT_INCIDENTS
+                )
+            )
+        ]
+
+        evidence_found = (
+            failed_mission is not None
+            or last_error_interaction is not None
+            or bool(recent_incidents)
+        )
+
+        return {
+            "window": window,
+            "failed_mission": failed_mission,
+            "last_error_interaction": (
+                last_error_interaction
+            ),
+            "recent_incidents": recent_incidents,
+            "incident_count": len(recent_incidents),
+            "evidence_found": evidence_found,
+        }
+
     roots_text = ", ".join(str(root) for root in roots)
 
     tools = [
@@ -1131,6 +1309,85 @@ def register_local_tools(
                 }
             },
         ),
+        AtlasTool(
+            name="pi.get_mission_history",
+            description=(
+                "Report recorded A.T.L.A.S. agent missions "
+                "from the persistent mission store: the last "
+                "mission, recent missions, or failed "
+                "missions, with goal, status, and "
+                "timestamps. Read-only."
+            ),
+            runs_on="pi",
+            handler=get_mission_history,
+            permission_level=0,
+            timeout_seconds=10,
+            metadata={
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "scope": {
+                            "type": "string",
+                            "enum": list(
+                                _MISSION_HISTORY_SCOPES
+                            ),
+                            "description": (
+                                "'last' for the most recent "
+                                "mission, 'recent' for the "
+                                "latest missions, or 'failed' "
+                                "for missions that failed or "
+                                "were cancelled."
+                            ),
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 20,
+                            "description": (
+                                "Maximum number of missions "
+                                "to return."
+                            ),
+                        },
+                    },
+                    "required": ["scope", "limit"],
+                    "additionalProperties": False,
+                }
+            },
+        ),
+        AtlasTool(
+            name="pi.explain_last_failure",
+            description=(
+                "Explain the most recent recorded failure "
+                "using only real evidence: the last failed "
+                "mission from the mission store, the last "
+                "logged voice-turn error, and recent "
+                "recovery incidents. Never invents a root "
+                "cause. Read-only."
+            ),
+            runs_on="pi",
+            handler=explain_last_failure,
+            permission_level=0,
+            timeout_seconds=10,
+            metadata={
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "window": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 50,
+                            "description": (
+                                "How many recent logged "
+                                "voice turns to scan for "
+                                "errors."
+                            ),
+                        },
+                    },
+                    "required": ["window"],
+                    "additionalProperties": False,
+                }
+            },
+        ),
     ]
 
     for tool in tools:
@@ -1163,6 +1420,14 @@ def register_local_tools(
     verifier.register(
         "pi.get_upgrade_status",
         _verify_upgrade_status,
+    )
+    verifier.register(
+        "pi.get_mission_history",
+        _verify_mission_history,
+    )
+    verifier.register(
+        "pi.explain_last_failure",
+        _verify_failure_explanation,
     )
 
     return tools
@@ -1621,4 +1886,140 @@ def _verify_upgrade_status(
             else "The A.T.L.A.S. upgrade status result was malformed."
         ),
         evidence={"scope": scope},
+    )
+
+
+def _verify_mission_history(
+    call: Any,
+    result: Any,
+) -> VerificationCheck:
+    output = result.output
+
+    if not isinstance(output, dict):
+        return VerificationCheck(
+            verified=False,
+            reason=(
+                "Mission history output was not an object."
+            ),
+        )
+
+    scope = output.get("scope")
+    missions = output.get("missions")
+    count = output.get("count")
+    total_count = output.get("total_count")
+
+    verified = (
+        scope in _MISSION_HISTORY_SCOPES
+        and isinstance(missions, list)
+        and all(
+            isinstance(mission, dict)
+            and isinstance(mission.get("goal"), str)
+            and isinstance(mission.get("status"), str)
+            and isinstance(
+                mission.get("updated_at"), str
+            )
+            for mission in missions
+        )
+        and isinstance(count, int)
+        and count == len(missions)
+        and isinstance(total_count, int)
+        and total_count >= count
+    )
+
+    return VerificationCheck(
+        verified=verified,
+        reason=(
+            "The A.T.L.A.S. mission history was returned "
+            "successfully."
+            if verified
+            else "The A.T.L.A.S. mission history result "
+            "was malformed."
+        ),
+        evidence={
+            "scope": scope,
+            "count": (
+                count if isinstance(count, int) else 0
+            ),
+        },
+    )
+
+
+def _verify_failure_explanation(
+    call: Any,
+    result: Any,
+) -> VerificationCheck:
+    output = result.output
+
+    if not isinstance(output, dict):
+        return VerificationCheck(
+            verified=False,
+            reason=(
+                "Failure explanation output was not "
+                "an object."
+            ),
+        )
+
+    window = output.get("window")
+    failed_mission = output.get("failed_mission")
+    interaction = output.get("last_error_interaction")
+    incidents = output.get("recent_incidents")
+    incident_count = output.get("incident_count")
+    evidence_found = output.get("evidence_found")
+
+    mission_ok = failed_mission is None or (
+        isinstance(failed_mission, dict)
+        and isinstance(
+            failed_mission.get("goal"), str
+        )
+        and failed_mission.get("status")
+        in _FAILED_TASK_STATUSES
+    )
+    interaction_ok = interaction is None or (
+        isinstance(interaction, dict)
+        and isinstance(
+            interaction.get("errors"), list
+        )
+        and bool(interaction.get("errors"))
+    )
+    incidents_ok = isinstance(
+        incidents, list
+    ) and all(
+        isinstance(incident, dict)
+        for incident in incidents
+    )
+
+    verified = (
+        isinstance(window, int)
+        and window >= 1
+        and mission_ok
+        and interaction_ok
+        and incidents_ok
+        and isinstance(incident_count, int)
+        and incident_count == len(incidents)
+        and isinstance(evidence_found, bool)
+        and evidence_found
+        == (
+            failed_mission is not None
+            or interaction is not None
+            or bool(incidents)
+        )
+    )
+
+    return VerificationCheck(
+        verified=verified,
+        reason=(
+            "The failure explanation used only recorded "
+            "evidence."
+            if verified
+            else "The failure explanation result was "
+            "malformed."
+        ),
+        evidence={
+            "evidence_found": evidence_found,
+            "incident_count": (
+                incident_count
+                if isinstance(incident_count, int)
+                else 0
+            ),
+        },
     )

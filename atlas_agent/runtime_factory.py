@@ -119,6 +119,7 @@ def build_pc_agent_runtime(
         approved_roots=(
             Path("/home/atlas/atlas-robot"),
         ),
+        mission_store_path=mission_store_path,
     )
 
     planning_service = (

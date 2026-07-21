@@ -850,3 +850,215 @@ def test_pi_get_upgrade_status_speaks_empty_scope():
     response = controller.handle_goal("What upgrades are blocked?")
 
     assert response.text == "No upgrade items are currently blocked."
+
+
+def test_pi_get_mission_history_speaks_last_mission():
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.COMPLETED,
+        confirmation_call_id=None,
+        error=None,
+        steps=(
+            make_step(
+                tool_name="pi.get_mission_history",
+                output={
+                    "scope": "last",
+                    "missions": [
+                        {
+                            "goal": "Read the hub logs",
+                            "source": "voice",
+                            "status": "completed",
+                            "created_at": "2026-07-19T10:00:00+00:00",
+                            "updated_at": "2026-07-19T10:00:05+00:00",
+                            "note": None,
+                        },
+                    ],
+                    "count": 1,
+                    "total_count": 6,
+                },
+            ),
+        ),
+    )
+    controller = AgentVoiceController(
+        FakeBundle(FakeRuntime(result=make_result(workflow)))
+    )
+
+    response = controller.handle_goal("What was your last mission?")
+
+    assert response.ok is True
+    assert response.text == (
+        "My last recorded mission was: Read the hub logs, "
+        "which completed."
+    )
+
+
+def test_pi_get_mission_history_speaks_bounded_failed_list():
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.COMPLETED,
+        confirmation_call_id=None,
+        error=None,
+        steps=(
+            make_step(
+                tool_name="pi.get_mission_history",
+                output={
+                    "scope": "failed",
+                    "missions": [
+                        {
+                            "goal": f"Mission {index}",
+                            "source": "voice",
+                            "status": "failed",
+                            "created_at": "2026-07-19T10:00:00+00:00",
+                            "updated_at": "2026-07-19T10:00:05+00:00",
+                            "note": None,
+                        }
+                        for index in range(5)
+                    ],
+                    "count": 5,
+                    "total_count": 9,
+                },
+            ),
+        ),
+    )
+    controller = AgentVoiceController(
+        FakeBundle(FakeRuntime(result=make_result(workflow)))
+    )
+
+    response = controller.handle_goal("Did any missions fail recently?")
+
+    assert response.ok is True
+    assert response.text.startswith(
+        "I have 5 recorded failed missions: "
+    )
+    assert "Mission 0, which failed" in response.text
+    assert "Mission 2, which failed" in response.text
+    assert "Mission 3" not in response.text
+    assert "plus 2 more" in response.text
+
+
+def test_pi_get_mission_history_speaks_empty_store():
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.COMPLETED,
+        confirmation_call_id=None,
+        error=None,
+        steps=(
+            make_step(
+                tool_name="pi.get_mission_history",
+                output={
+                    "scope": "failed",
+                    "missions": [],
+                    "count": 0,
+                    "total_count": 4,
+                },
+            ),
+        ),
+    )
+    controller = AgentVoiceController(
+        FakeBundle(FakeRuntime(result=make_result(workflow)))
+    )
+
+    response = controller.handle_goal("Did any missions fail recently?")
+
+    assert response.text == "No recorded missions have failed."
+
+
+def test_pi_explain_last_failure_speaks_recorded_evidence():
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.COMPLETED,
+        confirmation_call_id=None,
+        error=None,
+        steps=(
+            make_step(
+                tool_name="pi.explain_last_failure",
+                output={
+                    "window": 25,
+                    "failed_mission": {
+                        "goal": "Read the hub logs",
+                        "source": "voice",
+                        "status": "failed",
+                        "created_at": "2026-07-19T10:00:00+00:00",
+                        "updated_at": "2026-07-19T10:00:05+00:00",
+                        "note": (
+                            "Task was interrupted before completion."
+                        ),
+                    },
+                    "last_error_interaction": {
+                        "transcript": "read the hub logs",
+                        "intent": "agent_goal",
+                        "errors": [
+                            "TimeoutError: planner timed out"
+                        ],
+                        "outcome": "error",
+                        "timestamp": 1000.0,
+                    },
+                    "recent_incidents": [
+                        {
+                            "component": "hud",
+                            "cause": "the HUD kiosk was not active",
+                            "action": "restarted atlas-hud.service",
+                            "verification": "service still not active",
+                            "resolved": False,
+                            "timestamp": 900.0,
+                        },
+                    ],
+                    "incident_count": 1,
+                    "evidence_found": True,
+                },
+            ),
+        ),
+    )
+    controller = AgentVoiceController(
+        FakeBundle(FakeRuntime(result=make_result(workflow)))
+    )
+
+    response = controller.handle_goal(
+        "Why did the last command fail?"
+    )
+
+    assert response.ok is True
+    assert "My last failed mission was: Read the hub logs." in (
+        response.text
+    )
+    assert (
+        "The recorded reason is: Task was interrupted before "
+        "completion." in response.text
+    )
+    assert (
+        "The last logged error was: TimeoutError: planner "
+        "timed out." in response.text
+    )
+    assert (
+        "My latest unresolved incident is hud: service still "
+        "not active." in response.text
+    )
+
+
+def test_pi_explain_last_failure_speaks_no_evidence():
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.COMPLETED,
+        confirmation_call_id=None,
+        error=None,
+        steps=(
+            make_step(
+                tool_name="pi.explain_last_failure",
+                output={
+                    "window": 25,
+                    "failed_mission": None,
+                    "last_error_interaction": None,
+                    "recent_incidents": [],
+                    "incident_count": 0,
+                    "evidence_found": False,
+                },
+            ),
+        ),
+    )
+    controller = AgentVoiceController(
+        FakeBundle(FakeRuntime(result=make_result(workflow)))
+    )
+
+    response = controller.handle_goal(
+        "Why did the last command fail?"
+    )
+
+    assert response.text == (
+        "I checked my mission history and logs, and I found no "
+        "recorded failure to explain."
+    )
