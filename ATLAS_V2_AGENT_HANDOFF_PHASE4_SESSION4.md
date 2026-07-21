@@ -5,25 +5,68 @@
 > `ATLAS_V2_AGENT_HANDOFF_*.md` by date first (`ls -lat *.md`) before
 > trusting this one.
 >
-> - **Branch / HEAD:** `atlas-v2-agent` — HEAD is `d693854` ("feat: add
->   HUD recording-state indicator for self-recording clips"). `git log -1`
->   to confirm it's still there. **666 tests passing.**
-> - **⏸️ LEFT OFF HERE (2026-07-21, iteration 4):** both remaining
->   Phase-4-closing items from the prior checkpoint are now code-complete
->   and unit-tested, but **neither is live-voice-verified yet** — see the
->   "What Wesley needs to test" list at the very bottom of this file for
->   the exact order to run them in. **Stopped deliberately before Phase
->   11** (the self-showcase edit-and-post pipeline): it needs real
->   decisions only Wesley can make — Instagram API credentials/OAuth,
->   licensed background audio (copyright-sensitive, can't just pick
->   something), and branding/caption style — plus it ends in an actual
->   public Instagram post, which the safety model explicitly requires
->   confirming with Wesley before ever building the auto-post path. That
->   is the "critical, ask first" boundary for this session, not a scope
->   decision made lightly.
+> - **Branch / HEAD:** `atlas-v2-agent` — HEAD is `a9ce869` ("fix:
+>   self-recorded clips are silent and unplayable on Windows"). `git log
+>   -1` to confirm it's still there. **674 tests passing.**
+> - **⏸️ LEFT OFF HERE (2026-07-21, iteration 5):** Wesley live-tested
+>   iteration 4's work — the REC indicator worked, but the clip itself
+>   was silent and wouldn't play on his PC at all. Root-caused and fixed
+>   both problems (see "What changed 2026-07-21, iteration 5" below):
+>   an mp4 pixel-format bug Windows' native players reject outright, and
+>   the *actual* mic-contention fix — the previous session's
+>   retry-then-fallback (`9030897`) could never succeed in practice
+>   because barge-in never releases the mic until the whole answer
+>   finishes, so self-recording (invoked mid-answer) always landed on
+>   muted. Added `mic_arbiter.py` so `capture_clip()` now actively
+>   coordinates with `watch_for_barge_in()` to get the mic released
+>   instead of hoping a retry gets lucky. **Not yet live-voice-verified —
+>   this is the first-ever change to the core barge-in device loop and it
+>   has zero prior test coverage**, so treat it as higher-risk than the
+>   other fixes this session. See "What Wesley needs to test" at the
+>   bottom. **Still stopped deliberately before Phase 11** (edit-and-post
+>   pipeline) — needs Wesley's input on Instagram credentials, licensed
+>   audio, and branding/caption style before any of that gets built; see
+>   that section below, unchanged from iteration 4.
 > - **Phase / milestone:** Phase 4, milestone 1 (spoken-command tests,
 >   see below) plus an out-of-band Phase 3 fix Wesley reported directly:
 >   he asked Atlas to turn off his PC and it didn't work.
+> - **What changed 2026-07-21, iteration 5 (silent/unplayable clip
+>   investigation):** Wesley live-tested iteration 4's mic-contention fix.
+>   The REC indicator worked, but the resulting clip had no audio, and
+>   separately wouldn't open on his PC at all — Windows reported
+>   "unsupported encoding settings" despite it being a real `.mp4`. Two
+>   distinct bugs:
+>   1. **Unplayable file.** The mjpeg v4l2 camera source decodes to
+>      `yuvj420p` (JPEG full-range color). `libx264` encoded that as-is,
+>      which `ffprobe` reads fine but Windows' built-in players
+>      (Photos/Movies & TV, Media Foundation) reject outright. **Fix:**
+>      force `-pix_fmt yuv420p` on every `capture_clip()` video encode.
+>   2. **Silent clip — the actual root cause of the mic-contention "fix"
+>      never really fixing anything.** The prior session's
+>      retry-then-fallback (`9030897`) could structurally never succeed:
+>      `watch_for_barge_in()` doesn't release the mic until the *entire*
+>      streamed answer finishes speaking, and self-recording is invoked
+>      *during* that same answer — so a 1.5s retry was always going to
+>      find the mic still busy and fall back to muted, every single time,
+>      not just occasionally. **Fix:** added `mic_arbiter.py`, a small
+>      fail-open coordination point. `capture_clip()` now actively asks
+>      `watch_for_barge_in()` to release the mic before opening it, and
+>      `listen_for_barge_in()` cooperates — closes its `arecord`, confirms
+>      release, waits for the request to clear, reopens. The old
+>      busy-retry/muted-fallback logic stays as a safety net if nothing
+>      responds in time (e.g. `atlas-wake` isn't running at all).
+>   12 new tests (`tests/test_mic_arbiter.py`,
+>   `tests/test_listen_for_barge_in.py`, updated
+>   `tests/test_camera_gate.py`) — **674 passing (was 666)**.
+>   `graphify update .` run, `atlas-wake` restarted clean. Committed as
+>   `a9ce869`. **Higher risk than the other fixes this session** — this
+>   is the first-ever change to `listen_for_barge_in`'s device-handling
+>   loop, which had zero prior test coverage and cannot be fully
+>   validated without live mic hardware. **Not yet live-voice-verified.**
+>   Wesley's stated end goal, for context: record witty short-form self
+>   clips, edit them on the PC, post to Instagram. This fix targets
+>   "capture with real narration" specifically — editing and posting are
+>   still Phase 11, untouched (see below).
 > - **What changed 2026-07-21, iteration 2 (PC shutdown investigation):**
 >   Wesley reported "he couldn't turn off my PC." Root cause:
 >   `pc_control.py` has always called the `shutdown_pc`,
@@ -142,31 +185,23 @@ reports either misbehaving.
 
 ## What's left to fully close Phase 4
 
-1. ~~**Fix the mic-contention bug.**~~ **Done 2026-07-21 (iteration 3),
-   pending live verification.** Took the retry-and-fallback approach
-   (the second bullet below) rather than plumbing a stop/resume signal
-   into `watch_for_barge_in()` — lower blast radius, fully self-contained
-   in `camera_gate.py`, no changes to the streaming/tool-execution thread
-   coordination. `capture_clip()` now retries once on an ffmpeg
-   "resource busy" error, then falls back to a muted/video-only clip
-   (`"audio_fallback": True` in the returned metadata) instead of
-   failing outright. 4 new regression tests, 662 passing. Committed as
-   `9030897`. **Still needs a real live-voice test** — a mocked busy
-   error isn't the same as the real device contention that caused the
-   original bug, and the unit tests can't catch a hang or a subtler
-   real-hardware failure mode the mock doesn't reproduce. Say "Hey
-   Atlas, record a 10 second clip of yourself" during a live answer and
-   confirm one of: a full clip with audio, or a muted clip with
-   `audio_fallback` — either is a pass, a hard failure or hang is not.
-   (Original two options considered, for context:
-   - Have the agent runtime signal back to the turn handler before
-     running an audio-capturing tool, so `barge_stop_event` can be set
-     (killing the barge-in `arecord`) and restarted after — requires a
-     way for a tool executing deep inside `run_atlas_agent` to reach the
-     barge-in thread's stop event, which doesn't currently exist as a
-     plumbed-through hook. Not taken this session.
-   - **Taken:** have `camera_gate.capture_clip()` retry with backoff and
-     fall back to muted/video-only capture if the device is busy.)
+1. ~~**Fix the mic-contention bug.**~~ **Attempted twice.** Iteration 3's
+   retry-and-fallback (`9030897`) was live-tested by Wesley in iteration
+   4/5 and, as suspected, always landed on the muted fallback — it could
+   never actually succeed given how `watch_for_barge_in()` holds the mic.
+   Iteration 5 (`a9ce869`) took the harder, originally-deferred approach
+   instead: `mic_arbiter.py` coordinates an actual mic release between
+   `capture_clip()` and `listen_for_barge_in()`. This is now the real
+   fix; the retry/fallback from iteration 3 remains as a fail-open safety
+   net underneath it. 12 more regression tests, 674 passing total.
+   **Still needs a real live-voice test — this is higher-risk than the
+   other fixes**, since it's the first-ever change to
+   `listen_for_barge_in`'s device loop and that loop has zero prior test
+   coverage. Say "Hey Atlas, record a 10 second clip of yourself" and
+   **actually talk during the recording window** — confirm the clip has
+   real narration, AND separately confirm barge-in still works normally
+   afterward (say "Hey Atlas" mid-answer on an unrelated turn) since a
+   regression there would be silent and easy to miss.
 2. Once self-recording-by-voice is live-verified end to end (see item 1),
    flip `phase4_screen_capture` to `live_verified` in the ledger.
 3. ~~**Add the HUD recording-state indicator.**~~ **Done 2026-07-21
@@ -223,22 +258,32 @@ affected services → live verify → commit exact paths → update
 
 ## What Wesley needs to test (in order)
 
-Say each of these for real, one at a time, and report back what actually
-happened (words spoken, what you heard/saw) in this same order:
+Say/do each of these for real, one at a time, and report back what
+actually happened in this same order:
 
-1. **"Hey Atlas, record a 10 second clip of yourself."**
-   Confirms the mic-contention fix. Pass = either a full clip with audio,
-   or Atlas mentioning/behaving like a muted clip (no hard failure, no
-   hang). Watch the HUD at the same time for #2.
-2. **While that's recording, look at the HUD kiosk screen.**
-   A small red pulsing "REC" dot should appear in the top-right masthead
-   area next to the uplink status line, and disappear once the recording
-   finishes. Confirms the new recording-state indicator.
-3. *(Optional sanity check, not new this session)* **"Hey Atlas, take a
+1. **"Hey Atlas, record a 10 second clip of yourself" — and actually
+   talk during the 10 seconds.** This is the real test of the
+   `mic_arbiter` fix. Pass = the clip has your voice in it, not silence.
+2. **Play the resulting clip on your PC.** Confirms the `-pix_fmt
+   yuv420p` fix — it should just open and play now instead of
+   "unsupported encoding settings."
+3. **While #1 is recording, watch the HUD kiosk screen** for the small
+   red pulsing "REC" dot in the top-right masthead area, and confirm it
+   disappears once the recording finishes.
+4. **On a separate, later turn, say "Hey Atlas" while Atlas is mid-answer
+   on something unrelated** (barge-in), and confirm it still interrupts
+   normally. This is the regression check — `listen_for_barge_in`'s
+   device loop changed for the first time ever this session, and a
+   regression here wouldn't show up in #1-3.
+5. *(Optional sanity check, not new this session)* **"Hey Atlas, take a
    picture of my screen."** — confirms the Session 4 screenshot routing
    fix is still solid after this session's restarts.
 
 Report back in that order — which one(s) passed, which didn't, and
-anything Atlas said or the HUD showed that seemed off. That determines
-whether `phase4_screen_capture` gets flipped to `live_verified` or needs
-another round.
+anything Atlas said, the clip sounded/looked like, or the HUD showed that
+seemed off. That determines whether `phase4_screen_capture` gets flipped
+to `live_verified` or needs another round. Once all of this passes,
+Phase 11 (edit-and-post) is next — but that needs your answers on
+Instagram credentials, audio licensing, and branding/caption style
+first (see the checkpoint block and "What's left to fully close Phase 4"
+item 4 above).
