@@ -7,6 +7,7 @@ from typing import Any
 
 from atlas_agent.runtime_factory import RuntimeBundle
 from atlas_agent.workflow import (
+    StepOutcome,
     WorkflowResult,
     WorkflowStatus,
 )
@@ -35,6 +36,27 @@ class AgentVoiceResponse:
     error: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class _PendingConfirmation:
+    """One paused CONFIRMATION_REQUIRED call, held in memory only, so a
+    later "yes, post it" turn can actually resume the exact call that
+    asked for confirmation instead of starting a brand new, unrelated
+    mission with no idea what file/caption it's supposed to act on.
+
+    Confirmed live 2026-07-21: without this, "post the video" as a
+    separate follow-up utterance always failed -- AgentRuntime.run_goal
+    always builds a fresh plan from scratch for a new goal string, so a
+    second, independent mission has no access to the first mission's
+    concrete tool output (e.g. content.record_self_showcase's actual
+    video_path), and content.publish_to_instagram's schema requires an
+    exact non-null path -- there was never a way for that second
+    mission to know it."""
+
+    task: Any
+    call: Any
+    description: str
+
+
 class AgentVoiceController:
     """Serialized voice/phone entry point for the agent runtime."""
 
@@ -44,6 +66,7 @@ class AgentVoiceController:
     ) -> None:
         self.bundle = bundle
         self._lock = threading.RLock()
+        self._pending: _PendingConfirmation | None = None
 
     def handle_goal(
         self,
@@ -80,6 +103,9 @@ class AgentVoiceController:
 
             workflow = result.workflow
             text = self._spoken_summary(workflow)
+            self._pending = (
+                self._extract_pending(result.task, workflow)
+            )
 
             return AgentVoiceResponse(
                 text=text,
@@ -100,6 +126,138 @@ class AgentVoiceController:
                 ),
                 error=workflow.error,
             )
+
+    def confirm_pending(
+        self, *, confirm: bool
+    ) -> AgentVoiceResponse:
+        """Resolves the one call this controller is remembering as
+        paused on confirmation -- runs it for real with confirmed=True
+        if confirm, or discards it if not. Never re-plans or re-runs
+        any earlier step (e.g. never re-records a Reel just to publish
+        the one already sitting on disk)."""
+        with self._lock:
+            pending = self._pending
+            self._pending = None
+
+            if pending is None:
+                return AgentVoiceResponse(
+                    text=(
+                        "There's nothing waiting for "
+                        "confirmation right now."
+                    ),
+                    ok=False,
+                    task_id=None,
+                    workflow_status=None,
+                    confirmation_call_id=None,
+                    input_tokens=0,
+                    output_tokens=0,
+                    error=None,
+                )
+
+            if not confirm:
+                return AgentVoiceResponse(
+                    text=(
+                        "Okay, I won't "
+                        f"{pending.description.rstrip('.').lower()}."
+                    ),
+                    ok=True,
+                    task_id=pending.task.task_id,
+                    workflow_status="cancelled",
+                    confirmation_call_id=None,
+                    input_tokens=0,
+                    output_tokens=0,
+                    error=None,
+                )
+
+            try:
+                result = self.bundle.executor.execute(
+                    pending.call, confirmed=True
+                )
+            except Exception as error:
+                return AgentVoiceResponse(
+                    text=(
+                        "I couldn't complete that confirmed "
+                        "action. The failure was recorded."
+                    ),
+                    ok=False,
+                    task_id=pending.task.task_id,
+                    workflow_status=None,
+                    confirmation_call_id=None,
+                    input_tokens=0,
+                    output_tokens=0,
+                    error=(
+                        f"{type(error).__name__}: {error}"
+                    ),
+                )
+
+            verification = self.bundle.verifier.verify(
+                pending.call, result
+            )
+            synthetic_workflow = WorkflowResult(
+                task_id=pending.task.task_id,
+                plan_id="confirmation",
+                status=(
+                    WorkflowStatus.COMPLETED
+                    if verification.verified
+                    else WorkflowStatus.FAILED
+                ),
+                steps=(
+                    StepOutcome(
+                        position=1,
+                        description=pending.description,
+                        call=pending.call,
+                        result=result,
+                        verification=verification,
+                        error=(
+                            None
+                            if verification.verified
+                            else verification.reason
+                        ),
+                    ),
+                ),
+                failed_step=(
+                    None if verification.verified else 1
+                ),
+                confirmation_call_id=None,
+                error=(
+                    None
+                    if verification.verified
+                    else verification.reason
+                ),
+            )
+            text = self._spoken_summary(synthetic_workflow)
+
+            return AgentVoiceResponse(
+                text=text,
+                ok=verification.verified,
+                task_id=pending.task.task_id,
+                workflow_status=synthetic_workflow.status.value,
+                confirmation_call_id=None,
+                input_tokens=0,
+                output_tokens=0,
+                error=synthetic_workflow.error,
+            )
+
+    @staticmethod
+    def _extract_pending(
+        task: Any,
+        workflow: WorkflowResult,
+    ) -> _PendingConfirmation | None:
+        if (
+            workflow.status
+            is not WorkflowStatus.WAITING_CONFIRMATION
+        ):
+            return None
+
+        for step in workflow.steps:
+            if step.call.call_id == workflow.confirmation_call_id:
+                return _PendingConfirmation(
+                    task=task,
+                    call=step.call,
+                    description=step.description,
+                )
+
+        return None
 
     def close(self) -> None:
         with self._lock:
@@ -971,6 +1129,50 @@ class AgentVoiceController:
                 "your PC right now."
             )
 
+        if (
+            tool_name == "content.record_self_showcase"
+            and isinstance(output, dict)
+        ):
+            video_path = output.get("video_path")
+
+            if not output.get("ok") or not video_path:
+                return (
+                    "I tried to record a self-showcase Reel, "
+                    "but it didn't produce a usable file: "
+                    f"{output.get('error') or 'no reason given'}."
+                )
+
+            filename = Path(video_path).name
+            caption = output.get("caption")
+            caption_line = (
+                caption.strip().splitlines()[0]
+                if isinstance(caption, str) and caption.strip()
+                else "no caption"
+            )
+
+            return (
+                "Done. I recorded and edited a self-showcase "
+                f"Reel, saved as {filename} at {video_path}. "
+                f"Draft caption: {caption_line}. Say post it "
+                "if you want me to publish it to Instagram, "
+                "or say never mind."
+            )
+
+        if (
+            tool_name == "content.publish_to_instagram"
+            and isinstance(output, dict)
+        ):
+            if output.get("ok") and output.get("permalink"):
+                return (
+                    "Done. Published the Reel to Instagram: "
+                    f"{output['permalink']}"
+                )
+
+            return (
+                "I couldn't publish the Reel to Instagram: "
+                f"{output.get('error') or 'no reason given'}."
+            )
+
         step_count = len(workflow.steps)
         noun = (
             "step"
@@ -1046,22 +1248,43 @@ class AgentVoiceController:
     def _failure_reason(
         workflow: WorkflowResult,
     ) -> str | None:
-        candidates: list[Any] = [
-            workflow.error,
-        ]
+        # Tools like content.publish_to_instagram catch their own
+        # errors and return them inside output["error"] rather than
+        # raising -- that's the specific, actionable reason (e.g.
+        # "video file not found: ..."). Checked first, ahead of
+        # workflow.error, because WorkflowRunner sets workflow.error to
+        # the same generic verification.reason text below on every
+        # verification failure -- if checked in the old order, that
+        # generic text always won and the tool's own specific reason
+        # was never reachable.
+        specific_candidates: list[Any] = []
+        generic_candidates: list[Any] = [workflow.error]
 
         for step in reversed(workflow.steps):
-            candidates.append(step.error)
+            if step.result is not None and isinstance(
+                step.result.output, dict
+            ):
+                output_error = step.result.output.get("error")
+
+                if (
+                    isinstance(output_error, str)
+                    and output_error.strip()
+                ):
+                    specific_candidates.append(output_error)
+
+            generic_candidates.append(step.error)
 
             if step.result is not None:
-                candidates.append(
+                generic_candidates.append(
                     step.result.error
                 )
 
             if step.verification is not None:
-                candidates.append(
+                generic_candidates.append(
                     step.verification.reason
                 )
+
+        candidates = specific_candidates + generic_candidates
 
         for candidate in candidates:
             if (

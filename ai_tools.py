@@ -92,7 +92,14 @@ TOOLS = [
             "Instagram. This is the ONLY path to those recording/"
             "publishing capabilities -- do not answer them with "
             "run_atlas_diagnostic_or_repair, which cannot record or "
-            "publish anything. Do not use this for ordinary questions, "
+            "publish anything. After a recording finishes, the result "
+            "will already say whether the owner wants it published and, "
+            "if so, will name the exact saved file -- if the owner "
+            "later says something like 'post it' or 'yes, publish that' "
+            "in direct reply, use respond_to_pending_confirmation "
+            "instead of calling run_atlas_agent again with a new goal; "
+            "a brand new goal has no way to know which exact file was "
+            "just recorded. Do not use this for ordinary questions, "
             "explanations, weather, or Atlas diagnostics."
         ),
         "parameters": {
@@ -141,6 +148,38 @@ TOOLS = [
                 },
             },
             "required": ["capability"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+    {
+        "type": "function",
+        "name": "respond_to_pending_confirmation",
+        "description": (
+            "Use this ONLY when Atlas's own previous message just asked "
+            "you to confirm or cancel a specific pending action (for "
+            "example: after recording a self-showcase Reel, it will ask "
+            "whether to publish it to Instagram) and the owner's reply "
+            "is a direct answer to that -- 'yes', 'post it', 'go ahead', "
+            "'confirm', or 'no', 'cancel', 'don't', 'never mind'. This "
+            "resumes the exact pending action (e.g. publishing the "
+            "exact Reel just recorded); it does not start anything new "
+            "and does not need a goal. Do not use this for a fresh, "
+            "unrelated request -- use run_atlas_agent for that instead."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "confirm": {
+                    "type": "boolean",
+                    "description": (
+                        "True if the owner said yes/confirm/go ahead/"
+                        "post it. False if the owner said no/cancel/"
+                        "don't/never mind."
+                    ),
+                },
+            },
+            "required": ["confirm"],
             "additionalProperties": False,
         },
         "strict": True,
@@ -386,5 +425,16 @@ def run_tool_call(
         return listen_and_answer.run_diagnostic_capability(
             arguments.get("capability")
         )
+
+    if name == "respond_to_pending_confirmation":
+        owner = _get_agent_runtime_owner()
+        response = owner.confirm_pending(
+            confirm=bool(arguments.get("confirm"))
+        )
+        _record_agent_usage(
+            response.input_tokens,
+            response.output_tokens,
+        )
+        return response.text
 
     return f"Unknown tool: {name}"

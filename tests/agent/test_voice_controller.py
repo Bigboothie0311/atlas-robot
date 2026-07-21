@@ -34,12 +34,39 @@ class FakeRuntime:
 
 
 class FakeBundle:
-    def __init__(self, runtime):
+    def __init__(self, runtime, *, executor=None, verifier=None):
         self.runtime = runtime
+        self.executor = executor
+        self.verifier = verifier
         self.closed = False
 
     def close(self):
         self.closed = True
+
+
+class FakeExecutor:
+    def __init__(self, result=None, error=None):
+        self.result = result
+        self.error = error
+        self.calls = []
+
+    def execute(self, call, *, confirmed):
+        self.calls.append((call, confirmed))
+
+        if self.error is not None:
+            raise self.error
+
+        return self.result
+
+
+class FakeVerifier:
+    def __init__(self, verification):
+        self.verification = verification
+        self.calls = []
+
+    def verify(self, call, result):
+        self.calls.append((call, result))
+        return self.verification
 
 
 def make_result(
@@ -1414,3 +1441,390 @@ def test_spoken_summary_for_active_window_with_no_title():
     assert response.text == (
         "I couldn't tell what's focused on your PC right now."
     )
+
+
+def test_record_self_showcase_summary_names_file_and_invites_posting():
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.COMPLETED,
+        confirmation_call_id=None,
+        error=None,
+        steps=(
+            make_step(
+                tool_name="content.record_self_showcase",
+                output={
+                    "ok": True,
+                    "video_path": (
+                        "/home/atlas/atlas-staging/incoming/"
+                        "reel_123.mp4"
+                    ),
+                    "caption": "A quick look at my HUD.\n\n#atlas",
+                    "mission": None,
+                },
+            ),
+        ),
+    )
+    controller = AgentVoiceController(
+        FakeBundle(FakeRuntime(result=make_result(workflow)))
+    )
+
+    response = controller.handle_goal("Record a promo Reel.")
+
+    assert response.ok is True
+    assert "reel_123.mp4" in response.text
+    assert (
+        "/home/atlas/atlas-staging/incoming/reel_123.mp4"
+        in response.text
+    )
+    assert "A quick look at my HUD." in response.text
+    assert "post it" in response.text.lower()
+
+
+def test_record_self_showcase_summary_reports_real_failure():
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.COMPLETED,
+        confirmation_call_id=None,
+        error=None,
+        steps=(
+            make_step(
+                tool_name="content.record_self_showcase",
+                output={
+                    "ok": False,
+                    "error": "no HUD frames were captured",
+                },
+            ),
+        ),
+    )
+    controller = AgentVoiceController(
+        FakeBundle(FakeRuntime(result=make_result(workflow)))
+    )
+
+    response = controller.handle_goal("Record a promo Reel.")
+
+    assert "no HUD frames were captured" in response.text
+
+
+def test_publish_to_instagram_summary_success():
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.COMPLETED,
+        confirmation_call_id=None,
+        error=None,
+        steps=(
+            make_step(
+                tool_name="content.publish_to_instagram",
+                output={
+                    "ok": True,
+                    "permalink": (
+                        "https://www.instagram.com/reel/ABC123/"
+                    ),
+                    "media_id": "999",
+                },
+            ),
+        ),
+    )
+    controller = AgentVoiceController(
+        FakeBundle(FakeRuntime(result=make_result(workflow)))
+    )
+
+    response = controller.handle_goal("Publish the reel.")
+
+    assert response.ok is True
+    assert (
+        "https://www.instagram.com/reel/ABC123/" in response.text
+    )
+
+
+def test_publish_to_instagram_summary_reports_real_failure():
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.COMPLETED,
+        confirmation_call_id=None,
+        error=None,
+        steps=(
+            make_step(
+                tool_name="content.publish_to_instagram",
+                output={
+                    "ok": False,
+                    "error": "video file not found: /tmp/gone.mp4",
+                },
+            ),
+        ),
+    )
+    controller = AgentVoiceController(
+        FakeBundle(FakeRuntime(result=make_result(workflow)))
+    )
+
+    response = controller.handle_goal("Publish the reel.")
+
+    assert "video file not found: /tmp/gone.mp4" in response.text
+
+
+def test_handle_goal_remembers_pending_confirmation():
+    pending_call = SimpleNamespace(
+        tool_name="content.publish_to_instagram",
+        arguments={"video_path": "/tmp/reel.mp4", "caption": "hi"},
+        call_id="call-publish",
+    )
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.WAITING_CONFIRMATION,
+        confirmation_call_id="call-publish",
+        error=None,
+        steps=(
+            SimpleNamespace(
+                position=1,
+                description="publish the Reel to Instagram",
+                call=pending_call,
+                result=None,
+                verification=None,
+                error=None,
+            ),
+        ),
+    )
+    controller = AgentVoiceController(
+        FakeBundle(FakeRuntime(result=make_result(workflow)))
+    )
+
+    response = controller.handle_goal("Record and post a Reel.")
+
+    assert response.workflow_status == "waiting_confirmation"
+    assert controller._pending is not None
+    assert controller._pending.call is pending_call
+
+
+def test_confirm_pending_with_nothing_pending():
+    controller = AgentVoiceController(
+        FakeBundle(FakeRuntime())
+    )
+
+    response = controller.confirm_pending(confirm=True)
+
+    assert response.ok is False
+    assert "nothing waiting" in response.text.lower()
+
+
+def test_confirm_pending_false_cancels_without_executing():
+    pending_call = SimpleNamespace(
+        tool_name="content.publish_to_instagram",
+        arguments={},
+        call_id="call-publish",
+    )
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.WAITING_CONFIRMATION,
+        confirmation_call_id="call-publish",
+        error=None,
+        steps=(
+            SimpleNamespace(
+                position=1,
+                description="publish the Reel to Instagram.",
+                call=pending_call,
+                result=None,
+                verification=None,
+                error=None,
+            ),
+        ),
+    )
+    executor = FakeExecutor()
+    controller = AgentVoiceController(
+        FakeBundle(
+            FakeRuntime(result=make_result(workflow)),
+            executor=executor,
+        )
+    )
+    controller.handle_goal("Record and post a Reel.")
+
+    response = controller.confirm_pending(confirm=False)
+
+    assert response.ok is True
+    assert executor.calls == []
+    assert controller._pending is None
+    assert "won't" in response.text.lower()
+
+
+def test_confirm_pending_true_executes_and_reports_success():
+    pending_call = SimpleNamespace(
+        tool_name="content.publish_to_instagram",
+        arguments={
+            "video_path": "/tmp/reel.mp4",
+            "caption": "hi",
+            "mission": None,
+        },
+        call_id="call-publish",
+    )
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.WAITING_CONFIRMATION,
+        confirmation_call_id="call-publish",
+        error=None,
+        steps=(
+            SimpleNamespace(
+                position=1,
+                description="publish the Reel to Instagram.",
+                call=pending_call,
+                result=None,
+                verification=None,
+                error=None,
+            ),
+        ),
+    )
+    confirmed_result = SimpleNamespace(
+        output={
+            "ok": True,
+            "permalink": "https://www.instagram.com/reel/XYZ/",
+            "media_id": "1",
+        },
+        error=None,
+    )
+    executor = FakeExecutor(result=confirmed_result)
+    verifier = FakeVerifier(
+        SimpleNamespace(verified=True, reason="Verified live.")
+    )
+    controller = AgentVoiceController(
+        FakeBundle(
+            FakeRuntime(result=make_result(workflow)),
+            executor=executor,
+            verifier=verifier,
+        )
+    )
+    controller.handle_goal("Record and post a Reel.")
+
+    response = controller.confirm_pending(confirm=True)
+
+    assert executor.calls == [(pending_call, True)]
+    assert verifier.calls == [(pending_call, confirmed_result)]
+    assert response.ok is True
+    assert response.workflow_status == "completed"
+    assert (
+        "https://www.instagram.com/reel/XYZ/" in response.text
+    )
+    assert controller._pending is None
+
+
+def test_confirm_pending_true_reports_real_verification_failure():
+    pending_call = SimpleNamespace(
+        tool_name="content.publish_to_instagram",
+        arguments={
+            "video_path": "/tmp/reel.mp4",
+            "caption": "hi",
+            "mission": None,
+        },
+        call_id="call-publish",
+    )
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.WAITING_CONFIRMATION,
+        confirmation_call_id="call-publish",
+        error=None,
+        steps=(
+            SimpleNamespace(
+                position=1,
+                description="publish the Reel to Instagram.",
+                call=pending_call,
+                result=None,
+                verification=None,
+                error=None,
+            ),
+        ),
+    )
+    confirmed_result = SimpleNamespace(
+        output={
+            "ok": False,
+            "error": "container processing failed with status ERROR",
+        },
+        error=None,
+    )
+    executor = FakeExecutor(result=confirmed_result)
+    verifier = FakeVerifier(
+        SimpleNamespace(
+            verified=False,
+            reason="The publish did not return a verified permalink.",
+        )
+    )
+    controller = AgentVoiceController(
+        FakeBundle(
+            FakeRuntime(result=make_result(workflow)),
+            executor=executor,
+            verifier=verifier,
+        )
+    )
+    controller.handle_goal("Record and post a Reel.")
+
+    response = controller.confirm_pending(confirm=True)
+
+    assert response.ok is False
+    assert response.workflow_status == "failed"
+    assert (
+        "container processing failed with status ERROR"
+        in response.text
+    )
+
+
+def test_confirm_pending_true_handles_executor_exception():
+    pending_call = SimpleNamespace(
+        tool_name="content.publish_to_instagram",
+        arguments={},
+        call_id="call-publish",
+    )
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.WAITING_CONFIRMATION,
+        confirmation_call_id="call-publish",
+        error=None,
+        steps=(
+            SimpleNamespace(
+                position=1,
+                description="publish the Reel to Instagram.",
+                call=pending_call,
+                result=None,
+                verification=None,
+                error=None,
+            ),
+        ),
+    )
+    executor = FakeExecutor(error=RuntimeError("boom"))
+    controller = AgentVoiceController(
+        FakeBundle(
+            FakeRuntime(result=make_result(workflow)),
+            executor=executor,
+        )
+    )
+    controller.handle_goal("Record and post a Reel.")
+
+    response = controller.confirm_pending(confirm=True)
+
+    assert response.ok is False
+    assert "RuntimeError: boom" in response.error
+
+
+def test_new_goal_clears_stale_pending_confirmation():
+    pending_call = SimpleNamespace(
+        tool_name="content.publish_to_instagram",
+        arguments={},
+        call_id="call-publish",
+    )
+    waiting_workflow = SimpleNamespace(
+        status=WorkflowStatus.WAITING_CONFIRMATION,
+        confirmation_call_id="call-publish",
+        error=None,
+        steps=(
+            SimpleNamespace(
+                position=1,
+                description="publish the Reel to Instagram.",
+                call=pending_call,
+                result=None,
+                verification=None,
+                error=None,
+            ),
+        ),
+    )
+    completed_workflow = SimpleNamespace(
+        status=WorkflowStatus.COMPLETED,
+        confirmation_call_id=None,
+        error=None,
+        steps=(
+            make_step(tool_name="pc.ensure_online", output=None),
+        ),
+    )
+    runtime = FakeRuntime(result=make_result(waiting_workflow))
+    controller = AgentVoiceController(FakeBundle(runtime))
+    controller.handle_goal("Record and post a Reel.")
+    assert controller._pending is not None
+
+    runtime.result = make_result(completed_workflow)
+    controller.handle_goal("What's the weather?")
+
+    assert controller._pending is None
