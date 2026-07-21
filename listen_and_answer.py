@@ -27,6 +27,7 @@ import instagram_stats
 import interaction_control
 import logbook
 import macros
+import mic_arbiter
 import pc_control
 import pc_power
 import memory_store
@@ -265,11 +266,8 @@ def dismiss_current_interaction():
             )
 
 
-def listen_for_barge_in(model, stop_event):
-    """Runs only during ask_and_speak_streaming's TTS window, when
-    wake_listener.py's own mic loop has already released the device. Returns
-    True if the wake phrase is verified before stop_event is set."""
-    recorder = subprocess.Popen(
+def _open_barge_in_recorder():
+    return subprocess.Popen(
         [
             "arecord",
             "-D", MIC_DEVICE,
@@ -282,12 +280,41 @@ def listen_for_barge_in(model, stop_event):
         stderr=subprocess.DEVNULL
     )
 
+
+def listen_for_barge_in(model, stop_event):
+    """Runs only during ask_and_speak_streaming's TTS window, when
+    wake_listener.py's own mic loop has already released the device.
+    Returns True if the wake phrase is verified before stop_event is
+    set.
+
+    Cooperates with mic_arbiter: if a tool needs the same physical mic
+    mid-answer (e.g. camera.capture_clip's audio branch, so a
+    self-recording actually gets Atlas's own narration instead of
+    routinely falling back to muted), this closes its own arecord,
+    confirms the release, and waits for the request to clear before
+    reopening — rather than holding the device for the whole answer
+    regardless of what else needs it."""
+    recorder = _open_barge_in_recorder()
     recognizer = wake_detection.create_recognizer(model)
     utterance_peak_rms = 0
     partial_hits = 0
 
     try:
         while not stop_event.is_set():
+            if mic_arbiter.yield_is_requested():
+                wake_detection.stop_recorder(recorder)
+                recorder = None
+                mic_arbiter.confirm_released()
+
+                while mic_arbiter.yield_is_requested() and not stop_event.is_set():
+                    time.sleep(0.1)
+
+                if stop_event.is_set():
+                    return False
+
+                recorder = _open_barge_in_recorder()
+                continue
+
             audio_data = recorder.stdout.read(wake_detection.AUDIO_CHUNK_BYTES)
 
             if not audio_data:
@@ -317,7 +344,8 @@ def listen_for_barge_in(model, stop_event):
 
         return False
     finally:
-        wake_detection.stop_recorder(recorder)
+        if recorder is not None:
+            wake_detection.stop_recorder(recorder)
 
 
 def log_qa(question, answer):

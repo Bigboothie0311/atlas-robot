@@ -30,6 +30,8 @@ import tempfile
 import time
 from pathlib import Path
 
+import mic_arbiter
+
 try:
     import cv2
     import numpy
@@ -340,13 +342,20 @@ def _build_clip_command(out_path, seconds, mute_audio):
 
     command.extend(["-t", str(seconds)])
 
+    # -pix_fmt yuv420p: the mjpeg v4l2 source decodes to yuvj420p
+    # (JPEG full-range), which libx264 will happily encode as-is, but
+    # Windows' built-in players (Photos/Movies & TV, Media Foundation)
+    # refuse to play a full-range-tagged stream at all and report it as
+    # an "unsupported encoding" file, even though it's a perfectly valid
+    # mp4/h264 by every other measure (ffprobe reads it fine). Forcing
+    # the standard yuv420p range fixes playback everywhere.
     if not mute_audio:
         command.extend([
             "-map", "0:v", "-map", "1:a",
-            "-c:v", "libx264", "-c:a", "aac",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
         ])
     else:
-        command.extend(["-c:v", "libx264"])
+        command.extend(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
 
     command.append(str(out_path))
     return command
@@ -380,6 +389,16 @@ def capture_clip(duration_seconds, mission=None, mute_audio=False):
         out_path = CLIPS_DIR / name
         command = _build_clip_command(out_path, seconds, attempt_mute)
 
+        # Ask the barge-in listener (if one is running, e.g. mid live
+        # voice turn) to release the mic before we try to open it, so a
+        # self-recording clip actually gets audio instead of routinely
+        # hitting "resource busy" and falling back to muted. Fails open
+        # (see mic_arbiter docstring) if nothing responds within its
+        # timeout, and the busy-retry/fallback below still applies as a
+        # safety net either way.
+        if not attempt_mute:
+            mic_arbiter.request_yield()
+
         try:
             subprocess.run(
                 command, check=True, timeout=seconds + 20,
@@ -404,6 +423,9 @@ def capture_clip(duration_seconds, mission=None, mute_audio=False):
         except (subprocess.SubprocessError, OSError) as error:
             print("Camera clip capture failed:", type(error).__name__, error, flush=True)
             return None
+        finally:
+            if not attempt_mute:
+                mic_arbiter.resume()
 
         if not out_path.is_file() or out_path.stat().st_size == 0:
             return None

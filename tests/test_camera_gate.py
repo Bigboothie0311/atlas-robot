@@ -272,6 +272,26 @@ class CaptureCommandTests(unittest.TestCase):
 
 
 class CaptureClipTests(unittest.TestCase):
+    def setUp(self):
+        # Real mic_arbiter.request_yield() waits up to 3s for a barge-in
+        # listener that isn't running in tests -- stub it out so every
+        # test stays fast and deterministic, and track calls so the
+        # coordination tests below can assert on them.
+        self.mic_arbiter_calls = []
+        patcher = mock.patch.object(
+            camera_gate.mic_arbiter, "request_yield",
+            side_effect=lambda *a, **k: self.mic_arbiter_calls.append("request_yield") or True,
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        patcher = mock.patch.object(
+            camera_gate.mic_arbiter, "resume",
+            side_effect=lambda: self.mic_arbiter_calls.append("resume"),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     @staticmethod
     def _fake_run_writing_output(command, **kwargs):
         Path(command[-1]).write_bytes(b"fake mp4 bytes")
@@ -288,10 +308,12 @@ class CaptureClipTests(unittest.TestCase):
             self.assertIn("alsa", command)
             self.assertIn(camera_gate.AUDIO_DEVICE, command)
             self.assertEqual("10", command[command.index("-t") + 1])
+            self.assertEqual("yuv420p", command[command.index("-pix_fmt") + 1])
             self.assertTrue(result["has_audio"])
             self.assertEqual(result["mission"], "showcase")
             self.assertEqual(result["duration_seconds"], 10)
             self.assertTrue(Path(result["path"]).is_file())
+            self.assertEqual(self.mic_arbiter_calls, ["request_yield", "resume"])
 
     def test_capture_clip_mute_audio_skips_alsa_input(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -303,7 +325,9 @@ class CaptureClipTests(unittest.TestCase):
 
             command = run.call_args.args[0]
             self.assertNotIn("alsa", command)
+            self.assertEqual("yuv420p", command[command.index("-pix_fmt") + 1])
             self.assertFalse(result["has_audio"])
+            self.assertEqual(self.mic_arbiter_calls, [])
 
     def test_capture_clip_caps_duration_to_max(self):
         with tempfile.TemporaryDirectory() as directory:
