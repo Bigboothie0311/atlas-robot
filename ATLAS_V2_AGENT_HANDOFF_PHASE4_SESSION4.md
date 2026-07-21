@@ -5,13 +5,46 @@
 > `ATLAS_V2_AGENT_HANDOFF_*.md` by date first (`ls -lat *.md`) before
 > trusting this one.
 >
-> - **Branch / HEAD:** `atlas-v2-agent` — this session's code changes are
->   committed as `<commit-hash-below>` (see "What changed" for the exact
->   diff; check `git log -1` to confirm it landed).
-> - **Phase / milestone:** Phase 4, milestone 1 — the Session 2/3 spoken-
->   command test finally ran for real this session, and it found two
->   real bugs (both fixed) plus one real, unfixed blocker.
-> - **What changed this session (2026-07-21):**
+> - **Branch / HEAD:** `atlas-v2-agent` — HEAD is `e09cac4` ("fix:
+>   implement missing shutdown_pc/cancel/recycle-bin companion actions").
+>   `git log -1` to confirm it's still there.
+> - **Phase / milestone:** Phase 4, milestone 1 (spoken-command tests,
+>   see below) plus an out-of-band Phase 3 fix Wesley reported directly:
+>   he asked Atlas to turn off his PC and it didn't work.
+> - **What changed 2026-07-21, iteration 2 (PC shutdown investigation):**
+>   Wesley reported "he couldn't turn off my PC." Root cause:
+>   `pc_control.py` has always called the `shutdown_pc`,
+>   `cancel_pc_shutdown`, and `empty_recycle_bin` companion actions, but
+>   `windows-companion/atlas_companion.py`'s `ACTIONS` dispatch dict never
+>   registered handlers for any of them — they simply didn't exist
+>   server-side, so every request 404'd as "unknown action" and Atlas
+>   correctly reported the failure. (A prior ledger note claiming
+>   "recycle-bin emptying and shutdown already existed pre-Phase-3" was
+>   wrong.) `youtube_search` had the same problem from the other
+>   direction: its handler function existed but was never added to
+>   `ACTIONS`. **Fix:** implemented `act_shutdown_pc` (`shutdown /s /t
+>   60`, so a misheard command is always recoverable via
+>   `act_cancel_pc_shutdown` = `shutdown /a`), `act_empty_recycle_bin`
+>   (`Clear-RecycleBin`), and registered all four
+>   (`shutdown_pc`/`cancel_pc_shutdown`/`empty_recycle_bin`/
+>   `youtube_search`) in `ACTIONS`. Added regression tests in
+>   `tests/test_windows_companion_actions.py` — **658 passing (was
+>   652)**. Updated `windows-companion/README.md`'s action table.
+>   `implementation_ledger.py`'s `phase3_pc_companion` entry updated with
+>   the honest root cause and evidence. Committed as `e09cac4`.
+>   **Not yet live-verified — see blocker below, same one as the
+>   pre-existing `focus_or_open_app`/`active_window` fixes.**
+> - **⚠️ Standing blocker, unchanged by this fix:** none of this takes
+>   effect until Wesley manually copies the updated
+>   `windows-companion/atlas_companion.py` to the real Windows PC and
+>   restarts the companion service there — this agent must not overwrite
+>   the deployed companion itself (policy, and it has no access to the PC
+>   filesystem from the Pi). Until that deploy happens, "turn off my PC"
+>   will keep failing exactly as Wesley saw, even though the code fix is
+>   committed. **Tell Wesley this explicitly** — it's the one manual step
+>   between this fix and it actually working.
+> - **What changed the prior session (2026-07-21, iteration 1 — Phase 4
+>   spoken-command tests):**
 >   1. **Ran the actual spoken-command test** Session 3 left open: "Hey
 >      Atlas, take a picture of my screen" and "Hey Atlas, record a 10
 >      second clip of yourself" — the first real end-to-end voice test of
@@ -84,6 +117,18 @@
 and
 [ATLAS_V2_AGENT_HANDOFF_PHASE4_SESSION3.md](ATLAS_V2_AGENT_HANDOFF_PHASE4_SESSION3.md)
 for the full history this session builds on.
+
+## What's left on the PC-shutdown fix
+
+1. **Wesley needs to deploy the updated companion.** Copy
+   `windows-companion/atlas_companion.py` to the real Windows PC (same
+   path as before, e.g. `C:\atlas-companion\atlas_companion.py`) and
+   restart it. This also picks up the earlier, still-undeployed
+   `focus_or_open_app`/`active_window` fixes from Phase 3 milestone 1.
+2. After deploying, live-verify by voice: "Hey Atlas, shut down my PC"
+   (confirm the 60-second warning and that `shutdown /a` cancels it),
+   then "empty the recycle bin" and a YouTube search command. Flip the
+   `phase3_pc_companion` ledger's `external_blockers` once confirmed.
 
 ## What's left to fully close Phase 4
 
