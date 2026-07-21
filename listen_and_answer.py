@@ -2716,6 +2716,29 @@ LOG_QUERY_PHRASES = {
 }
 
 
+def run_diagnostics_command():
+    """Spoken 'run diagnostics': the full structured 14-component sweep.
+    Pushes the findings to the hub so the HUD switches into its
+    diagnostics view, then speaks a verdict built only from what the
+    checks actually observed. Zero tokens."""
+    findings = diagnostics.run_structured_checks()
+
+    try:
+        requests.post(
+            f"{HUB}/diagnostics_report",
+            json={"findings": findings},
+            timeout=5,
+        )
+    except requests.RequestException as error:
+        print(
+            "Diagnostics HUD update failed:",
+            error,
+            flush=True,
+        )
+
+    return diagnostics.spoken_structured_report(findings)
+
+
 def run_system_health_command():
     """Full Pi-side health sweep: diagnose, safe-repair, verify, back up,
     report. Sets the diagnostics HUD layout while it runs."""
@@ -3590,7 +3613,7 @@ def _answer_and_speak(text, model):
 # (voice fallback, phone link) instead of claiming it has no access when a
 # phrasing doesn't match one of the fixed trigger phrases below.
 DIAGNOSTIC_CAPABILITY_HANDLERS = {
-    "diagnostics": lambda: diagnostics.build_diagnostics_report(),
+    "diagnostics": run_diagnostics_command,
     "self_heal": run_self_heal_command,
     "system_health": run_system_health_command,
     "connections": run_connection_health_command,
@@ -4423,7 +4446,7 @@ def _handle_turn_body(model):
 
         if normalized_phrase in DIAGNOSTICS_PHRASES:
             set_face("thinking")
-            answer = diagnostics.build_diagnostics_report()
+            answer = run_diagnostics_command()
             log_qa(text, answer)
             speak(answer)
             return

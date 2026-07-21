@@ -516,3 +516,33 @@ def run_structured_checks(components=None):
             ))
 
     return findings
+
+
+def spoken_structured_report(findings):
+    """One-breath spoken verdict built from real structured findings —
+    never claims more than the checks actually observed."""
+    if not findings:
+        return (
+            "I ran no diagnostic checks — nothing to report."
+        )
+
+    problems = [f for f in findings if not f["ok"]]
+    total = len(findings)
+
+    if not problems:
+        return (
+            f"Diagnostics sweep complete. All {total} systems "
+            "nominal — services, audio, network, storage, "
+            "thermals, and budget all check out."
+        )
+
+    spoken_problems = "; ".join(
+        f"{f['component'].replace('_', ' ')}: {f['detail']}"
+        for f in problems
+    )
+
+    return (
+        f"Diagnostics sweep complete. {total - len(problems)} of "
+        f"{total} systems nominal, {len(problems)} need attention "
+        f"— {spoken_problems}."
+    )

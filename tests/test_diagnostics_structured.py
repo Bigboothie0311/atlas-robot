@@ -370,3 +370,41 @@ def test_check_voice_provider_flags_missing_whisper(
 
     assert finding["ok"] is False
     assert "vosk" in finding["detail"].lower()
+
+
+def test_spoken_structured_report_all_nominal():
+    findings = [
+        diagnostics._finding(name, True, "fine")
+        for name in diagnostics.STRUCTURED_COMPONENTS
+    ]
+
+    report = diagnostics.spoken_structured_report(findings)
+
+    assert "14" in report
+    assert "nominal" in report.lower()
+    assert "fine" not in report  # no per-check noise when healthy
+
+
+def test_spoken_structured_report_lists_problems():
+    findings = [
+        diagnostics._finding("services", True, "all active"),
+        diagnostics._finding(
+            "camera", False, "no camera device connected"
+        ),
+        diagnostics._finding(
+            "wifi", False, "Wi-Fi down"
+        ),
+    ]
+
+    report = diagnostics.spoken_structured_report(findings)
+
+    assert "camera" in report
+    assert "no camera device connected" in report
+    assert "Wi-Fi down" in report
+    assert "2" in report
+
+
+def test_spoken_structured_report_empty_is_honest():
+    report = diagnostics.spoken_structured_report([])
+
+    assert "no diagnostic" in report.lower()

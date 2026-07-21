@@ -1237,6 +1237,108 @@ body.layout-diagnostics #cosmetic-terminal .panel-label {
 }
 
 /* ------------------------------------------------------------------ */
+/* Diagnostics sweep overlay                                           */
+/* ------------------------------------------------------------------ */
+
+#diagnostics-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: radial-gradient(ellipse at center, #061a18, #040807 82%);
+  flex-direction: column;
+  padding: 48px 64px;
+  z-index: 50;
+}
+
+body.layout-diagnostics #diagnostics-overlay {
+  display: flex;
+}
+
+#diagnostics-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  border-bottom: 1px solid rgba(88, 255, 156, 0.4);
+  padding-bottom: 18px;
+}
+
+#diagnostics-title {
+  font-size: 34px;
+  font-weight: 600;
+  letter-spacing: 8px;
+  color: var(--green);
+  text-shadow: 0 0 18px rgba(88, 255, 156, 0.55);
+  animation: live-pulse 1.4s ease-in-out infinite;
+}
+
+#diagnostics-verdict {
+  font-size: 18px;
+  letter-spacing: 2px;
+  color: rgba(220, 255, 238, 0.85);
+}
+
+#diagnostics-grid {
+  flex: 1;
+  overflow-y: auto;
+  margin-top: 32px;
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 16px 40px;
+  align-content: start;
+}
+
+#diagnostics-grid .diagnostics-row {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  padding: 10px 0;
+  border-bottom: 1px solid rgba(88, 255, 156, 0.15);
+}
+
+#diagnostics-grid .diagnostics-status {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  box-shadow: 0 0 8px currentColor;
+}
+
+#diagnostics-grid .diagnostics-row.ok .diagnostics-status {
+  background: var(--green);
+  color: var(--green);
+}
+
+#diagnostics-grid .diagnostics-row.problem .diagnostics-status {
+  background: var(--red);
+  color: var(--red);
+}
+
+#diagnostics-grid .diagnostics-row.problem {
+  border-bottom-color: rgba(255, 95, 95, 0.3);
+}
+
+#diagnostics-grid .diagnostics-text {
+  min-width: 0;
+}
+
+#diagnostics-grid .diagnostics-component {
+  font-size: 15px;
+  letter-spacing: 1.5px;
+  color: var(--cyan);
+  text-transform: uppercase;
+}
+
+#diagnostics-grid .diagnostics-detail {
+  font-size: 14px;
+  color: rgba(220, 255, 238, 0.75);
+  margin-top: 2px;
+}
+
+#diagnostics-grid .diagnostics-row.problem .diagnostics-detail {
+  color: #ffb0b0;
+}
+
+/* ------------------------------------------------------------------ */
 /* JARVIS upgrades: boot self-test, threat readout, greeting           */
 /* ------------------------------------------------------------------ */
 

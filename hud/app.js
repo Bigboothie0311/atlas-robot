@@ -522,6 +522,56 @@ function applyLayout(state) {
 
   if (layout === "security") {
     renderSecurity(state);
+  } else if (layout === "diagnostics") {
+    renderDiagnostics(state);
+  }
+}
+
+let lastDiagnosticsKey = "";
+
+function renderDiagnostics(state) {
+  const report = state.diagnostics_report || {};
+  const findings = Array.isArray(report.findings) ? report.findings : [];
+
+  const key = JSON.stringify(findings);
+  if (key === lastDiagnosticsKey) {
+    return;
+  }
+  lastDiagnosticsKey = key;
+
+  const problems = findings.filter((f) => !f.ok);
+  const verdict = document.getElementById("diagnostics-verdict");
+
+  verdict.textContent = findings.length
+    ? `${findings.length - problems.length}/${findings.length} NOMINAL`
+    : "NO CHECKS RUN";
+
+  const grid = document.getElementById("diagnostics-grid");
+  grid.innerHTML = "";
+
+  for (const finding of findings) {
+    const row = document.createElement("div");
+    row.className = `diagnostics-row ${finding.ok ? "ok" : "problem"}`;
+
+    const status = document.createElement("div");
+    status.className = "diagnostics-status";
+
+    const text = document.createElement("div");
+    text.className = "diagnostics-text";
+
+    const component = document.createElement("div");
+    component.className = "diagnostics-component";
+    component.textContent = String(finding.component || "").replaceAll("_", " ");
+
+    const detail = document.createElement("div");
+    detail.className = "diagnostics-detail";
+    detail.textContent = String(finding.detail || "");
+
+    text.appendChild(component);
+    text.appendChild(detail);
+    row.appendChild(status);
+    row.appendChild(text);
+    grid.appendChild(row);
   }
 }
 

@@ -98,6 +98,63 @@ def _sanitize_agent_evidence(value):
     return sanitized
 
 
+def _default_diagnostics_report():
+    return {
+        "findings": [],
+        "ts": 0.0,
+        "visible_until": 0.0,
+    }
+
+
+DIAGNOSTICS_DISPLAY_SECONDS = 30.0
+DIAGNOSTICS_MAX_FINDINGS = 20
+DIAGNOSTICS_MAX_DETAIL_CHARS = 200
+
+
+def _sanitize_diagnostics_findings(findings):
+    sanitized = []
+
+    for finding in findings[:DIAGNOSTICS_MAX_FINDINGS]:
+        if not isinstance(finding, dict):
+            continue
+
+        component = finding.get("component")
+        detail = finding.get("detail")
+
+        if not isinstance(component, str) or not component:
+            continue
+
+        sanitized.append({
+            "component": component,
+            "ok": bool(finding.get("ok")),
+            "detail": (
+                str(detail)[:DIAGNOSTICS_MAX_DETAIL_CHARS]
+                if detail is not None
+                else ""
+            ),
+        })
+
+    return sanitized
+
+
+def _expire_diagnostics_report_locked(now=None):
+    """Clears an expired diagnostics report and, if the diagnostics
+    layout is still up because of it, returns the HUD to idle."""
+    now = time.time() if now is None else now
+    report = robot_state.get("diagnostics_report") or {}
+    visible_until = report.get("visible_until", 0.0)
+
+    if not visible_until or now < visible_until:
+        return
+
+    robot_state["diagnostics_report"] = (
+        _default_diagnostics_report()
+    )
+
+    if robot_state.get("hud_layout") == "diagnostics":
+        robot_state["hud_layout"] = "idle"
+
+
 robot_state = {
     "expression": "happy",
     "speaking": False,
@@ -113,6 +170,7 @@ robot_state = {
     "intruder_records": [],
     "active_intruder_photo": None,
     "agent": _default_agent_state(),
+    "diagnostics_report": _default_diagnostics_report(),
 }
 
 QA_LOG_MAX_ENTRIES = 20
@@ -237,12 +295,17 @@ def status():
 
 @app.get("/hud")
 def hud_page():
-    return send_from_directory(HUD_DIR, "index.html")
+    response = send_from_directory(HUD_DIR, "index.html")
+    # The kiosk Chromium must never serve a stale HUD after a deploy.
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.get("/hud/static/<path:filename>")
 def hud_static(filename):
-    return send_from_directory(HUD_DIR, filename)
+    response = send_from_directory(HUD_DIR, filename)
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.get("/network_devices")
@@ -298,6 +361,7 @@ def get_state():
         clear_expired_image_locked()
         clear_expired_gallery_locked()
         _expire_agent_state_locked()
+        _expire_diagnostics_report_locked()
         state = robot_state.copy()
         state["gallery_until"] = gallery_until
 
@@ -1212,6 +1276,36 @@ def set_brightness_boost():
 @app.post("/stand_down")
 def stand_down():
     return jsonify({"ok": True, "was_active": alerts.stand_down()})
+
+
+@app.post("/diagnostics_report")
+def set_diagnostics_report():
+    data = request.get_json(silent=True) or {}
+    findings = data.get("findings")
+
+    if not isinstance(findings, list):
+        return jsonify({
+            "ok": False,
+            "error": "findings must be a list",
+        }), 400
+
+    sanitized = _sanitize_diagnostics_findings(findings)
+    now = time.time()
+
+    with state_lock:
+        robot_state["diagnostics_report"] = {
+            "findings": sanitized,
+            "ts": now,
+            "visible_until": (
+                now + DIAGNOSTICS_DISPLAY_SECONDS
+            ),
+        }
+        robot_state["hud_layout"] = "diagnostics"
+
+    return jsonify({
+        "ok": True,
+        "count": len(sanitized),
+    })
 
 
 VALID_LAYOUTS = {"idle", "security", "diagnostics", "red_alert"}
