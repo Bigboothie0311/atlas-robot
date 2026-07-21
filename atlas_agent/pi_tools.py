@@ -7,6 +7,8 @@ from collections.abc import Callable
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
+import requests
+
 from atlas_agent.sftp_client import SFTPClient
 from atlas_agent.tool_registry import ToolRegistry
 from atlas_agent.tools import AtlasTool
@@ -16,12 +18,23 @@ from atlas_agent.verifier import (
 )
 
 HUD_DISPLAY = ":0"
+HUB = "http://127.0.0.1:5051"
 
 CameraCaptureHandler = Callable[
     ...,
     dict[str, Any] | None,
 ]
 HudFrameHandler = Callable[[Path], bool]
+HudRecordingNotifier = Callable[[bool], None]
+
+
+def _notify_hud_recording(active: bool) -> None:
+    """Best-effort HUD recording indicator toggle — never raises, since a
+    HUD/network hiccup must not block or fail the actual capture."""
+    try:
+        requests.post(f"{HUB}/hud/recording", json={"active": active}, timeout=3)
+    except requests.RequestException:
+        pass
 
 
 def _capture_hud_frame_file(out_path: Path) -> bool:
@@ -51,6 +64,7 @@ def register_pi_capture_tools(
     staging_directory: str | Path,
     camera_capture_handler: CameraCaptureHandler | None = None,
     hud_frame_handler: HudFrameHandler | None = None,
+    hud_recording_notifier: HudRecordingNotifier | None = None,
 ) -> list[AtlasTool]:
     """Registers A.T.L.A.S.'s self-showcase capture tools: recording
     himself via the USB camera, and grabbing his own HUD kiosk screen.
@@ -64,6 +78,9 @@ def register_pi_capture_tools(
 
     if hud_frame_handler is None:
         hud_frame_handler = _capture_hud_frame_file
+
+    if hud_recording_notifier is None:
+        hud_recording_notifier = _notify_hud_recording
 
     staging_path = Path(staging_directory)
 
@@ -139,11 +156,15 @@ def register_pi_capture_tools(
                 "mute_audio must be a boolean"
             )
 
-        clip = camera_capture_handler(
-            duration_seconds,
-            mission=mission,
-            mute_audio=mute_audio,
-        )
+        hud_recording_notifier(True)
+        try:
+            clip = camera_capture_handler(
+                duration_seconds,
+                mission=mission,
+                mute_audio=mute_audio,
+            )
+        finally:
+            hud_recording_notifier(False)
 
         if clip is None:
             return {

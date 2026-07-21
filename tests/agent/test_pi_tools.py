@@ -30,7 +30,9 @@ class FakeSFTPClient:
         return self.transfer_result
 
 
-def build_tools(tmp_path, *, camera_handler=None, hud_handler=None):
+def build_tools(
+    tmp_path, *, camera_handler=None, hud_handler=None, recording_notifier=None
+):
     registry = ToolRegistry()
     verifier = ResultVerifier()
     sftp_client = FakeSFTPClient()
@@ -43,6 +45,9 @@ def build_tools(tmp_path, *, camera_handler=None, hud_handler=None):
         staging_directory=tmp_path,
         camera_capture_handler=camera_handler,
         hud_frame_handler=hud_handler,
+        # Defaults to a no-op in tests so nothing ever makes a real HTTP
+        # call to the HUD hub; tests that care pass a spy explicitly.
+        hud_recording_notifier=recording_notifier or (lambda active: None),
     )
 
     return registry, verifier, sftp_client, tools
@@ -193,6 +198,54 @@ def test_capture_self_clip_reports_failure_when_camera_fails(tmp_path):
     assert result.output["ok"] is False
     assert sftp_client.arguments is None
     assert verification.verified is False
+
+
+def test_capture_self_clip_toggles_hud_recording_indicator_on_success(tmp_path):
+    local_clip = tmp_path / "clip_123.mp4"
+    local_clip.write_bytes(b"clip bytes")
+    calls = []
+
+    def fake_camera_handler(duration_seconds, mission=None, mute_audio=False):
+        assert calls == [True]  # indicator already on while capture "runs"
+        return {
+            "path": str(local_clip),
+            "name": local_clip.name,
+            "mission": mission,
+            "duration_seconds": duration_seconds,
+            "has_audio": not mute_audio,
+        }
+
+    registry, _verifier, _sftp, _tools = build_tools(
+        tmp_path,
+        camera_handler=fake_camera_handler,
+        recording_notifier=calls.append,
+    )
+    call = ToolCall(
+        tool_name="camera.capture_clip",
+        arguments={"duration_seconds": 10, "mission": None, "mute_audio": False},
+    )
+
+    execute(registry, call)
+
+    assert calls == [True, False]
+
+
+def test_capture_self_clip_toggles_hud_recording_indicator_off_on_failure(tmp_path):
+    calls = []
+
+    registry, _verifier, _sftp, _tools = build_tools(
+        tmp_path,
+        camera_handler=lambda *a, **k: None,
+        recording_notifier=calls.append,
+    )
+    call = ToolCall(
+        tool_name="camera.capture_clip",
+        arguments={"duration_seconds": 10, "mission": None, "mute_audio": False},
+    )
+
+    execute(registry, call)
+
+    assert calls == [True, False]
 
 
 def test_capture_self_clip_rejects_non_positive_duration(tmp_path):

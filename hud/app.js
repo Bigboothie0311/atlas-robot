@@ -500,6 +500,7 @@ function applyAlertAndScreen(state) {
   document.body.classList.toggle("red-alert", Boolean(redAlert.active));
   document.body.classList.toggle("screen-dark", Boolean(state.screen_dark));
   document.body.classList.toggle("brightness-boost", Boolean(state.brightness_boost));
+  document.body.classList.toggle("recording-active", Boolean(state.recording_active));
 
   if (redAlert.active && document.body.classList.contains("state-idle")) {
     document.getElementById("masthead-state-text").textContent = "RED ALERT";

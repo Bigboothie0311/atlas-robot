@@ -52,5 +52,35 @@ class BrightnessBoostRouteTests(unittest.TestCase):
                 robot_hub._brightness_boost = False
 
 
+class RecordingIndicatorRouteTests(unittest.TestCase):
+    def test_active_and_inactive_reflected_in_state(self):
+        client = robot_hub.app.test_client()
+
+        try:
+            response = client.post("/hud/recording", json={"active": True})
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.get_json()["active"])
+            self.assertTrue(client.get("/state").get_json()["recording_active"])
+
+            response = client.post("/hud/recording", json={"active": False})
+            self.assertEqual(response.status_code, 200)
+            self.assertFalse(response.get_json()["active"])
+            self.assertFalse(client.get("/state").get_json()["recording_active"])
+        finally:
+            with robot_hub._recording_lock:
+                robot_hub._recording_active = False
+
+    def test_missing_body_defaults_to_inactive(self):
+        client = robot_hub.app.test_client()
+
+        try:
+            response = client.post("/hud/recording")
+            self.assertEqual(response.status_code, 200)
+            self.assertFalse(response.get_json()["active"])
+        finally:
+            with robot_hub._recording_lock:
+                robot_hub._recording_active = False
+
+
 if __name__ == "__main__":
     unittest.main()

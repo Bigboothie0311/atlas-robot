@@ -396,6 +396,9 @@ def get_state():
     with _brightness_boost_lock:
         state["brightness_boost"] = _brightness_boost
 
+    with _recording_lock:
+        state["recording_active"] = _recording_active
+
     return jsonify(state)
 
 
@@ -1271,6 +1274,27 @@ def set_brightness_boost():
         boost = _brightness_boost
 
     return jsonify({"ok": True, "boost": boost})
+
+
+_recording_lock = threading.Lock()
+_recording_active = False
+
+
+@app.post("/hud/recording")
+def set_recording():
+    """Flag-based indicator (same pattern as /screen) so the HUD can show
+    a visible cue while camera.capture_clip is recording A.T.L.A.S.
+    himself — set True right before the capture starts, False in a
+    finally block once it ends either way."""
+    global _recording_active
+
+    data = request.get_json(silent=True) or {}
+
+    with _recording_lock:
+        _recording_active = bool(data.get("active", False))
+        active = _recording_active
+
+    return jsonify({"ok": True, "active": active})
 
 
 @app.post("/stand_down")

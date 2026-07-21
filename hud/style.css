@@ -206,6 +206,32 @@ body.state-speaking .live-dot {
   animation: live-pulse 0.8s ease-in-out infinite;
 }
 
+/* Self-recording indicator (camera.capture_clip) — hidden by default,
+   shown via body.recording-active same pattern as body.screen-dark. */
+#recording-indicator {
+  display: none;
+  align-items: center;
+  font-size: 13px;
+  letter-spacing: 3px;
+  color: var(--red);
+  margin-top: 6px;
+}
+
+body.recording-active #recording-indicator {
+  display: flex;
+}
+
+.recording-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  margin-right: 8px;
+  background: var(--red);
+  box-shadow: 0 0 10px var(--red);
+  animation: live-pulse 0.8s ease-in-out infinite;
+}
+
 @keyframes wordmark-in {
   from { letter-spacing: 28px; opacity: 0; }
   to   { letter-spacing: 10px; opacity: 1; }
