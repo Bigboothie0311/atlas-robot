@@ -273,6 +273,14 @@ sudo apt install -y cage seatd
 sudo systemctl enable --now seatd
 ```
 
+The self-showcase content pipeline (`hud_capture.py`) also needs
+`wf-recorder` for real continuous screen recording of the kiosk (`grim`
+alone only takes single stills):
+
+```bash
+sudo apt install -y wf-recorder
+```
+
 `cage` also needs `XDG_RUNTIME_DIR` (`/run/user/<uid>`) to already exist,
 which systemd normally only creates once that user actually logs in —
 on a cold boot with no interactive login, `atlas-hud.service` fails

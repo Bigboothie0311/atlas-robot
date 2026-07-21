@@ -2,7 +2,16 @@ import wave
 from pathlib import Path
 from unittest import mock
 
-from atlas_agent.content_tools import register_content_tools
+from atlas_agent.content_tools import (
+    DIAGNOSTICS_LINES,
+    EXTRA_BEATS,
+    INTRO_LINES,
+    MAX_EXTRA_BEATS,
+    OUTRO_LINES,
+    WEATHER_LINES,
+    _build_default_tour,
+    register_content_tools,
+)
 from atlas_agent.executor import ToolExecutor
 from atlas_agent.results import ResultStatus
 from atlas_agent.tasks import ToolCall
@@ -50,6 +59,41 @@ def test_content_tools_are_registered(tmp_path):
     }
     assert registry.get("content.record_self_showcase").permission_level == 0
     assert registry.get("content.publish_to_instagram").permission_level == 2
+
+
+def test_build_default_tour_always_includes_weather_and_diagnostics():
+    tour = _build_default_tour()
+
+    actions = [beat["action"] for beat in tour]
+    assert "weather_open" in actions
+    assert "diagnostics" in actions
+    assert tour[0]["narration"] in INTRO_LINES
+    assert tour[-1]["narration"] in OUTRO_LINES
+
+    weather_beat = next(b for b in tour if b["action"] == "weather_open")
+    diagnostics_beat = next(b for b in tour if b["action"] == "diagnostics")
+    assert weather_beat["narration"] in WEATHER_LINES
+    assert diagnostics_beat["narration"] in DIAGNOSTICS_LINES
+
+    core_count = 4  # intro, weather, diagnostics, outro
+    extra_beats_used = [
+        beat for beat in tour if beat["narration"] in {
+            b["narration"] for b in EXTRA_BEATS
+        }
+    ]
+    assert len(tour) - core_count == len(extra_beats_used)
+    assert len(extra_beats_used) <= MAX_EXTRA_BEATS
+    assert len(extra_beats_used) == len({b["narration"] for b in extra_beats_used})
+
+
+def test_build_default_tour_varies_across_calls():
+    tours = [_build_default_tour() for _ in range(30)]
+
+    narrations = {tuple(beat["narration"] for beat in tour) for tour in tours}
+    assert len(narrations) > 1, (
+        "30 calls produced the exact same script every time -- "
+        "randomization isn't actually varying anything"
+    )
 
 
 def test_record_self_showcase_runs_default_tour_and_drives_hud(tmp_path, monkeypatch):

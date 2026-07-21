@@ -9,28 +9,29 @@ The kiosk runs on Wayland via `cage` (confirmed live in
 tool -- confirmed live it was silently capturing a solid-black frame
 every time (an unrelated stale X11 socket exists, but nothing draws to
 it). `grim` is the Wayland-native equivalent and captures the kiosk's
-real content correctly.
+real content correctly; still used here for single-still `capture_frame`.
 
-There's no installed video-capture tool for this wlroots kiosk (no
-wf-recorder), so video here is frame-stitched: periodic `grim` stills at
-a low frame rate, muxed into an mp4 via ffmpeg's image2 sequence input.
-That's a reasonable substitute for HUD content, which is mostly static
-panels changing state rather than fast motion.
-"""
+Video (`record_hud_clip`) previously frame-stitched periodic `grim`
+stills at 2fps because no video-capture tool was installed for this
+wlroots kiosk -- confirmed live 2026-07-21 that this was genuinely
+choppy on a real Reel. `wf-recorder` (installed via apt, works against
+any wlroots compositor including `cage`) now does real continuous
+capture instead -- confirmed live: 24fps, 116 real frames over a 4.8s
+clip, vs. the old approach's ~10 stitched stills for the same span."""
 
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
-import tempfile
 import time
 from pathlib import Path
 
 WAYLAND_DISPLAY = "wayland-0"
 XDG_RUNTIME_DIR = "/run/user/1000"
-CAPTURE_FPS = 2
+CAPTURE_FPS = 24
 FRAME_TIMEOUT_SECONDS = 5
-FFMPEG_TIMEOUT_SECONDS = 120
+RECORDER_EXIT_TIMEOUT_SECONDS = 15
 
 
 class HudCaptureError(RuntimeError):
@@ -67,51 +68,49 @@ def capture_frame(out_path) -> bool:
 def record_hud_clip(
     duration_seconds: float, out_path, *, fps: float = CAPTURE_FPS
 ) -> str:
-    """Records `duration_seconds` of the HUD's own display: captures
-    `grim` frames at `fps`, then stitches them into an mp4."""
-    frame_interval = 1.0 / fps
-    frame_count = max(1, round(duration_seconds * fps))
+    """Records `duration_seconds` of the HUD's own display via
+    `wf-recorder` -- real continuous capture at `fps`, not periodic
+    stills. `wf-recorder` finalizes its output on SIGINT (its documented
+    stop signal, same as Ctrl+C), so it's started, left running for the
+    clip's duration, then signalled and given a chance to exit cleanly
+    before the file is checked."""
+    command = [
+        "wf-recorder", "-y",
+        "-r", str(fps),
+        "-f", str(out_path),
+    ]
 
-    with tempfile.TemporaryDirectory(prefix="atlas_hud_frames_") as frame_dir:
-        saved_index = 0
+    try:
+        process = subprocess.Popen(
+            command,
+            env=_wayland_env(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except OSError as error:
+        raise HudCaptureError(
+            f"wf-recorder failed to start: {error}"
+        ) from error
 
-        for _attempt in range(frame_count):
-            frame_path = Path(frame_dir) / f"frame_{saved_index:04d}.png"
-            if capture_frame(frame_path):
-                saved_index += 1
-            time.sleep(frame_interval)
+    time.sleep(duration_seconds)
 
-        if saved_index == 0:
-            raise HudCaptureError("no HUD frames were captured")
-
-        command = [
-            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-            "-framerate", str(fps),
-            "-i", str(Path(frame_dir) / "frame_%04d.png"),
-            "-c:v", "libx264", "-pix_fmt", "yuv420p",
-            str(out_path),
-        ]
-
-        try:
-            subprocess.run(
-                command,
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=FFMPEG_TIMEOUT_SECONDS,
-            )
-        except subprocess.CalledProcessError as error:
-            raise HudCaptureError(
-                f"ffmpeg frame-stitch failed: {error.stderr.strip()}"
-            ) from error
-        except subprocess.TimeoutExpired as error:
-            raise HudCaptureError(
-                f"ffmpeg frame-stitch timed out after "
-                f"{FFMPEG_TIMEOUT_SECONDS}s"
-            ) from error
+    process.send_signal(signal.SIGINT)
+    try:
+        _, stderr = process.communicate(
+            timeout=RECORDER_EXIT_TIMEOUT_SECONDS
+        )
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.communicate()
+        raise HudCaptureError(
+            "wf-recorder did not exit after SIGINT"
+        )
 
     result_path = Path(out_path)
     if not result_path.is_file() or result_path.stat().st_size == 0:
-        raise HudCaptureError("HUD clip is missing or empty")
+        raise HudCaptureError(
+            "HUD clip is missing or empty "
+            f"(wf-recorder: {stderr.decode(errors='replace').strip()})"
+        )
 
     return str(result_path)

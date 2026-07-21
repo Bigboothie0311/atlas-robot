@@ -7,10 +7,12 @@ HUD kiosk on the Pi (see hud_capture.py) -- not the Windows PC's screen.
 Confirmed live 2026-07-21: recording the PC screen shows the owner's
 desktop, not Atlas; the whole point of self-showcase content is Atlas
 narrating his own features (weather radar, self-diagnostics, ...), which
-only exist on his own HUD. It drives a scripted "tour" of real HUD
-states between narrated clips, edits each with content_pipeline.edit_reel,
-and concatenates them. Nothing it does is public or destructive, so it
-stays at permission_level=0.
+only exist on his own HUD. It drives a varied "tour" of real HUD states
+between narrated clips -- randomized phrasing and beat selection by
+default (see _build_default_tour()) so repeated recordings don't produce
+the same video twice, or a fully custom script via 'beats' -- edits each
+with content_pipeline.edit_reel, and concatenates them. Nothing it does
+is public or destructive, so it stays at permission_level=0.
 
 content.publish_to_instagram is the one tool in this codebase that uses
 PermissionLevel.CONFIRMATION_REQUIRED: it's the step the safety model
@@ -20,6 +22,7 @@ anything goes public.
 
 from __future__ import annotations
 
+import random
 import time
 import wave
 from pathlib import Path
@@ -46,37 +49,101 @@ RECORDING_BUFFER_SECONDS = 3
 # capture starts, so the clip doesn't open on a mid-transition frame.
 HUD_ACTION_SETTLE_SECONDS = 1.0
 
-# The default "tour" for "make a promo video of yourself" -- an honest,
+# The default tour for "make a promo video of yourself" -- an honest,
 # narrated walk through real, currently-working features. Wesley's ask:
 # Atlas should show his own screen and actually talk about what he can
-# do, not just sit on one static shot.
-DEFAULT_TOUR: tuple[dict[str, str], ...] = (
+# do, not just sit on one static shot -- and not post the exact same
+# script and clip every single time either, so this is randomized
+# (phrasing, and which extra beats show up) rather than one fixed
+# tuple. Weather radar and self-diagnostics always run -- they're the
+# only two beats with a real HUD-driving action -- everything else
+# varies. All EXTRA_BEATS use action="idle" because system status,
+# printer, and gaming-PC panels are already part of the always-visible
+# HUD dashboard (see hud/app.js's #printer-panel, .panel-system-status,
+# .panel-gaming-pc), not separate overlays that need driving open.
+INTRO_LINES: tuple[str, ...] = (
+    "Hi, I'm A.T.L.A.S. Let me show you around my own screen.",
+    "Hey, it's A.T.L.A.S. -- here's a quick look at what's live on my "
+    "display right now.",
+    "A.T.L.A.S. here. Let me walk you through what I've got running "
+    "today.",
+)
+
+WEATHER_LINES: tuple[str, ...] = (
+    "This is my weather radar -- live conditions and the forecast, "
+    "right here on my display.",
+    "Here's my weather radar, showing live conditions and the "
+    "forecast straight off my own screen.",
+    "Right here is my weather radar -- current conditions and "
+    "forecast, updated live.",
+)
+
+DIAGNOSTICS_LINES: tuple[str, ...] = (
+    "And this is my self-diagnostics -- I check my own services, "
+    "sensors, and budget, and report exactly what I find.",
+    "Now here's my self-diagnostics -- a live check of my own "
+    "services, sensors, and budget, reported honestly.",
+    "This is self-diagnostics -- a real check on my own services, "
+    "sensors, and budget, showing exactly what comes back.",
+)
+
+OUTRO_LINES: tuple[str, ...] = (
+    "That's a quick look at what I can do.",
+    "That's just a slice of what's running on me right now.",
+    "And that's a peek at my own screen -- there's more where that "
+    "came from.",
+)
+
+EXTRA_BEATS: tuple[dict[str, str], ...] = (
     {
         "narration": (
-            "Hi, I'm A.T.L.A.S. Let me show you around my own screen."
+            "Over here is my system status -- live CPU, memory, and "
+            "thermal readings straight off this Pi."
         ),
         "action": "idle",
     },
     {
         "narration": (
-            "This is my weather radar -- live conditions and the "
-            "forecast, right here on my display."
+            "This panel tracks my printer -- real status from the "
+            "device, not a guess."
         ),
-        "action": "weather_open",
+        "action": "idle",
     },
     {
         "narration": (
-            "And this is my self-diagnostics -- I check my own "
-            "services, sensors, and budget, and report exactly what "
-            "I find."
+            "And this keeps an eye on the gaming PC on the network -- "
+            "health and what's running over there."
         ),
-        "action": "diagnostics",
-    },
-    {
-        "narration": "That's a quick look at what I can do.",
         "action": "idle",
     },
 )
+MAX_EXTRA_BEATS = 2
+
+
+def _build_default_tour() -> tuple[dict[str, str], ...]:
+    """Builds one varied instance of the default tour: randomized
+    intro/outro phrasing, the always-on weather + diagnostics beats
+    (with randomized phrasing too), and a random subset of extra
+    beats -- so consecutive "record a promo video" calls don't
+    produce the same script and clip twice in a row."""
+    extra = random.sample(
+        EXTRA_BEATS,
+        k=random.randint(0, min(MAX_EXTRA_BEATS, len(EXTRA_BEATS))),
+    )
+
+    return (
+        {"narration": random.choice(INTRO_LINES), "action": "idle"},
+        {
+            "narration": random.choice(WEATHER_LINES),
+            "action": "weather_open",
+        },
+        {
+            "narration": random.choice(DIAGNOSTICS_LINES),
+            "action": "diagnostics",
+        },
+        *extra,
+        {"narration": random.choice(OUTRO_LINES), "action": "idle"},
+    )
 
 
 def _wav_duration_seconds(wav_path) -> float:
@@ -160,7 +227,7 @@ def register_content_tools(
                 "default tour"
             )
 
-        tour = beats if beats else DEFAULT_TOUR
+        tour = beats if beats else _build_default_tour()
         staging_path.mkdir(parents=True, exist_ok=True)
 
         clip_paths: list[str] = []
@@ -286,9 +353,13 @@ def register_content_tools(
                 "Records a narrated tour of Atlas's own HUD screen and "
                 "edits it into a 9:16 Reel, returning the finished "
                 "local video path and a draft caption. Does not "
-                "publish anything. With no 'beats', runs the default "
-                "weather-radar/self-diagnostics tour -- but this is "
-                "not a fixed script: pass 'beats' with any narration "
+                "publish anything. With no 'beats', runs a varied "
+                "default tour -- weather radar and self-diagnostics "
+                "always show up, phrasing and a few extra real "
+                "feature beats (system status, printer, gaming PC) "
+                "are randomized so repeated calls don't produce the "
+                "same script and clip twice in a row. Not a fixed "
+                "script either way: pass 'beats' with any narration "
                 "lines, in any order, any length, to record a fully "
                 "custom video saying and showing whatever is asked "
                 "for instead."

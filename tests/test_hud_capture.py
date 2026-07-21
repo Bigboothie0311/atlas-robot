@@ -47,40 +47,60 @@ class CaptureFrameTests(unittest.TestCase):
 
 class RecordHudClipTests(unittest.TestCase):
     @mock.patch.object(hud_capture.time, "sleep")
-    @mock.patch.object(hud_capture, "capture_frame")
     @mock.patch.object(hud_capture.Path, "is_file", return_value=True)
     @mock.patch.object(hud_capture.Path, "stat")
-    @mock.patch.object(hud_capture.subprocess, "run")
-    def test_stitches_captured_frames_into_a_clip(
-        self, run, stat, _is_file, capture_frame, _sleep
+    @mock.patch.object(hud_capture.subprocess, "Popen")
+    def test_records_via_wf_recorder_and_signals_stop(
+        self, popen, stat, _is_file, _sleep
     ):
-        capture_frame.return_value = True
         stat.return_value = mock.Mock(st_size=999)
+        process = mock.Mock()
+        process.communicate.return_value = (b"", b"")
+        popen.return_value = process
 
-        result = hud_capture.record_hud_clip(2.0, "/tmp/hud_clip.mp4", fps=2)
+        result = hud_capture.record_hud_clip(2.0, "/tmp/hud_clip.mp4", fps=24)
 
         self.assertEqual(result, "/tmp/hud_clip.mp4")
-        self.assertEqual(capture_frame.call_count, 4)  # 2s * 2fps
-        command = run.call_args.args[0]
-        self.assertEqual(command[0], "ffmpeg")
-        self.assertIn("-framerate", command)
+        command = popen.call_args.args[0]
+        self.assertEqual(command[0], "wf-recorder")
+        self.assertIn("-r", command)
+        self.assertIn("24", command)
+        self.assertIn("/tmp/hud_clip.mp4", command)
+        process.send_signal.assert_called_once_with(hud_capture.signal.SIGINT)
+        process.communicate.assert_called_once()
 
-    @mock.patch.object(hud_capture.time, "sleep")
-    @mock.patch.object(hud_capture, "capture_frame", return_value=False)
-    def test_raises_when_no_frames_captured(self, _capture_frame, _sleep):
-        with self.assertRaises(hud_capture.HudCaptureError):
-            hud_capture.record_hud_clip(1.0, "/tmp/hud_clip.mp4", fps=2)
-
-    @mock.patch.object(hud_capture.time, "sleep")
-    @mock.patch.object(hud_capture, "capture_frame", return_value=True)
-    @mock.patch.object(hud_capture.subprocess, "run")
-    def test_raises_on_ffmpeg_stitch_failure(self, run, _capture_frame, _sleep):
-        run.side_effect = subprocess.CalledProcessError(
-            1, ["ffmpeg"], stderr="no frames"
-        )
+    @mock.patch.object(hud_capture.subprocess, "Popen")
+    def test_raises_when_recorder_fails_to_start(self, popen):
+        popen.side_effect = OSError("no such file")
 
         with self.assertRaises(hud_capture.HudCaptureError):
-            hud_capture.record_hud_clip(1.0, "/tmp/hud_clip.mp4", fps=2)
+            hud_capture.record_hud_clip(1.0, "/tmp/hud_clip.mp4", fps=24)
+
+    @mock.patch.object(hud_capture.time, "sleep")
+    @mock.patch.object(hud_capture.subprocess, "Popen")
+    def test_raises_and_kills_process_when_exit_times_out(self, popen, _sleep):
+        process = mock.Mock()
+        process.communicate.side_effect = [
+            subprocess.TimeoutExpired(cmd=["wf-recorder"], timeout=15),
+            (b"", b""),
+        ]
+        popen.return_value = process
+
+        with self.assertRaises(hud_capture.HudCaptureError):
+            hud_capture.record_hud_clip(1.0, "/tmp/hud_clip.mp4", fps=24)
+
+        process.kill.assert_called_once()
+
+    @mock.patch.object(hud_capture.time, "sleep")
+    @mock.patch.object(hud_capture.Path, "is_file", return_value=False)
+    @mock.patch.object(hud_capture.subprocess, "Popen")
+    def test_raises_when_output_missing(self, popen, _is_file, _sleep):
+        process = mock.Mock()
+        process.communicate.return_value = (b"", b"no such compositor")
+        popen.return_value = process
+
+        with self.assertRaises(hud_capture.HudCaptureError):
+            hud_capture.record_hud_clip(1.0, "/tmp/hud_clip.mp4", fps=24)
 
 
 if __name__ == "__main__":
