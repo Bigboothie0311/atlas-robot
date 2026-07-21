@@ -5,39 +5,100 @@
 > `ATLAS_V2_AGENT_HANDOFF_*.md` by date first (`ls -lat *.md`) before
 > trusting this one.
 >
-> - **Branch / HEAD:** `atlas-v2-agent` — HEAD is `dc594e9` ("fix: stop
->   offering self_record_clip -- physical camera faces the room, not
->   Atlas"). `git log -1` to confirm it's still there. **674 tests
->   passing** (test count unchanged from iteration 5 — one test swapped
->   for its inverse).
-> - **⏸️ LEFT OFF HERE (2026-07-21, iteration 6) — self-recording via the
->   physical camera is RETIRED, not fixed further.** Wesley live-tested
->   iteration 5's mic-coordination fix and confirmed (via journalctl) it
->   actually worked mechanically — no more "resource busy" fallback. But
->   the clip showed **Wesley**, not Atlas: the onboard USB camera
->   physically faces the room/desk, not himself. This is the exact "may
->   not be able to film Atlas itself depending on mounting position" risk
->   the original mission doc flagged in advance, now confirmed live twice
->   (the clip, and separate vision-command snapshots earlier in the same
->   session log). Wesley was explicit: **never use this camera for
->   self-showcase content again**; PC screen recording, or a genuine
->   future "his own" video source, are the only acceptable paths for
->   Instagram content. Removed `self_record_clip` from
->   `capabilities.REGISTRY` so voice no longer routes there — see "What
->   changed 2026-07-21, iteration 6" below for full detail, including why
->   the underlying tool/`mic_arbiter`/HUD indicator were left in place
->   rather than ripped out. Video-jump/audio-content quality symptoms on
->   that camera path were **not** debugged further — not worth chasing
->   artifacts on a capture source we just retired. **Still stopped before
->   Phase 11** (edit-and-post pipeline) — same blockers as before
->   (Instagram credentials, licensed audio, branding/caption style), now
->   with an added wrinkle: Wesley wants Instagram content specifically as
->   *screen recording + witty narrated conversation*, not raw self-video,
->   which actually simplifies Phase 11 now that the camera path is off
->   the table.
+> - **Branch / HEAD:** `atlas-v2-agent` — HEAD is `f25cb53` ("fix: fully
+>   unregister camera.capture_clip -- hiding it from capabilities.py
+>   wasn't enough"). `git log -1` to confirm it's still there.
+>   **669 tests passing** (5 fewer than iteration 6 — tests for a tool
+>   that no longer exists were removed, not skipped).
+> - **⏸️ LEFT OFF HERE (2026-07-21, iteration 7) — self-recording via the
+>   physical camera is now MECHANICALLY IMPOSSIBLE, and Instagram
+>   credentials turned out to already exist.** Two things happened this
+>   iteration:
+>   1. Iteration 6's fix (removing `self_record_clip` from
+>      `capabilities.REGISTRY`) **did not actually work** — Wesley
+>      reported Atlas recorded him again. journalctl confirmed the test
+>      ran well after that fix was deployed. Root cause: `capabilities.py`
+>      only shapes the top-level system-prompt text; `run_atlas_agent` is
+>      a generic tool with no registry-based gate at all, so the
+>      top-level model still called it with a goal like "record a clip of
+>      yourself," and the sub-agent's own planner picked
+>      `camera.capture_clip` because it was still a *registered AtlasTool*
+>      regardless of what the system prompt said. **Real fix:**
+>      `atlas_agent/pi_tools.register_pi_capture_tools()` no longer
+>      registers `camera.capture_clip` at all — mechanically unreachable
+>      now, not just undocumented. `camera_gate.capture_clip()` and
+>      `mic_arbiter.py` are untouched, just unwired. Committed as
+>      `f25cb53`. **Lesson for future sessions: a capabilities.py-only
+>      block is a UX nicety (honest refusal wording), not a security or
+>      correctness gate — the real gate is tool registration.**
+>   2. Wesley pushed back on my iteration-4/5/6 claim that Phase 11 needs
+>      Instagram credentials from scratch — he said he already gave Atlas
+>      what it needs. **He was right, I was wrong.** Verified live:
+>      `~/.config/atlas/instagram.env` has a real token + account ID;
+>      `instagram_stats.get_stats()` returns real data for account
+>      `a.t.l.a.s_desktop_assistant` (6 followers, 1 media item, working
+>      insights). Read access is real and has been for a while
+>      (`instagram_stats.py`, `hud_stats.py` predate this session). What's
+>      actually still missing, confirmed via a repo-wide grep: **no
+>      publish/upload/content_publish code exists anywhere** — the write
+>      side was never built, and the token's write scope wasn't verified
+>      this session (would need app credentials not present in the env
+>      file). See "What changed 2026-07-21, iteration 7" below and the
+>      updated Phase 11 section for the corrected picture.
 > - **Phase / milestone:** Phase 4, milestone 1 (spoken-command tests,
 >   see below) plus an out-of-band Phase 3 fix Wesley reported directly:
 >   he asked Atlas to turn off his PC and it didn't work.
+> - **What changed 2026-07-21, iteration 7 (real fix for the camera +
+>   corrected Instagram-credentials claim):** Two independent findings.
+>   **(a) The registry-only fix from iteration 6 didn't hold.** Wesley
+>   reported the recording happened again — silent, of him, sent to his
+>   PC — despite `self_record_clip` being removed from
+>   `capabilities.REGISTRY`. journalctl confirmed the test (23:00:12) ran
+>   well after that fix's `atlas-wake` restart (22:56:28), so this wasn't
+>   a stale-code issue. Traced the actual routing:
+>   `run_atlas_agent` (`ai_tools.py`) is a plain function-call tool with
+>   *no* connection to `capabilities.REGISTRY` at all — that registry only
+>   feeds descriptive text into the top-level system prompt. The
+>   top-level model still called `run_atlas_agent` with a goal like
+>   "record a clip of yourself" (nothing stopped it from generalizing),
+>   and the sub-agent runtime's own planner picked `camera.capture_clip`
+>   because it was still a live, registered `AtlasTool` — capabilities.py
+>   never touches that layer. **Fix:**
+>   `atlas_agent/pi_tools.register_pi_capture_tools()` no longer
+>   registers `camera.capture_clip` at all; it's mechanically absent from
+>   the tool roster now, not just undocumented. Removed the now-dead
+>   `capture_self_clip` closure, `camera_capture_handler`/
+>   `hud_recording_notifier` params, and the `_notify_hud_recording`
+>   helper from `pi_tools.py` (no more `requests`/`HUB` import needed
+>   there either). 5 tests removed (they tested a tool that no longer
+>   exists) — **669 passing**. Updated
+>   `tests/agent/test_pi_tools.py`/`test_runtime_factory.py` accordingly.
+>   `graphify update .` run, `atlas-wake` restarted clean. Committed as
+>   `f25cb53`. The `/hud/recording` endpoint, `mic_arbiter.py`, and
+>   `camera_gate.capture_clip()` itself were deliberately left in place —
+>   correct, tested, reusable code, just currently unwired.
+>   **(b) Wesley corrected my Phase 11 assessment — he was right.** He
+>   said he'd already given Atlas the Instagram API access it needs, and
+>   pointed out Atlas can already show followers/insights (only possible
+>   with real business-account access). Checked: `~/.config/atlas/
+>   instagram.env` has a live `INSTAGRAM_ACCESS_TOKEN` +
+>   `INSTAGRAM_ACCOUNT_ID`; ran `instagram_stats.get_stats()` directly and
+>   got real data back — account `a.t.l.a.s_desktop_assistant`, 6
+>   followers, 1 media item, working insights. This is real,
+>   already-working infrastructure (`instagram_stats.py`, `hud_stats.py`,
+>   the 15-minute cache, voice/HUD stats routes), not aspirational — I was
+>   simply wrong earlier this session to tell Wesley "no Instagram API
+>   access exists at all." Grepped the repo for any publish/upload code:
+>   **none exists** — the read side is real and working, the write side
+>   (media upload, container creation, `content_publish`) has never been
+>   built, and the token's write-scope wasn't verified this session
+>   (would need app credentials not present in the env file to check via
+>   Graph API's debug_token). Per the mission doc's own Phase 12 section,
+>   building the dry-run/preview/confirmation pipeline is explicitly fine
+>   to do now — only the actual live publish call needs Wesley's exact
+>   payload approval — so this doesn't change the "ask Wesley first"
+>   boundary, just corrects what specifically still needs building
+>   (a real publish adapter, not credentials).
 > - **What changed 2026-07-21, iteration 6 (wrong-camera finding —
 >   self-recording retired):** Wesley live-tested iteration 5's
 >   mic-coordination fix. Checked journalctl for the actual test run
@@ -273,14 +334,24 @@ reports either misbehaving.
    separate design for polling PC state back to the Pi HUD; worth
    revisiting once Phase 11 actually needs a recording indicator for
    screen-record content instead.
-4. **Phase 11 (edit pipeline) — deliberately not started.** This is where
-   this session stopped. Wesley clarified the actual product goal this
-   session: Instagram content should be a **screen recording with witty
-   narrated conversation**, not raw self-video via camera — which
-   conveniently simplifies this list, since the self-video capture
-   question (item 1) is now moot. It still needs decisions only Wesley
-   can make before any code gets written:
-   - **Instagram credentials/OAuth.** No API access exists yet at all.
+4. **Phase 11/12 (edit + publish pipeline) — deliberately not started.**
+   This is where this session stopped. Wesley clarified the actual
+   product goal: Instagram content should be a **screen recording with
+   witty narrated conversation**, not raw self-video via camera — which
+   simplifies this list, since the self-video capture question (item 1)
+   is now moot. **Corrected from earlier in this session:** Instagram
+   API access already exists and is real — see iteration 7(b) above —
+   don't re-ask Wesley for credentials. What's actually still needed:
+   - ~~Instagram credentials/OAuth~~ **Already exists and verified
+     working** (`~/.config/atlas/instagram.env`, real account
+     `a.t.l.a.s_desktop_assistant`). Only unconfirmed detail: whether the
+     token's scope includes write/`content_publish` — check by attempting
+     Phase 12's own dry-run/sandbox path first (its spec explicitly wants
+     this tested without publishing), not by asking Wesley to re-do
+     OAuth.
+   - **Build the actual publish adapter** — confirmed via grep: no
+     upload/container-creation/publish code exists anywhere yet. This is
+     real, unstarted implementation work, not a credentials blocker.
    - **Licensed background audio** — only relevant if music/background
      audio is wanted under the narration; Atlas's own spoken narration
      itself isn't a licensing question. Can't just grab something off
@@ -296,11 +367,13 @@ reports either misbehaving.
      PC video during editing. Not designed yet.
    - The pipeline's last step is a **real public Instagram post**, which
      the safety model (see the main mission doc, "Safety and Authority
-     Model") explicitly requires confirming the exact media and caption
-     with Wesley before ever sending — this isn't a capability to just
-     build silently and gate behind a runtime confirmation prompt later;
-     the credentials and content-source decisions above have to happen
-     with Wesley first.
+     Model") and Phase 12's own spec explicitly require confirming the
+     exact media and caption with Wesley before ever sending — this isn't
+     a capability to just build silently and gate behind a runtime
+     confirmation prompt later; the design decisions above (audio, style,
+     editing approach) should happen with Wesley first, but the dry-run
+     pipeline itself can start being built without waiting on credentials
+     since those already exist.
    The capture primitive Phase 11 will actually use is already proven
    end to end (PC screenshot/screen-recording confirmed live 2026-07-20).
    Pi self-recording via camera is explicitly off the table (item 1).
@@ -324,7 +397,9 @@ actually happened in this same order:
 
 1. **"Hey Atlas, record a 10 second clip of yourself."** Should now get
    an honest refusal or a redirect toward PC screen recording, instead of
-   actually using the camera — confirms `self_record_clip` is really off.
+   actually using the camera — confirms `camera.capture_clip` is really
+   unreachable this time (iteration 6's fix looked right but wasn't;
+   iteration 7 removes the tool itself, not just its description).
 2. **On a separate, later turn, say "Hey Atlas" while Atlas is mid-answer
    on something unrelated** (normal barge-in, nothing to do with
    recording), and confirm it still interrupts normally. This is the one
@@ -338,9 +413,10 @@ actually happened in this same order:
    fix is still solid after this session's restarts.
 
 Report back in that order. Once #1 and #2 pass, this session's work is
-fully closed out. Next up is Phase 11 (edit-and-post) — but that needs
-your answers first: Instagram credentials, whether you want background
-music under the narration (and if so, from where), branding/caption
-style, and how narration audio should get from the Pi to the PC to sync
-with the screen recording (see "What's left to fully close Phase 4" item
-4 above for the full list).
+fully closed out. Next up is Phase 11/12 (edit-and-post) — Instagram
+credentials are already sorted (confirmed working this session, no need
+to redo that), but still needs your answers on: whether you want
+background music under the narration (and if so, from where),
+branding/caption style, and how narration audio should get from the Pi
+to the PC to sync with the screen recording (see "What's left to fully
+close Phase 4" item 4 above for the full list).
