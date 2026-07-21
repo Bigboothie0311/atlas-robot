@@ -538,3 +538,71 @@ def test_task_and_plan_identity_must_match() -> None:
             match="does not match",
         ):
             runner.run(other_task, plan)
+
+
+def test_step_completed_event_carries_target_and_bounded_evidence() -> None:
+    registry = ToolRegistry()
+    verifier = ResultVerifier()
+
+    registry.register(
+        AtlasTool(
+            name="pi.get_service_status",
+            description="Check a service.",
+            runs_on="pi",
+            handler=lambda: {"active_state": "active"},
+        )
+    )
+    verifier.register(
+        "pi.get_service_status",
+        lambda call, result: VerificationCheck(
+            True,
+            "Status checked.",
+            evidence={
+                "service": "atlas-hud.service",
+                "active": True,
+                "count": 3,
+                "oversized": "x" * 500,
+                "nested": {"dropped": True},
+            },
+        ),
+    )
+
+    task = AtlasTask(
+        goal="Check the HUD service.",
+        source="voice",
+    )
+    plan = make_plan(
+        registry,
+        task,
+        [
+            {
+                "tool": "pi.get_service_status",
+                "description": "Check the service.",
+                "arguments": {},
+            },
+        ],
+    )
+    event_bus = EventBus()
+    captured: list = []
+    event_bus.subscribe(
+        "agent.step.completed",
+        lambda event: captured.append(event.data),
+    )
+
+    with ToolExecutor(registry) as executor:
+        result = WorkflowRunner(
+            executor,
+            verifier,
+            event_bus=event_bus,
+        ).run(task, plan)
+
+    assert result.success is True
+    assert len(captured) == 1
+    data = captured[0]
+    assert data["target"] == "pi"
+    evidence = data["evidence"]
+    assert evidence["service"] == "atlas-hud.service"
+    assert evidence["active"] is True
+    assert evidence["count"] == 3
+    assert len(evidence["oversized"]) <= 160
+    assert "nested" not in evidence

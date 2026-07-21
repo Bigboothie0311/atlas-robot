@@ -291,4 +291,46 @@ def test_runtime_publishes_planning_lifecycle_events():
         "task_id": result.task.task_id,
         "plan_id": "plan-1",
         "step_count": 2,
+        "attempts": None,
+        "input_tokens": None,
+        "output_tokens": None,
     }
+
+
+def test_planning_completed_event_reports_tokens_and_attempts():
+    plan = SimpleNamespace(
+        plan_id="plan-1",
+        steps=(),
+    )
+    planning_result = SimpleNamespace(
+        plan=plan,
+        attempts=2,
+        total_input_tokens=120,
+        total_output_tokens=30,
+    )
+    workflow_result = SimpleNamespace(
+        status="completed",
+    )
+    event_bus = EventBus()
+    captured = []
+    event_bus.subscribe(
+        "agent.planning.completed",
+        lambda event: captured.append(event.data),
+    )
+    runtime = AgentRuntime(
+        planning_service=FakePlanningService(
+            result=planning_result,
+        ),
+        workflow_runner=FakeWorkflowRunner(
+            result=workflow_result,
+        ),
+        task_queue=TaskQueue(),
+        event_bus=event_bus,
+    )
+
+    runtime.run_goal("Check the HUD.", source="voice")
+
+    assert len(captured) == 1
+    assert captured[0]["attempts"] == 2
+    assert captured[0]["input_tokens"] == 120
+    assert captured[0]["output_tokens"] == 30

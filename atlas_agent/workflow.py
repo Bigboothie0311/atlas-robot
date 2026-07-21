@@ -59,6 +59,37 @@ class WorkflowResult:
         return self.status is WorkflowStatus.COMPLETED
 
 
+_MAX_EVIDENCE_KEYS = 6
+_MAX_EVIDENCE_CHARS = 160
+
+
+def _bounded_evidence(
+    evidence: Any,
+) -> dict[str, Any]:
+    """Scalar-only, bounded copy of verifier evidence, safe to put on
+    the HUD event stream."""
+    if not isinstance(evidence, dict):
+        return {}
+
+    bounded: dict[str, Any] = {}
+
+    for key, value in evidence.items():
+        if len(bounded) >= _MAX_EVIDENCE_KEYS:
+            break
+
+        if isinstance(value, str):
+            bounded[str(key)] = value[
+                :_MAX_EVIDENCE_CHARS
+            ]
+        elif (
+            value is None
+            or isinstance(value, (bool, int, float))
+        ):
+            bounded[str(key)] = value
+
+    return bounded
+
+
 class WorkflowRunner:
     def __init__(
         self,
@@ -236,6 +267,10 @@ class WorkflowRunner:
                     "position": step.position,
                     "tool_name": call.tool_name,
                     "verified": True,
+                    "target": step.target.value,
+                    "evidence": _bounded_evidence(
+                        verification.evidence
+                    ),
                 },
             )
 

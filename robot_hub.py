@@ -61,12 +61,41 @@ def _default_agent_state():
         "current_step": 0,
         "completed_steps": 0,
         "tool_name": None,
+        "target": None,
         "description": None,
+        "evidence": {},
         "error": None,
+        "retry_count": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
         "last_event": None,
         "updated_at": 0.0,
         "visible_until": 0.0,
     }
+
+
+AGENT_EVIDENCE_MAX_KEYS = 6
+AGENT_EVIDENCE_MAX_CHARS = 160
+
+
+def _sanitize_agent_evidence(value):
+    """Scalar-only, bounded evidence — /agent/event is an HTTP surface,
+    so the hub re-bounds whatever arrives."""
+    if not isinstance(value, dict):
+        return {}
+
+    sanitized = {}
+
+    for key, item in value.items():
+        if len(sanitized) >= AGENT_EVIDENCE_MAX_KEYS:
+            break
+
+        if isinstance(item, str):
+            sanitized[str(key)] = item[:AGENT_EVIDENCE_MAX_CHARS]
+        elif item is None or isinstance(item, (bool, int, float)):
+            sanitized[str(key)] = item
+
+    return sanitized
 
 
 robot_state = {
@@ -452,12 +481,20 @@ def set_agent_event():
                 "current_step": 0,
                 "completed_steps": 0,
                 "tool_name": None,
+                "target": None,
                 "description": "BUILDING EXECUTION PLAN",
+                "evidence": {},
                 "error": None,
+                "retry_count": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
                 "visible_until": 0.0,
             })
 
         elif event_name == "agent.planning.completed":
+            attempts = _event_int(
+                event_data.get("attempts")
+            )
             current.update({
                 "active": True,
                 "phase": "plan_ready",
@@ -467,6 +504,13 @@ def set_agent_event():
                 ),
                 "description": "PLAN VALIDATED",
                 "error": None,
+                "retry_count": max(0, attempts - 1),
+                "input_tokens": _event_int(
+                    event_data.get("input_tokens")
+                ),
+                "output_tokens": _event_int(
+                    event_data.get("output_tokens")
+                ),
                 "visible_until": 0.0,
             })
 
@@ -498,7 +542,9 @@ def set_agent_event():
                 "current_step": 0,
                 "completed_steps": 0,
                 "tool_name": None,
+                "target": None,
                 "description": "EXECUTION STARTED",
+                "evidence": {},
                 "error": None,
                 "visible_until": 0.0,
             })
@@ -514,10 +560,16 @@ def set_agent_event():
                 "tool_name": str(
                     event_data.get("tool_name") or ""
                 ),
+                "target": (
+                    str(event_data.get("target"))
+                    if event_data.get("target")
+                    else None
+                ),
                 "description": str(
                     event_data.get("description")
                     or "EXECUTING STEP"
                 ),
+                "evidence": {},
                 "error": None,
                 "visible_until": 0.0,
             })
@@ -541,6 +593,14 @@ def set_agent_event():
                     event_data.get("tool_name")
                     or current.get("tool_name")
                     or ""
+                ),
+                "target": (
+                    str(event_data.get("target"))
+                    if event_data.get("target")
+                    else current.get("target")
+                ),
+                "evidence": _sanitize_agent_evidence(
+                    event_data.get("evidence")
                 ),
                 "visible_until": 0.0,
             })

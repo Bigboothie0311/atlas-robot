@@ -234,6 +234,7 @@ function applyAgentState(state) {
     document.getElementById("agent-phase").textContent = "MISSION STANDBY";
     document.getElementById("agent-goal").textContent = "";
     document.getElementById("agent-step").textContent = "";
+    document.getElementById("agent-detail").textContent = "";
     document.getElementById("agent-progress-fill").style.width = "0%";
     return;
   }
@@ -287,6 +288,40 @@ function applyAgentState(state) {
   }
 
   document.getElementById("agent-step").textContent = stepText;
+
+  const detailParts = [];
+  const target = String(agent.target || "")
+    .replaceAll("_", " ")
+    .toUpperCase();
+
+  if (target && (phase === "executing" || phase === "waiting_confirmation")) {
+    detailParts.push(`TARGET ${target}`);
+  }
+
+  const evidence = agent.evidence;
+
+  if (evidence && typeof evidence === "object") {
+    const evidencePairs = Object.entries(evidence)
+      .slice(0, 3)
+      .map(([key, value]) =>
+        `${String(key).replaceAll("_", " ").toUpperCase()} ${String(value).toUpperCase()}`);
+
+    detailParts.push(...evidencePairs);
+  }
+
+  if (agent.retry_count > 0) {
+    detailParts.push(`PLAN RETRIES ${agent.retry_count}`);
+  }
+
+  const inputTokens = Number(agent.input_tokens) || 0;
+  const outputTokens = Number(agent.output_tokens) || 0;
+
+  if (inputTokens > 0 || outputTokens > 0) {
+    detailParts.push(`TOKENS ${inputTokens}/${outputTokens}`);
+  }
+
+  document.getElementById("agent-detail").textContent =
+    detailParts.join(" · ");
 
   if (
     !agent.active

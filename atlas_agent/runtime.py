@@ -122,6 +122,15 @@ class AgentRuntime:
                 "task_id": task.task_id,
                 "plan_id": plan_id,
                 "step_count": len(plan_steps),
+                "attempts": getattr(
+                    planning, "attempts", None
+                ),
+                "input_tokens": getattr(
+                    planning, "total_input_tokens", None
+                ),
+                "output_tokens": getattr(
+                    planning, "total_output_tokens", None
+                ),
             },
         )
 
