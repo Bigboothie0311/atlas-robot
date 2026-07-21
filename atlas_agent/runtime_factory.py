@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import logbook
+
 from atlas_agent.event_bus import EventBus
 from atlas_agent.executor import ToolExecutor
 from atlas_agent.local_tools import register_local_tools
@@ -139,6 +141,7 @@ def build_pc_agent_runtime(
     executor = ToolExecutor(
         registry,
         PermissionPolicy(),
+        audit_sink=logbook.record_tool_audit,
     )
     workflow_runner = WorkflowRunner(
         executor,

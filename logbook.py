@@ -14,6 +14,9 @@ from pathlib import Path
 LOG_DIR = Path("/home/atlas/atlas-robot/data/logs")
 INTERACTIONS_PATH = LOG_DIR / "interactions.jsonl"
 INCIDENTS_PATH = LOG_DIR / "incidents.jsonl"
+TOOL_AUDIT_PATH = LOG_DIR / "tool_audit.jsonl"
+
+TOOL_AUDIT_MAX_ERROR_CHARS = 300
 
 ROTATE_BYTES = 2 * 1024 * 1024  # 2 MB per file
 ROTATE_KEEP = 5                 # keep this many rotated generations
@@ -179,6 +182,49 @@ def read_incidents(limit=20):
 
     try:
         lines = INCIDENTS_PATH.read_text().splitlines()
+    except OSError:
+        return []
+
+    records = []
+    for line in lines[-limit:]:
+        try:
+            records.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+
+    return records
+
+
+# ---------------------------------------------------------------------
+# Agent tool audit (logged permission use, denials, and failures)
+# ---------------------------------------------------------------------
+
+def record_tool_audit(record):
+    """Persists one agent tool-execution audit record. Only fields the
+    executor actually measured; error text is bounded."""
+    error = record.get("error")
+
+    _append(TOOL_AUDIT_PATH, {
+        "ts": time.time(),
+        "tool_name": record.get("tool_name"),
+        "status": record.get("status"),
+        "permission_level": record.get("permission_level"),
+        "permission_outcome": record.get("permission_outcome"),
+        "duration_ms": record.get("duration_ms"),
+        "error": (
+            str(error)[:TOOL_AUDIT_MAX_ERROR_CHARS]
+            if error is not None
+            else None
+        ),
+    })
+
+
+def read_tool_audit(limit=20):
+    if not TOOL_AUDIT_PATH.exists():
+        return []
+
+    try:
+        lines = TOOL_AUDIT_PATH.read_text().splitlines()
     except OSError:
         return []
 

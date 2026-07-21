@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from concurrent.futures import (
     ThreadPoolExecutor,
     TimeoutError as FutureTimeoutError,
@@ -31,18 +32,68 @@ class ToolExecutor:
         permission_policy: PermissionPolicy | None = None,
         *,
         max_workers: int = 4,
+        audit_sink: Callable[[dict[str, Any]], Any] | None = None,
     ) -> None:
         if max_workers < 1:
             raise ValueError("max_workers must be at least 1")
 
         self._registry = registry
         self._permission_policy = permission_policy or PermissionPolicy()
+        self.audit_sink = audit_sink
         self._pool = ThreadPoolExecutor(
             max_workers=max_workers,
             thread_name_prefix="atlas-tool",
         )
 
     def execute(
+        self,
+        call: ToolCall,
+        *,
+        confirmed: bool = False,
+    ) -> ToolResult:
+        result = self._execute(call, confirmed=confirmed)
+        self._audit(result)
+        return result
+
+    def _audit(self, result: ToolResult) -> None:
+        """Persist an audit record for anything beyond a routine
+        level-0 success: logged permission use, denials, confirmations,
+        and failures. A broken sink never breaks execution."""
+        if self.audit_sink is None:
+            return
+
+        routine = (
+            result.status is ResultStatus.SUCCESS
+            and result.metadata.get("permission_outcome") == "allow"
+        )
+
+        if routine:
+            return
+
+        try:
+            self.audit_sink({
+                "tool_name": result.tool_name,
+                "call_id": result.call_id,
+                "task_id": result.task_id,
+                "status": result.status.value,
+                "permission_level": result.metadata.get(
+                    "permission_level"
+                ),
+                "permission_outcome": result.metadata.get(
+                    "permission_outcome"
+                ),
+                "duration_ms": result.duration_ms,
+                "error": result.error,
+            })
+        except Exception as error:
+            print(
+                "Tool audit sink failed:",
+                type(error).__name__,
+                error,
+                flush=True,
+            )
+
+    def _execute(
         self,
         call: ToolCall,
         *,

@@ -1231,3 +1231,63 @@ def test_spoken_summary_for_unresolved_recovery_is_truthful():
 
     assert "couldn't" in response.text.lower()
     assert "camera still not responding" in response.text
+
+
+def test_failure_explanation_mentions_retry_suggestion():
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.COMPLETED,
+        confirmation_call_id=None,
+        error=None,
+        steps=(
+            make_step(
+                tool_name="pi.explain_last_failure",
+                output={
+                    "window": 25,
+                    "failed_mission": {
+                        "goal": "Read the hub logs",
+                        "status": "failed",
+                        "note": None,
+                    },
+                    "last_error_interaction": None,
+                    "recent_incidents": [
+                        {
+                            "component": "hud",
+                            "cause": "kiosk down",
+                            "action": "restart failed",
+                            "verification": (
+                                "service still not active"
+                            ),
+                            "resolved": False,
+                            "timestamp": 1000.0,
+                        },
+                    ],
+                    "incident_count": 1,
+                    "evidence_found": True,
+                    "suggested_retries": [
+                        {
+                            "action": "recover_component",
+                            "component": "hud",
+                            "reason": (
+                                "service still not active"
+                            ),
+                        },
+                        {
+                            "action": "retry_mission",
+                            "goal": "Read the hub logs",
+                            "reason": "mission failed",
+                        },
+                    ],
+                },
+            ),
+        ),
+    )
+    controller = AgentVoiceController(
+        FakeBundle(FakeRuntime(result=make_result(workflow)))
+    )
+
+    response = controller.handle_goal(
+        "Why did the last command fail?"
+    )
+
+    assert "hud" in response.text.lower()
+    assert "recover" in response.text.lower()

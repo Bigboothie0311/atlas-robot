@@ -190,3 +190,12 @@ def test_factory_rejects_invalid_configuration(
             username=username,
             roots=roots,
         )
+
+
+def test_factory_wires_tool_audit_sink(tmp_path):
+    bundle = build_bundle(tmp_path)
+
+    try:
+        assert bundle.executor.audit_sink is not None
+    finally:
+        bundle.close()

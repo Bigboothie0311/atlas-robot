@@ -724,6 +724,38 @@ class AgentVoiceController:
                             f"{verification}."
                         )
 
+            suggestions = output.get(
+                "suggested_retries"
+            )
+
+            if (
+                isinstance(suggestions, list)
+                and suggestions
+                and isinstance(suggestions[0], dict)
+            ):
+                first = suggestions[0]
+                action = first.get("action")
+                component = first.get("component")
+                goal_text = first.get("goal")
+
+                if (
+                    action == "recover_component"
+                    and isinstance(component, str)
+                ):
+                    spoken = component.replace("_", " ")
+                    parts.append(
+                        "You can ask me to recover "
+                        f"the {spoken}."
+                    )
+                elif (
+                    action == "retry_mission"
+                    and isinstance(goal_text, str)
+                ):
+                    parts.append(
+                        "You can ask me to retry "
+                        "that mission."
+                    )
+
             if not parts:
                 return (
                     "I found recorded incident evidence, "

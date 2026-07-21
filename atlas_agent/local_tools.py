@@ -949,6 +949,33 @@ def register_local_tools(
             or bool(recent_incidents)
         )
 
+        suggested_retries: list[dict[str, Any]] = []
+
+        for incident in recent_incidents:
+            if (
+                incident.get("resolved") is False
+                and incident.get("component")
+                in _RECOVERY_COMPONENTS
+            ):
+                suggested_retries.append({
+                    "action": "recover_component",
+                    "component": incident["component"],
+                    "reason": str(
+                        incident.get("verification")
+                        or "unresolved incident"
+                    )[:_MAX_SPOKEN_ERROR_CHARS],
+                })
+                break
+
+        if failed_mission is not None:
+            suggested_retries.append({
+                "action": "retry_mission",
+                "goal": failed_mission["goal"],
+                "reason": (
+                    f"mission {failed_mission['status']}"
+                ),
+            })
+
         return {
             "window": window,
             "failed_mission": failed_mission,
@@ -958,6 +985,7 @@ def register_local_tools(
             "recent_incidents": recent_incidents,
             "incident_count": len(recent_incidents),
             "evidence_found": evidence_found,
+            "suggested_retries": suggested_retries,
         }
 
     def run_diagnostics(
@@ -2150,12 +2178,43 @@ def _verify_failure_explanation(
         for incident in incidents
     )
 
+    suggestions = output.get("suggested_retries")
+    suggestions_ok = (
+        isinstance(suggestions, list)
+        and len(suggestions) <= 2
+        and all(
+            isinstance(suggestion, dict)
+            and (
+                (
+                    suggestion.get("action")
+                    == "recover_component"
+                    and suggestion.get("component")
+                    in _RECOVERY_COMPONENTS
+                )
+                or (
+                    suggestion.get("action")
+                    == "retry_mission"
+                    and isinstance(
+                        suggestion.get("goal"), str
+                    )
+                    and bool(suggestion.get("goal"))
+                )
+            )
+            for suggestion in suggestions
+        )
+        and (
+            not suggestions
+            or evidence_found is True
+        )
+    )
+
     verified = (
         isinstance(window, int)
         and window >= 1
         and mission_ok
         and interaction_ok
         and incidents_ok
+        and suggestions_ok
         and isinstance(incident_count, int)
         and incident_count == len(incidents)
         and isinstance(evidence_found, bool)

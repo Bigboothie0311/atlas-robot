@@ -1452,3 +1452,119 @@ def test_pi_recover_component_reports_unresolved_honestly(
     assert result.status is ResultStatus.SUCCESS
     assert result.output["resolved"] is False
     assert verification.status is VerificationStatus.VERIFIED
+
+
+def test_explain_last_failure_suggests_bounded_retries(
+    tmp_path,
+    monkeypatch,
+):
+    save_missions(
+        tmp_path,
+        [
+            make_mission(
+                "Read the hub logs",
+                TaskStatus.FAILED,
+                "2026-07-19T11:00:00+00:00",
+            ),
+        ],
+    )
+    monkeypatch.setattr(
+        local_tools.logbook,
+        "read_interactions",
+        lambda window: [],
+    )
+    monkeypatch.setattr(
+        local_tools.logbook,
+        "read_incidents",
+        lambda limit: [
+            {
+                "ts": 1000.0,
+                "component": "hud",
+                "cause": "the HUD kiosk was down",
+                "action": "restarted atlas-hud.service",
+                "verification": "service still not active",
+                "resolved": False,
+            },
+        ],
+    )
+
+    registry, verifier, _tools = build_tools(tmp_path)
+    call = ToolCall(
+        tool_name="pi.explain_last_failure",
+        arguments={"window": 25},
+    )
+
+    result = execute(registry, call)
+    verification = verifier.verify(call, result)
+
+    assert result.status is ResultStatus.SUCCESS
+    suggestions = result.output["suggested_retries"]
+    assert len(suggestions) == 2
+    assert suggestions[0]["action"] == "recover_component"
+    assert suggestions[0]["component"] == "hud"
+    assert suggestions[1]["action"] == "retry_mission"
+    assert suggestions[1]["goal"] == "Read the hub logs"
+    assert verification.status is VerificationStatus.VERIFIED
+
+
+def test_explain_last_failure_suggests_nothing_without_evidence(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        local_tools.logbook,
+        "read_interactions",
+        lambda window: [],
+    )
+    monkeypatch.setattr(
+        local_tools.logbook,
+        "read_incidents",
+        lambda limit: [],
+    )
+
+    registry, _verifier, _tools = build_tools(tmp_path)
+    call = ToolCall(
+        tool_name="pi.explain_last_failure",
+        arguments={"window": 25},
+    )
+
+    result = execute(registry, call)
+
+    assert result.status is ResultStatus.SUCCESS
+    assert result.output["suggested_retries"] == []
+
+
+def test_explain_last_failure_skips_unallowlisted_components(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        local_tools.logbook,
+        "read_interactions",
+        lambda window: [],
+    )
+    monkeypatch.setattr(
+        local_tools.logbook,
+        "read_incidents",
+        lambda limit: [
+            {
+                "ts": 1000.0,
+                "component": "warp_core",
+                "cause": "unknown",
+                "action": "reported",
+                "verification": "still broken",
+                "resolved": False,
+            },
+        ],
+    )
+
+    registry, _verifier, _tools = build_tools(tmp_path)
+    call = ToolCall(
+        tool_name="pi.explain_last_failure",
+        arguments={"window": 25},
+    )
+
+    result = execute(registry, call)
+
+    assert result.status is ResultStatus.SUCCESS
+    assert result.output["suggested_retries"] == []

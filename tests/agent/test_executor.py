@@ -168,3 +168,85 @@ def test_invalid_timeout_does_not_run_handler() -> None:
 def test_executor_rejects_invalid_worker_count() -> None:
     with pytest.raises(ValueError, match="max_workers must be at least 1"):
         ToolExecutor(ToolRegistry(), max_workers=0)
+
+
+def test_audit_sink_records_logged_permission_use() -> None:
+    audits: list[dict] = []
+    registry = registry_with_tool(
+        lambda: {"ok": True},
+        permission_level=1,
+    )
+    call = ToolCall(tool_name="test.tool", arguments={})
+
+    with ToolExecutor(
+        registry,
+        audit_sink=audits.append,
+    ) as executor:
+        result = executor.execute(call)
+
+    assert result.status is ResultStatus.SUCCESS
+    assert len(audits) == 1
+    assert audits[0]["tool_name"] == "test.tool"
+    assert audits[0]["status"] == "success"
+    assert audits[0]["permission_level"] == 1
+    assert audits[0]["permission_outcome"] == "allow_logged"
+
+
+def test_audit_sink_skips_routine_level_zero_success() -> None:
+    audits: list[dict] = []
+    registry = registry_with_tool(lambda: {"ok": True})
+    call = ToolCall(tool_name="test.tool", arguments={})
+
+    with ToolExecutor(
+        registry,
+        audit_sink=audits.append,
+    ) as executor:
+        result = executor.execute(call)
+
+    assert result.status is ResultStatus.SUCCESS
+    assert audits == []
+
+
+def test_audit_sink_records_errors_and_denials() -> None:
+    audits: list[dict] = []
+
+    def boom() -> None:
+        raise RuntimeError("handler broke")
+
+    registry = registry_with_tool(boom)
+
+    with ToolExecutor(
+        registry,
+        audit_sink=audits.append,
+    ) as executor:
+        executor.execute(
+            ToolCall(tool_name="test.tool", arguments={})
+        )
+        executor.execute(
+            ToolCall(tool_name="unknown.tool")
+        )
+
+    assert len(audits) == 2
+    assert audits[0]["status"] == "error"
+    assert "RuntimeError" in audits[0]["error"]
+    assert audits[1]["status"] == "denied"
+    assert audits[1]["tool_name"] == "unknown.tool"
+
+
+def test_audit_sink_failure_does_not_break_execution() -> None:
+    def failing_sink(record: dict) -> None:
+        raise OSError("disk full")
+
+    registry = registry_with_tool(
+        lambda: {"ok": True},
+        permission_level=1,
+    )
+    call = ToolCall(tool_name="test.tool", arguments={})
+
+    with ToolExecutor(
+        registry,
+        audit_sink=failing_sink,
+    ) as executor:
+        result = executor.execute(call)
+
+    assert result.status is ResultStatus.SUCCESS
