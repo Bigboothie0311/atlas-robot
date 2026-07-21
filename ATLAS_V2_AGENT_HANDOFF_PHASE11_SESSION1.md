@@ -5,7 +5,7 @@
 > root for a newer `ATLAS_V2_AGENT_HANDOFF_*.md` by date first
 > (`ls -lat *.md`) before trusting this one.
 >
-> - **Branch:** `atlas-v2-agent`. **728 tests passing** (`./venv/bin/python
+> - **Branch:** `atlas-v2-agent`. **735 tests passing** (`./venv/bin/python
 >   -m pytest tests/` — this repo's own `venv/`, not system Python, which
 >   is missing `psutil` and others). **Use pytest, not `unittest
 >   discover`** — confirmed live: `unittest discover` silently collects
@@ -48,11 +48,19 @@
 >   fixed, word-for-word script every time — replaced with
 >   `_build_default_tour()`, which randomizes phrasing and which extra
 >   real-feature beats show up. `atlas-wake.service` restarted to
->   actually load all of this. **Ready now:** "hey atlas, record a video
->   of yourself for Instagram" records a smooth, non-repeating Reel, then
->   pauses for a spoken yes/no before publishing (that confirmation gate
->   is deliberate and untouched). Full detail in "Same day, round 2"
->   below.
+>   actually load all of this. Said at the time this was "ready now" --
+>   **that claim was wrong, see round 3.** Full detail in "Same day,
+>   round 2" below.
+> - **Round 3, same day: the actual bug behind "ready now" being wrong,
+>   plus PC-demo interleaving.** Wesley tried the exact phrase and Atlas
+>   ran self-diagnostics instead of recording anything -- confirmed via
+>   `journalctl -u atlas-wake.service`. Root cause: the top-level voice
+>   router (`ai_tools.py`) had a tool description gap, not a
+>   content-pipeline bug -- see "Same day, round 3" below. Fixed, plus
+>   added real PC-screen-clip interleaving (`"source": "pc"` beats) and
+>   found + fixed a real concat DTS bug live-testing that. **Actually
+>   ready now** -- this time verified by trying the literal failing
+>   scenario again, not just re-asserting it.
 
 ## What got built
 
@@ -339,6 +347,112 @@ end to end (record → edit → confirm → publish), one command:**
 - Not yet done, mentioned above as a real but separate follow-up:
   burned-in captions, crossfade transitions. Doesn't block readiness.
 
-**Test count, corrected:** 728 passing via `pytest tests/` (this repo's
-`venv/`). See the checkpoint block at the top of this file for why
-`unittest discover` under-counts.
+**Test count, corrected:** 735 passing via `pytest tests/` (this repo's
+`venv/`, as of the end of round 3). See the checkpoint block at the top
+of this file for why `unittest discover` under-counts.
+
+## Same day, round 3: the actual routing bug, PC interleaving, and honesty about round 2
+
+Wesley said the exact phrase from round 2's "ready now" claim. Real
+result: Atlas ran self-diagnostics (14 checks, all passed) and recorded
+nothing. That claim was wrong -- worth saying plainly, since round 2
+asserted readiness without ever actually trying the failing scenario.
+
+**Root cause, found via `journalctl -u atlas-wake.service --since
+"-20 minutes"`:** not a content-pipeline bug at all. The transcript
+showed `Whisper heard: record a video of yourself for instagram` →
+`Tokens: 12953 input, 106 output` → Atlas's own reply: *"The recording
+path didn't start; the system ran diagnostics instead."* Traced the
+tool-calling layer (`ai_tools.py`, the top-level voice router that sits
+in front of the whole `atlas_agent` runtime): it exposes two competing
+function tools to the model --
+- `run_atlas_diagnostic_or_repair`, whose description explicitly says
+  "...or list what it can do", and the system prompt in
+  `listen_and_answer.py` explicitly instructs: "For diagnostics, ...or
+  listing capabilities, call the run_atlas_diagnostic_or_repair tool."
+- `run_atlas_agent` -- the *only* path that reaches
+  `content.record_self_showcase`/`content.publish_to_instagram` (it's
+  what lazily builds the full `atlas_agent` runtime via
+  `build_pc_agent_runtime`) -- whose description listed only PC-file
+  examples ("finding or copying a file on the PC, checking visible PC
+  apps, opening an approved app") and never once mentioned video,
+  self-showcase, or Instagram, even though those tools were added in
+  the same uncommitted work this session started from.
+
+The model had a clear, explicit instruction pointing at the wrong tool,
+and zero signal pointing at the right one. Not a bug in
+`content_tools.py`, `hud_capture.py`, or anything actually built this
+session -- those never even got a chance to run. Confirmed via
+`data/logs/tool_audit.jsonl`: zero entries from that interaction, since
+the request never reached the `atlas_agent.ToolExecutor` audit path at
+all.
+
+**Fix:** rewrote both tool descriptions in `ai_tools.py`.
+`run_atlas_agent` now explicitly lists "recording a narrated
+self-showcase video... or publishing a finished video to Instagram" as
+a supported goal, with an explicit "this is the ONLY path to those...
+do not answer them with run_atlas_diagnostic_or_repair" line.
+`run_atlas_diagnostic_or_repair` got the mirror-image exclusion. No
+test previously covered this failure mode (`tests/test_ai_tools.py`
+doesn't assert on tool description content) -- worth knowing if this
+class of bug (new agent capability added but not wired into the
+top-level router's own tool descriptions) recurs.
+
+**Also this round: real PC-screen interleaving**, Wesley's other ask --
+"let him switch over to showing what he can do on the PC and hop
+between opening videos on YouTube or opening something else and then
+go back to recording himself... pull both recordings and stitch them
+together." Added `"source": "pc"` beats to `content.record_self_showcase`
+(`atlas_agent/content_tools.py`): starts a real PC screen recording via
+the same primitive `pc.start_screen_recording` wraps, performs the
+beat's `pc_action` (`youtube_search` or `open_app`) live so the actual
+demo gets captured, stops, downloads via `sftp_client`, and feeds the
+result through the exact same `edit_reel`/`concat_clips` path as HUD
+clips -- mixed sources, one final Reel. `register_content_tools` gained
+optional `pc_client`/`sftp_client` params (wired in `runtime_factory.py`;
+existing callers without them are unaffected). `_build_default_tour()`
+now has a coin-flip chance of splicing one in when a PC connection is
+actually configured, so the fully-automatic default tour can genuinely
+hop HUD → PC → HUD, not just vary HUD phrasing.
+
+**Confirmed live, twice, against the real PC** (`pc_control.is_configured()`
+and `pc_reachable()` both true this session) -- not just mocked:
+1. First pass surfaced a real bug: mixing a 24fps HUD clip with a
+   30fps PC-recorded clip (`atlas_companion.py`'s gdigrab capture is
+   `-framerate 30`) through `concat_clips()`'s stream-copy (`-c copy`)
+   produced "non monotonically increasing dts" warnings on a full
+   `ffmpeg ... -f null -` decode pass -- 18+ of them. Pinning output fps
+   in `edit_reel()` (`REEL_FRAME_RATE = 24`, since every beat's clip
+   already gets re-encoded there regardless of source) cut it to 1-2
+   warnings but not zero. Root cause was really `concat_clips()`
+   assuming stream-copy is safe across differently-sourced segments;
+   switched it to re-encode (`-fps_mode cfr -r 24`, same as before)
+   instead of `-c copy`. Re-ran: **zero warnings**, clean decode, exactly
+   `24/1` fps.
+2. Second pass: sampled frames across a real HUD→PC→HUD clip -- distinct
+   hashes and distinct file sizes throughout (the PC segment's frames
+   were visibly smaller, consistent with a plainer PC desktop scene
+   compressing better than the busier HUD dashboard), confirming real,
+   different content was captured on both sides, not a frozen/black
+   frame.
+3. Found along the way: the `open_app` default example (`"notepad"`)
+   silently no-op'd -- confirmed live via `pc_client.execute("open_app",
+   {"app": "notepad"})` that it isn't in this PC's owner-configured
+   `approved_apps` whitelist (`atlas_companion.py`'s `act_open_app`).
+   Best-effort by design (no crash, no error surfaced), but not a good
+   *default*. Swapped `PC_DEMO_BEATS`'s default pool to two
+   `youtube_search` variants instead, which has no such whitelist
+   dependency and was confirmed live to actually work
+   (`pc_control.youtube_search(...)` really opened a real search).
+   `open_app` is still a fully supported `pc_action` for custom
+   `beats` -- just not relied on on in the automatic default mix,
+   since a real approved app name can't be known from here.
+4. Final pass: ran the actual fully-automatic default tour
+   (`beats=None`, `pc_demo_available=True`) repeatedly until the
+   coin-flip produced a PC beat, then ran it for real -- 7 beats, one
+   of them a real PC hop, one final 32.9s Reel, clean decode, zero
+   warnings.
+
+`atlas-wake.service` restarted again after all of this (it's the
+process that loads `ai_tools.py`/`content_tools.py`/`content_pipeline.py`
+in memory and doesn't auto-reload).
