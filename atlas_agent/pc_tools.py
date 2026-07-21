@@ -110,6 +110,24 @@ def register_pc_tools(
             )
         )
 
+    def focus_or_open_app(app: str) -> dict[str, Any]:
+        if not isinstance(app, str) or not app.strip():
+            raise ValueError(
+                "app must be a non-empty string"
+            )
+
+        return asdict(
+            pc_client.execute(
+                "focus_or_open_app",
+                {"app": app.strip()},
+            )
+        )
+
+    def active_window() -> dict[str, Any]:
+        return asdict(
+            pc_client.execute("active_window")
+        )
+
     tools = [
         AtlasTool(
             name="pc.ensure_online",
@@ -241,7 +259,13 @@ def register_pc_tools(
             name="pc.open_app",
             description=(
                 "Open an application from the Windows "
-                "companion's approved app list."
+                "companion's approved app list. Always "
+                "opens a new instance — prefer "
+                "pc.focus_or_open_app for the named "
+                "profile apps (spotify, claude, codex, "
+                "terminal, fusion, browser) so an "
+                "already-open window is focused instead "
+                "of duplicated."
             ),
             runs_on="pc",
             handler=open_app,
@@ -256,6 +280,58 @@ def register_pc_tools(
                         }
                     },
                     "required": ["app"],
+                    "additionalProperties": False,
+                }
+            },
+        ),
+        AtlasTool(
+            name="pc.focus_or_open_app",
+            description=(
+                "Focus an approved app's window if it is "
+                "already open on the Windows PC, or open "
+                "it if not — never opens a duplicate "
+                "instance. Approved app keys: spotify, "
+                "claude, codex, terminal, fusion, browser."
+            ),
+            runs_on="pc",
+            handler=focus_or_open_app,
+            permission_level=0,
+            timeout_seconds=30,
+            metadata={
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "app": {
+                            "type": "string",
+                            "enum": [
+                                "spotify",
+                                "claude",
+                                "codex",
+                                "terminal",
+                                "fusion",
+                                "browser",
+                            ],
+                        }
+                    },
+                    "required": ["app"],
+                    "additionalProperties": False,
+                }
+            },
+        ),
+        AtlasTool(
+            name="pc.active_window",
+            description=(
+                "Report the title of the currently "
+                "focused window on the Windows PC."
+            ),
+            runs_on="pc",
+            handler=active_window,
+            permission_level=0,
+            timeout_seconds=20,
+            metadata={
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
                     "additionalProperties": False,
                 }
             },
@@ -307,6 +383,19 @@ def register_pc_tools(
         "pc.open_app",
         lambda call, result: _verify_pc_action(
             result.output,
+        ),
+    )
+    verifier.register(
+        "pc.focus_or_open_app",
+        lambda call, result: _verify_focus_or_open_app(
+            result.output,
+        ),
+    )
+    verifier.register(
+        "pc.active_window",
+        lambda call, result: _verify_pc_action(
+            result.output,
+            required_data_field="title",
         ),
     )
 
@@ -373,6 +462,48 @@ def _verify_search_result(
         ),
         evidence={
             "match_count": len(output),
+        },
+    )
+
+
+def _verify_focus_or_open_app(
+    output: Any,
+) -> VerificationCheck:
+    if not isinstance(output, dict):
+        return VerificationCheck(
+            verified=False,
+            reason="PC action output was not an object.",
+        )
+
+    data = output.get("data")
+    action = (
+        data.get("action")
+        if isinstance(data, dict)
+        else None
+    )
+    verified = (
+        output.get("ok") is True
+        and isinstance(data, dict)
+        and data.get("ok") is True
+        and action in ("focused", "launched")
+    )
+
+    return VerificationCheck(
+        verified=verified,
+        reason=(
+            "The Windows companion confirmed the app was "
+            f"{action}."
+            if verified
+            else "The Windows companion did not confirm "
+            "the app was focused or opened."
+        ),
+        evidence={
+            "action": action,
+            "error": (
+                data.get("error")
+                if isinstance(data, dict)
+                else output.get("error")
+            ),
         },
     )
 

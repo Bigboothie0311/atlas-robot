@@ -40,6 +40,9 @@ _ACTION_DISPATCH = {
     "open_fusion": pc_control.open_fusion,
     "open_spotify": pc_control.open_spotify,
     "open_claude": pc_control.open_claude,
+    "open_codex": pc_control.open_codex,
+    "open_terminal": pc_control.open_terminal,
+    "open_browser": pc_control.open_browser,
 }
 
 

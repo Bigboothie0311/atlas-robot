@@ -69,19 +69,71 @@ def pc_reachable():
         return False
 
 
-def open_fusion():
-    ok, data = _call("open_fusion")
-    return "Opening Fusion 360." if ok else data
+_APP_SPOKEN_NAMES = {
+    "spotify": "Spotify",
+    "claude": "Claude",
+    "codex": "Codex",
+    "terminal": "the terminal",
+    "fusion": "Fusion 360",
+    "browser": "your browser",
+}
+
+
+def focus_or_open_app(app_name):
+    """Focuses the app's window if it's already open, otherwise opens
+    it — never a duplicate instance. app_name must be one of the
+    companion's approved_apps keys."""
+    spoken = _APP_SPOKEN_NAMES.get(app_name, app_name)
+    ok, data = _call("focus_or_open_app", {"app": app_name})
+
+    if not ok:
+        return data
+
+    action = data.get("action")
+
+    if action == "focused":
+        return f"{spoken} is already open — bringing it to the front."
+
+    return f"Opening {spoken}."
 
 
 def open_spotify():
-    ok, data = _call("open_spotify")
-    return "Opening Spotify." if ok else data
+    return focus_or_open_app("spotify")
 
 
 def open_claude():
-    ok, data = _call("open_claude")
-    return "Opening Claude." if ok else data
+    return focus_or_open_app("claude")
+
+
+def open_codex():
+    return focus_or_open_app("codex")
+
+
+def open_terminal():
+    return focus_or_open_app("terminal")
+
+
+def open_browser():
+    return focus_or_open_app("browser")
+
+
+def open_fusion():
+    return focus_or_open_app("fusion")
+
+
+def active_window():
+    """Spoken report of the PC's current foreground window title."""
+    ok, data = _call("active_window")
+
+    if not ok:
+        return data
+
+    title = data.get("title")
+
+    if not title:
+        return "I can't tell what's focused on your PC right now."
+
+    return f"You're focused on {title} on your PC."
 
 
 def open_app(app_name):
@@ -101,16 +153,6 @@ def set_volume_level(level):
     if ups:
         _call("volume", {"action": "up", "repeat": ups})
     return True
-
-
-def open_spotify():
-    ok, data = _call("open_spotify")
-    return "Opening Spotify." if ok else data
-
-
-def open_claude():
-    ok, data = _call("open_claude")
-    return "Opening Claude." if ok else data
 
 
 def empty_recycle_bin():

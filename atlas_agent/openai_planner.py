@@ -38,6 +38,17 @@ _FILE_IN_NAME_PATTERN = re.compile(
     r"\bwith\s+([A-Za-z0-9_.-]+)\s+in\s+the\s+name\b",
     re.IGNORECASE,
 )
+_APP_ALIASES: dict[str, frozenset[str]] = {
+    "spotify": frozenset({"spotify"}),
+    "claude": frozenset({"claude"}),
+    "codex": frozenset({"codex"}),
+    "terminal": frozenset(
+        {"terminal", "powershell", "shell"}
+    ),
+    "fusion": frozenset({"fusion"}),
+    "browser": frozenset({"browser", "chrome"}),
+}
+
 _SERVICE_ALIASES: dict[str, set[str]] = {
     "atlas-wake.service": {"wake"},
     "atlas-robot.service": {"robot"},
@@ -938,6 +949,86 @@ class OpenAIPlanGenerator:
                     input_tokens=0,
                     output_tokens=0,
                 )
+
+        mentions_focus_action = bool(
+            words
+            & {
+                "open",
+                "launch",
+                "start",
+                "focus",
+                "switch",
+            }
+        )
+
+        if (
+            "pc.focus_or_open_app" in available_tools
+            and mentions_focus_action
+        ):
+            matched_apps = {
+                app
+                for app, aliases in _APP_ALIASES.items()
+                if aliases & words
+            }
+
+            if len(matched_apps) == 1:
+                matched_app = next(iter(matched_apps))
+
+                return PlanGenerationResult(
+                    proposal=PlanProposal(
+                        goal=goal,
+                        steps=(
+                            PlanStepProposal(
+                                tool=(
+                                    "pc.focus_or_open_app"
+                                ),
+                                description=(
+                                    "Focus the requested "
+                                    "app's window if it is "
+                                    "already open, or open "
+                                    "it."
+                                ),
+                                arguments={
+                                    "app": matched_app,
+                                },
+                            ),
+                        ),
+                    ),
+                    response_id=None,
+                    input_tokens=0,
+                    output_tokens=0,
+                )
+
+        mentions_active_window = bool(
+            words & {"focused", "active"}
+        ) and bool(
+            words
+            & {"window", "app", "pc", "screen"}
+        )
+
+        if (
+            "pc.active_window" in available_tools
+            and mentions_active_window
+            and not mentions_focus_action
+        ):
+            return PlanGenerationResult(
+                proposal=PlanProposal(
+                    goal=goal,
+                    steps=(
+                        PlanStepProposal(
+                            tool="pc.active_window",
+                            description=(
+                                "Report the currently "
+                                "focused window on the PC."
+                            ),
+                            arguments={},
+                        ),
+                    ),
+                ),
+                response_id=None,
+                input_tokens=0,
+                output_tokens=0,
+            )
 
         return None
 

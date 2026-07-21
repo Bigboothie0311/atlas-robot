@@ -919,6 +919,58 @@ class AgentVoiceController:
             if isinstance(app, str) and app:
                 return f"Done. I opened {app}."
 
+        if (
+            tool_name == "pc.focus_or_open_app"
+            and isinstance(output, dict)
+        ):
+            data = output.get("data")
+            app = (
+                data.get("app")
+                if isinstance(data, dict)
+                else None
+            )
+            action = (
+                data.get("action")
+                if isinstance(data, dict)
+                else None
+            )
+            spoken_app = (
+                app
+                if isinstance(app, str) and app
+                else "that app"
+            )
+
+            if action == "focused":
+                return (
+                    f"{spoken_app} was already open — "
+                    "I brought it to the front."
+                )
+
+            if action == "launched":
+                return f"Done. I opened {spoken_app}."
+
+        if (
+            tool_name == "pc.active_window"
+            and isinstance(output, dict)
+        ):
+            data = output.get("data")
+            title = (
+                data.get("title")
+                if isinstance(data, dict)
+                else None
+            )
+
+            if isinstance(title, str) and title:
+                return (
+                    f"You're focused on {title} on "
+                    "your PC."
+                )
+
+            return (
+                "I couldn't tell what's focused on "
+                "your PC right now."
+            )
+
         step_count = len(workflow.steps)
         noun = (
             "step"

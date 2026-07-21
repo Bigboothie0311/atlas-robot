@@ -1129,6 +1129,22 @@ OPEN_FUSION_PHRASES = {
 
 OPEN_SPOTIFY_PHRASES = {"open spotify", "launch spotify", "open spot of i", "open spotifi"}
 OPEN_CLAUDE_PHRASES = {"open claude", "launch claude", "open cloud"}
+OPEN_CODEX_PHRASES = {"open codex", "launch codex", "start codex"}
+OPEN_TERMINAL_PHRASES = {
+    "open terminal", "open the terminal", "launch terminal",
+    "open windows terminal", "open powershell", "launch powershell",
+    "open a terminal on my pc", "open my terminal",
+}
+OPEN_BROWSER_PHRASES = {
+    "open my browser", "open the browser", "launch my browser",
+    "open chrome", "launch chrome",
+}
+ACTIVE_WINDOW_PHRASES = {
+    "what's focused on my pc", "whats focused on my pc",
+    "what am i focused on", "what window is focused",
+    "what app is focused on my pc", "what's active on my pc",
+    "whats active on my pc",
+}
 EMPTY_RECYCLE_BIN_PHRASES = {
     "empty the recycle bin", "empty recycle bin", "empty my recycle bin", "clear the recycle bin",
 }
@@ -1225,6 +1241,14 @@ def _pc_dispatch(normalized):
         return pc_control.open_spotify()
     if _is_open_claude_phrase(normalized):
         return pc_control.open_claude()
+    if normalized in OPEN_CODEX_PHRASES:
+        return pc_control.open_codex()
+    if normalized in OPEN_TERMINAL_PHRASES:
+        return pc_control.open_terminal()
+    if normalized in OPEN_BROWSER_PHRASES:
+        return pc_control.open_browser()
+    if normalized in ACTIVE_WINDOW_PHRASES:
+        return pc_control.active_window()
     if normalized in PC_APPS_PHRASES:
         return pc_control.active_apps()
     if normalized in PC_SCREENSHOT_PHRASES:

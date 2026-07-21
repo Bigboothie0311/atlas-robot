@@ -1491,3 +1491,196 @@ def test_hud_status_question_not_hijacked_by_recovery():
     assert result.proposal.steps[0].tool == (
         "pi.get_service_status"
     )
+
+
+FOCUS_OR_OPEN_APP_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "app": {
+            "type": "string",
+            "enum": [
+                "spotify", "claude", "codex",
+                "terminal", "fusion", "browser",
+            ],
+        },
+    },
+    "required": ["app"],
+    "additionalProperties": False,
+}
+
+
+ACTIVE_WINDOW_SCHEMA = {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": False,
+}
+
+
+def test_routes_pc_focus_or_open_app_spotify():
+    client = FakeClient([])
+    generator = OpenAIPlanGenerator(
+        client=client,
+        model="gpt-test",
+    )
+
+    result = generator.generate(
+        "Open Spotify",
+        [
+            make_tool(
+                "pc.focus_or_open_app",
+                parameters=FOCUS_OR_OPEN_APP_SCHEMA,
+            ),
+        ],
+    )
+
+    assert client.responses.calls == []
+    assert result.proposal.steps[0].tool == (
+        "pc.focus_or_open_app"
+    )
+    assert result.proposal.steps[0].arguments == {
+        "app": "spotify",
+    }
+
+
+def test_routes_pc_focus_or_open_app_terminal_via_powershell():
+    client = FakeClient([])
+    generator = OpenAIPlanGenerator(
+        client=client,
+        model="gpt-test",
+    )
+
+    result = generator.generate(
+        "Launch PowerShell on my PC",
+        [
+            make_tool(
+                "pc.focus_or_open_app",
+                parameters=FOCUS_OR_OPEN_APP_SCHEMA,
+            ),
+        ],
+    )
+
+    assert client.responses.calls == []
+    assert result.proposal.steps[0].arguments == {
+        "app": "terminal",
+    }
+
+
+def test_routes_pc_focus_or_open_app_browser_via_chrome():
+    client = FakeClient([])
+    generator = OpenAIPlanGenerator(
+        client=client,
+        model="gpt-test",
+    )
+
+    result = generator.generate(
+        "Switch to Chrome",
+        [
+            make_tool(
+                "pc.focus_or_open_app",
+                parameters=FOCUS_OR_OPEN_APP_SCHEMA,
+            ),
+        ],
+    )
+
+    assert client.responses.calls == []
+    assert result.proposal.steps[0].arguments == {
+        "app": "browser",
+    }
+
+
+def test_focus_or_open_app_not_hijacked_for_ambiguous_multiple_apps():
+    client = FakeClient(
+        [
+            make_plan_call(
+                [
+                    {
+                        "tool": "pc.active_window",
+                        "description": "Ambiguous fallback.",
+                        "arguments": {},
+                    }
+                ]
+            )
+        ]
+    )
+    generator = OpenAIPlanGenerator(
+        client=client,
+        model="gpt-test",
+    )
+
+    result = generator.generate(
+        "Open Spotify and Claude",
+        [
+            make_tool(
+                "pc.focus_or_open_app",
+                parameters=FOCUS_OR_OPEN_APP_SCHEMA,
+            ),
+            make_tool(
+                "pc.active_window",
+                parameters=ACTIVE_WINDOW_SCHEMA,
+            ),
+        ],
+    )
+
+    assert len(client.responses.calls) == 1
+
+
+def test_routes_pc_active_window():
+    client = FakeClient([])
+    generator = OpenAIPlanGenerator(
+        client=client,
+        model="gpt-test",
+    )
+
+    result = generator.generate(
+        "What's focused on my PC?",
+        [
+            make_tool(
+                "pc.active_window",
+                parameters=ACTIVE_WINDOW_SCHEMA,
+            ),
+        ],
+    )
+
+    assert client.responses.calls == []
+    assert result.proposal.steps[0].tool == (
+        "pc.active_window"
+    )
+    assert result.proposal.steps[0].arguments == {}
+
+
+def test_active_window_not_hijacked_by_open_app_phrase():
+    client = FakeClient(
+        [
+            make_plan_call(
+                [
+                    {
+                        "tool": "pc.focus_or_open_app",
+                        "description": "Open the app.",
+                        "arguments": {"app": "claude"},
+                    }
+                ]
+            )
+        ]
+    )
+    generator = OpenAIPlanGenerator(
+        client=client,
+        model="gpt-test",
+    )
+
+    result = generator.generate(
+        "Open the focused app on my PC",
+        [
+            make_tool(
+                "pc.focus_or_open_app",
+                parameters=FOCUS_OR_OPEN_APP_SCHEMA,
+            ),
+            make_tool(
+                "pc.active_window",
+                parameters=ACTIVE_WINDOW_SCHEMA,
+            ),
+        ],
+    )
+
+    assert result.proposal.steps[0].tool == (
+        "pc.focus_or_open_app"
+    )

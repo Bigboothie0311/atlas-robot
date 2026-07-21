@@ -146,14 +146,16 @@ def test_real_pc_tools_are_registered() -> None:
         tools,
     ) = build_tools()
 
-    assert len(tools) == 5
+    assert len(tools) == 7
     assert [
         tool.name
         for tool in registry.list_tools()
     ] == [
         "pc.active_apps",
+        "pc.active_window",
         "pc.download_file",
         "pc.ensure_online",
+        "pc.focus_or_open_app",
         "pc.open_app",
         "pc.search_files",
     ]
@@ -373,6 +375,191 @@ def test_unverified_transfer_is_not_accepted() -> None:
         verification.status
         is VerificationStatus.FAILED
     )
+
+
+def test_focus_or_open_app_launched_executes_and_verifies() -> None:
+    (
+        registry,
+        verifier,
+        pc_client,
+        _file_search,
+        _sftp_client,
+        _tools,
+    ) = build_tools()
+    pc_client.action_result = PCActionResult(
+        action="focus_or_open_app",
+        ok=True,
+        data={
+            "ok": True,
+            "app": "spotify",
+            "action": "launched",
+        },
+        error=None,
+        started_at="start",
+        finished_at="finish",
+        duration_ms=1,
+    )
+    call = ToolCall(
+        tool_name="pc.focus_or_open_app",
+        arguments={"app": "spotify"},
+    )
+
+    result = execute(registry, call)
+    verification = verifier.verify(call, result)
+
+    assert result.status is ResultStatus.SUCCESS
+    assert pc_client.action_arguments == (
+        "focus_or_open_app",
+        {"app": "spotify"},
+    )
+    assert result.output["data"]["action"] == "launched"
+    assert verification.status is VerificationStatus.VERIFIED
+
+
+def test_focus_or_open_app_focused_verifies() -> None:
+    (
+        registry,
+        verifier,
+        pc_client,
+        _file_search,
+        _sftp_client,
+        _tools,
+    ) = build_tools()
+    pc_client.action_result = PCActionResult(
+        action="focus_or_open_app",
+        ok=True,
+        data={
+            "ok": True,
+            "app": "claude",
+            "action": "focused",
+        },
+        error=None,
+        started_at="start",
+        finished_at="finish",
+        duration_ms=1,
+    )
+    call = ToolCall(
+        tool_name="pc.focus_or_open_app",
+        arguments={"app": "claude"},
+    )
+
+    result = execute(registry, call)
+    verification = verifier.verify(call, result)
+
+    assert result.status is ResultStatus.SUCCESS
+    assert verification.status is VerificationStatus.VERIFIED
+
+
+def test_focus_or_open_app_companion_error_fails_verification() -> None:
+    (
+        registry,
+        verifier,
+        pc_client,
+        _file_search,
+        _sftp_client,
+        _tools,
+    ) = build_tools()
+    pc_client.action_result = PCActionResult(
+        action="focus_or_open_app",
+        ok=True,
+        data={
+            "ok": False,
+            "error": "app 'chrome_dev' not in approved_apps",
+        },
+        error=None,
+        started_at="start",
+        finished_at="finish",
+        duration_ms=1,
+    )
+    call = ToolCall(
+        tool_name="pc.focus_or_open_app",
+        arguments={"app": "chrome_dev"},
+    )
+
+    result = execute(registry, call)
+    verification = verifier.verify(call, result)
+
+    assert result.status is ResultStatus.SUCCESS
+    assert verification.verified is False
+
+
+def test_focus_or_open_app_rejects_empty_app() -> None:
+    (
+        registry,
+        _verifier,
+        _pc_client,
+        _file_search,
+        _sftp_client,
+        _tools,
+    ) = build_tools()
+    call = ToolCall(
+        tool_name="pc.focus_or_open_app",
+        arguments={"app": "  "},
+    )
+
+    result = execute(registry, call)
+
+    assert result.status is ResultStatus.ERROR
+
+
+def test_active_window_executes_and_verifies() -> None:
+    (
+        registry,
+        verifier,
+        pc_client,
+        _file_search,
+        _sftp_client,
+        _tools,
+    ) = build_tools()
+    pc_client.action_result = PCActionResult(
+        action="active_window",
+        ok=True,
+        data={
+            "ok": True,
+            "title": "Fusion 360 - ATLAS.f3d",
+        },
+        error=None,
+        started_at="start",
+        finished_at="finish",
+        duration_ms=1,
+    )
+    call = ToolCall(tool_name="pc.active_window")
+
+    result = execute(registry, call)
+    verification = verifier.verify(call, result)
+
+    assert result.status is ResultStatus.SUCCESS
+    assert (
+        result.output["data"]["title"]
+        == "Fusion 360 - ATLAS.f3d"
+    )
+    assert verification.status is VerificationStatus.VERIFIED
+
+
+def test_active_window_null_title_still_verifies() -> None:
+    (
+        registry,
+        verifier,
+        pc_client,
+        _file_search,
+        _sftp_client,
+        _tools,
+    ) = build_tools()
+    pc_client.action_result = PCActionResult(
+        action="active_window",
+        ok=True,
+        data={"ok": True, "title": None},
+        error=None,
+        started_at="start",
+        finished_at="finish",
+        duration_ms=1,
+    )
+    call = ToolCall(tool_name="pc.active_window")
+
+    result = execute(registry, call)
+    verification = verifier.verify(call, result)
+
+    assert verification.status is VerificationStatus.VERIFIED
 
 
 def test_invalid_tool_arguments_become_error_result() -> None:

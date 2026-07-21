@@ -32,6 +32,34 @@ DEFAULT_CONFIG = {
     "approved_folders": {
         "downloads": r"C:\Users\YOU\Downloads"
     },
+    # name -> {path to launch, window-title substring to match when
+    # checking whether it's already open}. Edit paths for your PC.
+    "approved_apps": {
+        "spotify": {
+            "path": r"C:\Users\YOU\AppData\Roaming\Spotify\Spotify.exe",
+            "match": "Spotify",
+        },
+        "claude": {
+            "path": r"C:\Users\YOU\AppData\Local\AnthropicClaude\claude.exe",
+            "match": "Claude",
+        },
+        "codex": {
+            "path": r"C:\Users\YOU\AppData\Local\Programs\codex\Codex.exe",
+            "match": "Codex",
+        },
+        "terminal": {
+            "path": "wt.exe",
+            "match": "Windows Terminal",
+        },
+        "fusion": {
+            "path": r"C:\Users\YOU\AppData\Local\Autodesk\webdeploy\production\Fusion360.exe",
+            "match": "Fusion 360",
+        },
+        "browser": {
+            "path": r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            "match": "Chrome",
+        },
+    },
     # name -> full command list. ONLY these predefined scripts can run.
     "maintenance_scripts": {
         "clear_temp": ["cmd", "/c", "del", "/q", "/s", r"%TEMP%\*"],
@@ -42,11 +70,18 @@ DEFAULT_CONFIG = {
 
 def load_config():
     if not CONFIG_PATH.exists():
-        CONFIG_PATH.write_text(json.dumps(DEFAULT_CONFIG, indent=2))
-        print(f"Wrote default config to {CONFIG_PATH} — edit it and restart.")
-        return DEFAULT_CONFIG
+        return dict(DEFAULT_CONFIG)
 
     return {**DEFAULT_CONFIG, **json.loads(CONFIG_PATH.read_text())}
+
+
+def ensure_config_file():
+    """Writes the default config file on first run if missing. Kept out
+    of module import (unlike the old load_config()) so the module can
+    be imported for testing without touching disk."""
+    if not CONFIG_PATH.exists():
+        CONFIG_PATH.write_text(json.dumps(DEFAULT_CONFIG, indent=2))
+        print(f"Wrote default config to {CONFIG_PATH} — edit it and restart.")
 
 
 CONFIG = load_config()
@@ -213,13 +248,92 @@ def act_open_app(body):
     by ATLAS app profiles. Never launches an arbitrary path."""
     name = str(body.get("app", "")).strip()
     approved = CONFIG.get("approved_apps", {})
-    path = approved.get(name)
+    entry = approved.get(name)
+    path = entry.get("path") if isinstance(entry, dict) else entry
 
     if not path:
         return {"ok": False, "error": f"app '{name}' not in approved_apps"}
 
     subprocess.Popen([path])
     return {"ok": True, "opened": name}
+
+
+def _open_window_titles():
+    script = (
+        "Get-Process | Where-Object {$_.MainWindowTitle} | "
+        "Select-Object -ExpandProperty MainWindowTitle"
+    )
+    result = subprocess.run(["powershell", "-NoProfile", "-Command", script],
+                            capture_output=True, text=True, timeout=15)
+    return [t.strip() for t in result.stdout.splitlines() if t.strip()]
+
+
+def _focus_window(match_substring):
+    """Brings the first window whose title contains match_substring to
+    the foreground. Title-based (WScript.Shell.AppActivate) — no
+    coordinates, no clicks, nothing arbitrary."""
+    escaped = match_substring.replace("'", "''")
+    script = (
+        "$w = New-Object -ComObject WScript.Shell; "
+        f"$w.AppActivate('{escaped}')"
+    )
+    subprocess.run(["powershell", "-NoProfile", "-Command", script], timeout=10)
+
+
+def act_focus_or_open_app(body):
+    """Focuses an already-open approved app's window (matched by window
+    title substring) instead of launching a duplicate instance; opens
+    it only if no matching window is found. Never touches an
+    unapproved path."""
+    name = str(body.get("app", "")).strip()
+    approved = CONFIG.get("approved_apps", {})
+    entry = approved.get(name)
+
+    if not isinstance(entry, dict):
+        return {"ok": False, "error": f"app '{name}' not in approved_apps"}
+
+    match = str(entry.get("match") or name)
+    titles = _open_window_titles()
+    already_open = any(match.lower() in title.lower() for title in titles)
+
+    if already_open:
+        _focus_window(match)
+        return {"ok": True, "app": name, "action": "focused"}
+
+    path = entry.get("path")
+
+    if not path:
+        return {"ok": False, "error": f"app '{name}' has no configured path"}
+
+    subprocess.Popen([path])
+    return {"ok": True, "app": name, "action": "launched"}
+
+
+def act_active_window(_body):
+    """Returns the current foreground window's title via the Win32 API
+    — the single focused window, distinct from act_active_apps' full
+    list of open windows."""
+    script = (
+        "Add-Type @'\n"
+        "using System;\n"
+        "using System.Runtime.InteropServices;\n"
+        "using System.Text;\n"
+        "public class AtlasForeground {\n"
+        "  [DllImport(\"user32.dll\")]\n"
+        "  public static extern IntPtr GetForegroundWindow();\n"
+        "  [DllImport(\"user32.dll\")]\n"
+        "  public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);\n"
+        "}\n"
+        "'@ -ErrorAction SilentlyContinue; "
+        "$h = [AtlasForeground]::GetForegroundWindow(); "
+        "$sb = New-Object System.Text.StringBuilder 256; "
+        "[AtlasForeground]::GetWindowText($h, $sb, 256) | Out-Null; "
+        "Write-Output $sb.ToString()"
+    )
+    result = subprocess.run(["powershell", "-NoProfile", "-Command", script],
+                            capture_output=True, text=True, timeout=15)
+    title = result.stdout.strip()
+    return {"ok": True, "title": title or None}
 
 
 def act_system_info(_body):
@@ -264,6 +378,8 @@ ACTIONS = {
     "slicer_status": act_slicer_status,
     "system_info": act_system_info,
     "open_app": act_open_app,
+    "focus_or_open_app": act_focus_or_open_app,
+    "active_window": act_active_window,
 }
 
 
@@ -310,6 +426,10 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    ensure_config_file()
+    global CONFIG
+    CONFIG = load_config()
+
     if CONFIG["token"] == "CHANGE_ME":
         print("Refusing to start with the default token — set one in companion_config.json.")
         return

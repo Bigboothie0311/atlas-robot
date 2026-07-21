@@ -13,6 +13,8 @@ EXPECTED_PC_TOOLS = {
     "pc.download_file",
     "pc.active_apps",
     "pc.open_app",
+    "pc.focus_or_open_app",
+    "pc.active_window",
     "pi.list_directory",
     "pi.read_text_file",
     "pi.search_files",

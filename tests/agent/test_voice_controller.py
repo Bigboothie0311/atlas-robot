@@ -1291,3 +1291,126 @@ def test_failure_explanation_mentions_retry_suggestion():
 
     assert "hud" in response.text.lower()
     assert "recover" in response.text.lower()
+
+
+def test_spoken_summary_for_focus_or_open_app_launched():
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.COMPLETED,
+        confirmation_call_id=None,
+        error=None,
+        steps=(
+            make_step(
+                tool_name="pc.focus_or_open_app",
+                arguments={"app": "spotify"},
+                output={
+                    "ok": True,
+                    "data": {
+                        "ok": True,
+                        "app": "spotify",
+                        "action": "launched",
+                    },
+                    "error": None,
+                },
+            ),
+        ),
+    )
+    controller = AgentVoiceController(
+        FakeBundle(FakeRuntime(result=make_result(workflow)))
+    )
+
+    response = controller.handle_goal("Open Spotify")
+
+    assert response.text == "Done. I opened spotify."
+
+
+def test_spoken_summary_for_focus_or_open_app_focused():
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.COMPLETED,
+        confirmation_call_id=None,
+        error=None,
+        steps=(
+            make_step(
+                tool_name="pc.focus_or_open_app",
+                arguments={"app": "claude"},
+                output={
+                    "ok": True,
+                    "data": {
+                        "ok": True,
+                        "app": "claude",
+                        "action": "focused",
+                    },
+                    "error": None,
+                },
+            ),
+        ),
+    )
+    controller = AgentVoiceController(
+        FakeBundle(FakeRuntime(result=make_result(workflow)))
+    )
+
+    response = controller.handle_goal("Open Claude")
+
+    assert response.text == (
+        "claude was already open — I brought it to the front."
+    )
+
+
+def test_spoken_summary_for_active_window_with_title():
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.COMPLETED,
+        confirmation_call_id=None,
+        error=None,
+        steps=(
+            make_step(
+                tool_name="pc.active_window",
+                output={
+                    "ok": True,
+                    "data": {
+                        "ok": True,
+                        "title": "Fusion 360 - ATLAS.f3d",
+                    },
+                    "error": None,
+                },
+            ),
+        ),
+    )
+    controller = AgentVoiceController(
+        FakeBundle(FakeRuntime(result=make_result(workflow)))
+    )
+
+    response = controller.handle_goal(
+        "What's focused on my PC?"
+    )
+
+    assert response.text == (
+        "You're focused on Fusion 360 - ATLAS.f3d on your PC."
+    )
+
+
+def test_spoken_summary_for_active_window_with_no_title():
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.COMPLETED,
+        confirmation_call_id=None,
+        error=None,
+        steps=(
+            make_step(
+                tool_name="pc.active_window",
+                output={
+                    "ok": True,
+                    "data": {"ok": True, "title": None},
+                    "error": None,
+                },
+            ),
+        ),
+    )
+    controller = AgentVoiceController(
+        FakeBundle(FakeRuntime(result=make_result(workflow)))
+    )
+
+    response = controller.handle_goal(
+        "What's focused on my PC?"
+    )
+
+    assert response.text == (
+        "I couldn't tell what's focused on your PC right now."
+    )
