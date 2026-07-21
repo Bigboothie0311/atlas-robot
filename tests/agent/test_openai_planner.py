@@ -426,3 +426,76 @@ def test_rejects_schema_that_is_not_strict():
         )
 
     assert client.responses.calls == []
+
+def test_routes_atlas_project_listing_to_pi_without_api_call():
+    client = FakeClient(
+        [
+            make_plan_call(
+                [
+                    {
+                        "tool": "pc.search_files",
+                        "description": (
+                            "Incorrectly search Windows."
+                        ),
+                        "arguments": {
+                            "query": "atlas",
+                            "extensions": None,
+                            "limit": 20,
+                        },
+                    }
+                ]
+            )
+        ]
+    )
+    generator = OpenAIPlanGenerator(
+        client=client,
+        model="gpt-test",
+    )
+    list_schema = {
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+            },
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 200,
+            },
+        },
+        "required": [
+            "path",
+            "limit",
+        ],
+        "additionalProperties": False,
+    }
+
+    result = generator.generate(
+        (
+            "List all the files in the Atlas Robot "
+            "project folder."
+        ),
+        [
+            make_tool(
+                "pc.search_files",
+                parameters=SEARCH_SCHEMA,
+            ),
+            make_tool(
+                "pi.list_directory",
+                parameters=list_schema,
+            ),
+        ],
+    )
+
+    assert client.responses.calls == []
+    assert result.response_id is None
+    assert result.input_tokens == 0
+    assert result.output_tokens == 0
+    assert len(result.proposal.steps) == 1
+    assert result.proposal.steps[0].tool == (
+        "pi.list_directory"
+    )
+    assert result.proposal.steps[0].arguments == {
+        "path": "/home/atlas/atlas-robot",
+        "limit": 200,
+    }

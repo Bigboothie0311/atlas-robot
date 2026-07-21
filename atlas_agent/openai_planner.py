@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterable
 from copy import deepcopy
 from dataclasses import dataclass
@@ -126,6 +127,14 @@ class OpenAIPlanGenerator:
             for tool in tools
         ]
 
+        deterministic = self._deterministic_local_plan(
+            normalized_goal,
+            set(tool_names),
+        )
+
+        if deterministic is not None:
+            return deterministic
+
         response = self.client.responses.create(
             model=self.model,
             reasoning={"effort": "none"},
@@ -201,6 +210,89 @@ class OpenAIPlanGenerator:
             ),
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+        )
+
+    @staticmethod
+    def _deterministic_local_plan(
+        goal: str,
+        available_tools: set[str],
+    ) -> PlanGenerationResult | None:
+        """Route unmistakable local project listings without an API call."""
+
+        if "pi.list_directory" not in available_tools:
+            return None
+
+        normalized = " ".join(goal.casefold().split())
+        words = set(
+            re.findall(
+                r"[a-z0-9]+",
+                normalized,
+            )
+        )
+
+        names_project_folder = (
+            "/home/atlas/atlas-robot" in normalized
+            or (
+                "atlas" in words
+                and "project" in words
+                and bool(
+                    words
+                    & {
+                        "folder",
+                        "directory",
+                    }
+                )
+            )
+        )
+        requests_listing = (
+            bool(
+                words
+                & {
+                    "list",
+                    "show",
+                    "contents",
+                }
+            )
+            or (
+                "files" in words
+                and bool(
+                    words
+                    & {
+                        "folder",
+                        "directory",
+                    }
+                )
+            )
+        )
+
+        if not (
+            names_project_folder
+            and requests_listing
+        ):
+            return None
+
+        return PlanGenerationResult(
+            proposal=PlanProposal(
+                goal=goal,
+                steps=(
+                    PlanStepProposal(
+                        tool="pi.list_directory",
+                        description=(
+                            "List the immediate contents of "
+                            "the local A.T.L.A.S. project folder."
+                        ),
+                        arguments={
+                            "path": (
+                                "/home/atlas/atlas-robot"
+                            ),
+                            "limit": 200,
+                        },
+                    ),
+                ),
+            ),
+            response_id=None,
+            input_tokens=0,
+            output_tokens=0,
         )
 
     def _find_plan_call(
