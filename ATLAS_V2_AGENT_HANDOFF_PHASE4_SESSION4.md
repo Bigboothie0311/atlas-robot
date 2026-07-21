@@ -5,9 +5,20 @@
 > `ATLAS_V2_AGENT_HANDOFF_*.md` by date first (`ls -lat *.md`) before
 > trusting this one.
 >
-> - **Branch / HEAD:** `atlas-v2-agent` — HEAD is `e09cac4` ("fix:
->   implement missing shutdown_pc/cancel/recycle-bin companion actions").
->   `git log -1` to confirm it's still there.
+> - **Branch / HEAD:** `atlas-v2-agent` — HEAD is `9030897` ("fix: retry
+>   then fall back to muted capture on busy mic in capture_clip()").
+>   `git log -1` to confirm it's still there. **662 tests passing.**
+> - **⏸️ LEFT OFF HERE (2026-07-21, iteration 3):** the mic-contention
+>   blocker below is now code-fixed and unit-tested but **not yet
+>   live-voice-verified** — say "Hey Atlas, record a 10 second clip of
+>   yourself" for real and confirm it either records with audio or falls
+>   back to a muted clip, not a hard failure. After that passes, the
+>   remaining Phase-4-closing work is untouched this session: (1) the HUD
+>   recording-state indicator (`/screen`-flag pattern, `hud/app.js` /
+>   `robot_hub.py` — not started), (2) Phase 11 edit pipeline (not
+>   started). See "What's left to fully close Phase 4" below for the
+>   full punch list, unchanged except item 1 is now done pending live
+>   verification.
 > - **Phase / milestone:** Phase 4, milestone 1 (spoken-command tests,
 >   see below) plus an out-of-band Phase 3 fix Wesley reported directly:
 >   he asked Atlas to turn off his PC and it didn't work.
@@ -132,27 +143,33 @@ for the full history this session builds on.
 
 ## What's left to fully close Phase 4
 
-1. **Fix the mic-contention bug.** `watch_for_barge_in()` needs to
-   release/pause its `arecord` hold on `plughw:CARD=Device,DEV=0` for the
-   duration of any tool call that itself needs the mic (right now, only
-   `camera_gate.capture_clip()`'s audio branch). Options worth weighing
-   next session:
+1. ~~**Fix the mic-contention bug.**~~ **Done 2026-07-21 (iteration 3),
+   pending live verification.** Took the retry-and-fallback approach
+   (the second bullet below) rather than plumbing a stop/resume signal
+   into `watch_for_barge_in()` — lower blast radius, fully self-contained
+   in `camera_gate.py`, no changes to the streaming/tool-execution thread
+   coordination. `capture_clip()` now retries once on an ffmpeg
+   "resource busy" error, then falls back to a muted/video-only clip
+   (`"audio_fallback": True` in the returned metadata) instead of
+   failing outright. 4 new regression tests, 662 passing. Committed as
+   `9030897`. **Still needs a real live-voice test** — a mocked busy
+   error isn't the same as the real device contention that caused the
+   original bug, and the unit tests can't catch a hang or a subtler
+   real-hardware failure mode the mock doesn't reproduce. Say "Hey
+   Atlas, record a 10 second clip of yourself" during a live answer and
+   confirm one of: a full clip with audio, or a muted clip with
+   `audio_fallback` — either is a pass, a hard failure or hang is not.
+   (Original two options considered, for context:
    - Have the agent runtime signal back to the turn handler before
      running an audio-capturing tool, so `barge_stop_event` can be set
      (killing the barge-in `arecord`) and restarted after — requires a
      way for a tool executing deep inside `run_atlas_agent` to reach the
      barge-in thread's stop event, which doesn't currently exist as a
-     plumbed-through hook.
-   - Or have `camera_gate.capture_clip()` retry with backoff and fall
-     back to muted/video-only capture (it already supports
-     `mute_audio=True`) if the device is busy after N attempts, so a
-     recording still succeeds even without audio narration.
-   - Whichever approach: reproduce live again afterward — say "Hey
-     Atlas, record a 10 second clip of yourself" for real, don't just
-     trust a unit test, since this bug is inherently about real-device
-     contention that a mock won't catch.
-2. Once self-recording-by-voice genuinely works end to end, flip
-   `phase4_screen_capture` to `live_verified` in the ledger.
+     plumbed-through hook. Not taken this session.
+   - **Taken:** have `camera_gate.capture_clip()` retry with backoff and
+     fall back to muted/video-only capture if the device is busy.)
+2. Once self-recording-by-voice is live-verified end to end (see item 1),
+   flip `phase4_screen_capture` to `live_verified` in the ledger.
 3. Add the HUD recording-state indicator (Phase 4's own spec still wants
    one — same `/screen`-flag pattern already used for dark-mode;
    `hud/app.js` / `robot_hub.py` untouched so far).
