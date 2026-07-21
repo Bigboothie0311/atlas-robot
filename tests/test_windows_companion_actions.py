@@ -406,6 +406,73 @@ def test_new_capture_actions_are_whitelisted(companion):
         assert action in companion.ACTIONS
 
 
+def test_pc_power_and_recycle_bin_actions_are_whitelisted(companion):
+    for action in ("shutdown_pc", "cancel_pc_shutdown", "empty_recycle_bin", "youtube_search"):
+        assert action in companion.ACTIONS
+
+
+def test_shutdown_pc_schedules_delayed_shutdown(companion, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        companion.subprocess, "run",
+        lambda args, **kwargs: calls.append(args) or SimpleNamespace(returncode=0, stderr=""),
+    )
+
+    result = companion.act_shutdown_pc({})
+
+    assert result == {"ok": True}
+    assert calls == [["shutdown", "/s", "/t", "60"]]
+
+
+def test_shutdown_pc_reports_failure(companion, monkeypatch):
+    monkeypatch.setattr(
+        companion.subprocess, "run",
+        lambda args, **kwargs: SimpleNamespace(returncode=1, stderr="access denied"),
+    )
+
+    result = companion.act_shutdown_pc({})
+
+    assert result == {"ok": False, "error": "access denied"}
+
+
+def test_cancel_pc_shutdown_runs_shutdown_abort(companion, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        companion.subprocess, "run",
+        lambda args, **kwargs: calls.append(args) or SimpleNamespace(returncode=0, stderr=""),
+    )
+
+    result = companion.act_cancel_pc_shutdown({})
+
+    assert result == {"ok": True}
+    assert calls == [["shutdown", "/a"]]
+
+
+def test_cancel_pc_shutdown_reports_no_pending_shutdown(companion, monkeypatch):
+    monkeypatch.setattr(
+        companion.subprocess, "run",
+        lambda args, **kwargs: SimpleNamespace(returncode=1, stderr=""),
+    )
+
+    result = companion.act_cancel_pc_shutdown({})
+
+    assert result == {"ok": False, "error": "no shutdown was pending"}
+
+
+def test_empty_recycle_bin_runs_powershell_clear(companion, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        companion.subprocess, "run",
+        lambda args, **kwargs: calls.append(args) or SimpleNamespace(returncode=0, stderr=""),
+    )
+
+    result = companion.act_empty_recycle_bin({})
+
+    assert result == {"ok": True}
+    assert calls[0][0] == "powershell"
+    assert "Clear-RecycleBin" in calls[0][-1]
+
+
 def test_open_app_still_accepts_legacy_string_paths(companion, monkeypatch):
     """approved_apps entries used to be bare path strings; open_app must
     keep working for anyone who hasn't migrated to the dict form."""

@@ -593,6 +593,41 @@ def act_youtube_search(body):
     return {"ok": True, "query": query}
 
 
+def act_shutdown_pc(_body):
+    """Schedules a shutdown 60 seconds out (matches the Pi's spoken
+    'shut down in one minute, say cancel to abort') instead of shutting
+    down immediately, so a misheard/duplicate command is always
+    recoverable via act_cancel_pc_shutdown."""
+    result = subprocess.run(
+        ["shutdown", "/s", "/t", "60"], capture_output=True, text=True, timeout=15
+    )
+
+    if result.returncode != 0:
+        return {"ok": False, "error": result.stderr.strip() or "shutdown command failed"}
+
+    return {"ok": True}
+
+
+def act_cancel_pc_shutdown(_body):
+    result = subprocess.run(
+        ["shutdown", "/a"], capture_output=True, text=True, timeout=15
+    )
+
+    if result.returncode != 0:
+        return {"ok": False, "error": result.stderr.strip() or "no shutdown was pending"}
+
+    return {"ok": True}
+
+
+def act_empty_recycle_bin(_body):
+    script = "Clear-RecycleBin -Force -ErrorAction SilentlyContinue"
+    subprocess.run(
+        ["powershell", "-NoProfile", "-Command", script],
+        capture_output=True, text=True, timeout=20,
+    )
+    return {"ok": True}
+
+
 def act_open_app(body):
     """Opens an app from the approved_apps whitelist in the config — used
     by ATLAS app profiles. Never launches an arbitrary path."""
@@ -725,6 +760,7 @@ ACTIONS = {
     "screenshot": act_screenshot,
     "active_apps": act_active_apps,
     "run_script": act_run_script,
+    "youtube_search": act_youtube_search,
     "slicer_status": act_slicer_status,
     "system_info": act_system_info,
     "open_app": act_open_app,
@@ -735,6 +771,9 @@ ACTIONS = {
     "start_recording": act_start_recording,
     "stop_recording": act_stop_recording,
     "list_recordings": act_list_recordings,
+    "shutdown_pc": act_shutdown_pc,
+    "cancel_pc_shutdown": act_cancel_pc_shutdown,
+    "empty_recycle_bin": act_empty_recycle_bin,
 }
 
 

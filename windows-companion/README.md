@@ -24,6 +24,10 @@ messages, or delete anything outside the predefined maintenance scripts.
 | `start_recording` | Start an ffmpeg screen recording (full desktop or one window), bounded by `max_recording_seconds` |
 | `stop_recording` | Stop the in-progress recording and verify the file landed on disk |
 | `list_recordings` | List every capture/recording's metadata, newest first |
+| `youtube_search` | Open a YouTube search (long-form only) full-screen in the browser |
+| `shutdown_pc` | Schedule a shutdown 60 seconds out (`shutdown /s /t 60`) |
+| `cancel_pc_shutdown` | Abort a pending scheduled shutdown (`shutdown /a`) |
+| `empty_recycle_bin` | Empty the Recycle Bin |
 
 `capture_screenshot`, `capture_window`, and `start_recording` all refuse a
 privacy-blocked window (see `privacy_blocked_window_substrings` in the
