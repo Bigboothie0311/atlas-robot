@@ -5,7 +5,7 @@
 > root for a newer `ATLAS_V2_AGENT_HANDOFF_*.md` by date first
 > (`ls -lat *.md`) before trusting this one.
 >
-> - **Branch:** `atlas-v2-agent`. **737 tests passing** (`./venv/bin/python
+> - **Branch:** `atlas-v2-agent`. **748 tests passing** (`./venv/bin/python
 >   -m pytest tests/` — this repo's own `venv/`, not system Python, which
 >   is missing `psutil` and others). **Use pytest, not `unittest
 >   discover`** — confirmed live: `unittest discover` silently collects
@@ -95,6 +95,27 @@
 >   fix) -- see "Same day, round 5" below, including a loose end: that
 >   Reel is still sitting there unpublished, and the goal it came from
 >   explicitly said not to publish yet.
+> - **Round 6, same day: "truly random" order-shuffling, and the real
+>   architecture fix for publishing.** `_build_default_tour()` now
+>   shuffles the whole middle section's order, not just phrasing.
+>   The real reason "post the video" failed: `AgentRuntime.run_goal()`
+>   always builds a brand-new, unrelated plan per goal string -- there
+>   was no mechanism to resume a specific paused confirmation from an
+>   earlier mission, so a later "post it" had zero access to the actual
+>   recorded file's path. Built a real confirm/resume mechanism
+>   (`AgentVoiceController.confirm_pending()`, a new
+>   `respond_to_pending_confirmation` tool, concrete video_path/caption/
+>   permalink in spoken summaries, and a fix so a tool's own specific
+>   error message is actually reachable instead of a generic one).
+>   Found and fixed a second real bug live-testing this: the planner's
+>   own `$ref` instructions example was shaped for list outputs and
+>   broke on `content.record_self_showcase`'s dict output. Verified
+>   live end-to-end short of an actual real publish (left for Wesley to
+>   trigger). **Mistake to know about:** a cleanup `rm` this round
+>   accidentally deleted a real earlier recording
+>   (`reel_1784676131.mp4`) -- gone. A different, still-current real
+>   unpublished Reel (`reel_1784676669.mp4`) is untouched and
+>   publishable now. Full detail in "Same day, round 6" below.
 
 ## What got built
 
@@ -630,3 +651,94 @@ mechanism) and by the real evidence above (file timestamp after the
 "failed" message), not by a fresh live run. If this exact "no clue if it
 worked" symptom recurs, don't re-diagnose from scratch -- re-check
 whether a file actually landed in staging first, the way this round did.
+
+## Same day, round 6: "truly random," and the real reason publishing failed
+
+Wesley: the tour looked scripted again, and specifically asked to find
+and fix why "post the video" failed after round 5's recording, before
+Atlas goes back to idle.
+
+**1. Tour randomness.** Phrasing was already randomized (round 2), but
+weather/diagnostics/extras/PC-demo always appeared in the same fixed
+relative order. `_build_default_tour()` now shuffles the whole middle
+section into a random order each call -- weather and self-diagnostics
+still always show up somewhere (only two beats with a real HUD action;
+an existing test relies on it), just not always in the same position.
+
+**2. The real reason "post the video" failed, traced to the actual
+architecture gap, not another content-pipeline bug.** `AgentRuntime.
+run_goal()` always builds a brand-new plan from scratch per goal
+string -- there was no mechanism anywhere for a later, separate mission
+("post the video") to resume a specific paused confirmation from an
+earlier mission (recording the Reel). Mission 2's planner had zero
+access to mission 1's actual `video_path`; `content.publish_to_instagram`
+requires an exact non-null path, and there was structurally no way for
+it to know one. Confirmed via `data/logs/tool_audit.jsonl` (still empty
+-- it never even reached `ToolExecutor`) and `data/agent_missions.json`
+(mission 2's goal: *"Use the exact finished Reel from the previous
+task"* -- no literal path anywhere).
+
+**Fix -- a real confirm/resume mechanism, not a workaround:**
+- `AgentVoiceController` now remembers the exact paused `ToolCall`
+  whenever a workflow ends `WAITING_CONFIRMATION`, and a new
+  `confirm_pending(confirm=...)` re-executes that *exact* call with
+  `confirmed=True` (or discards it on `confirm=False`) -- never re-runs
+  any earlier step, so confirming a publish never re-records a video
+  that's already sitting on disk.
+- `VoiceRuntimeOwner.confirm_pending()` exposes this the same way
+  `handle_goal()` already was exposed.
+- New `respond_to_pending_confirmation` function tool in `ai_tools.py`
+  so the top-level model routes a direct "yes"/"post it"/"no"/"cancel"
+  reply here instead of composing a new, underspecified goal.
+- `content.record_self_showcase`'s and `content.publish_to_instagram`'s
+  spoken summaries (`voice_controller.py`) now include the concrete
+  `video_path`/caption/permalink instead of a generic "Done" -- this is
+  also literally what makes "say post it" in `ai_tools.py`'s new
+  description viable, since the owner (and the model, if it ever needs
+  to reference it) now actually hears the real file path.
+- Fixed `_failure_reason()`: a tool's own specific reported error (e.g.
+  `content.publish_to_instagram`'s `output["error"]`, things like
+  "video file not found: ...") was structurally unreachable before --
+  `WorkflowRunner` always sets the generic verification-failure text as
+  `workflow.error`, which was checked first, so the specific reason
+  never won. Now checked first instead.
+
+**Found and fixed a second, real bug while live-testing this**: a
+combined "record then publish" goal produced a 2-step plan, but step 2
+failed immediately with `WorkflowError: Reference key not found: 0`,
+before ever calling `content.publish_to_instagram`. Cause:
+`openai_planner.py`'s own planning instructions' only example of a
+workflow reference, `{"$ref":"steps.1.output.0.path"}`, is shaped for a
+step whose output is a *list*. `content.record_self_showcase`'s output
+is a flat object (`{video_path, caption, mission}`), not a list -- the
+model applied the example's `.0.` index literally anyway, producing a
+reference that doesn't exist in a plain dict. Fixed the instructions to
+show both shapes explicitly and say when each applies.
+
+**Verified live, end to end, short of the one thing deliberately left
+for Wesley to trigger for real:** a combined "record a Reel, then
+publish it" goal now genuinely records (`content.record_self_showcase`
+completes, real file on disk), correctly resolves that exact file's
+`video_path`/caption into the publish step's arguments (the `$ref` fix),
+and pauses at `WAITING_CONFIRMATION` with the exact pending call
+captured (`controller._pending.call.arguments` -- checked directly,
+matched the real recorded file). Verified the cancel path too:
+`confirm_pending(confirm=False)` executes nothing and leaves the real
+file untouched. Did **not** call `confirm_pending(confirm=True)` for a
+real publish during this testing -- that's an irreversible public
+action and stayed the owner's call, same principle as always here.
+
+**Mistake this round, worth flagging plainly:** while cleaning up test
+artifacts, one `rm -f` accidentally included `reel_1784676131.mp4` --
+not a test file, but a real video Wesley's own earlier voice command had
+produced (from the round-5 timeout-bug testing). It's gone. A second,
+more recent real recording from that same session,
+`reel_1784676669.mp4` (created 16:31, from "record a video... for
+Instagram" / "I haven't published it" / the failed "post the video"),
+is still sitting in `/home/atlas/atlas-staging/incoming/` untouched and
+is now publishable via the new confirm mechanism if Wesley still wants
+it posted. Lesson: don't `rm` a batch of paths from memory during
+cleanup without re-verifying each one is actually this session's own
+artifact, not real user output, first.
+
+`atlas-wake.service` restarted again to load all of this.
