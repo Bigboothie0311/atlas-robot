@@ -70,6 +70,8 @@ REGISTRY = [
      "aliases": ["do I have any intruder alerts", "were there any unauthorized users"], "confirm": False, "requires": "none", "category": "security"},
     {"id": "camera_gate", "name": "camera gate", "description": "turns face verification on or off",
      "aliases": ["camera gate on", "camera gate off"], "confirm": False, "requires": "none", "category": "security"},
+    {"id": "self_record_clip", "name": "self-recording clip", "description": "records a short video clip of itself using its own camera and mic",
+     "aliases": ["record a clip of yourself", "record a video of yourself"], "confirm": False, "requires": "none", "category": "security"},
 
     # --- Diagnostics & self ----------------------------------------
     {"id": "diagnostics", "name": "diagnostics", "description": "runs a self-check of services, sensors, and budget",
@@ -130,6 +132,8 @@ REGISTRY = [
      "aliases": ["volume up", "mute", "play", "pause", "next track"], "confirm": False, "requires": "pc", "category": "pc"},
     {"id": "pc_screenshot", "name": "PC screenshot", "description": "captures the PC screen onto the HUD",
      "aliases": ["show me my PC screen", "show me the newest screenshot"], "confirm": False, "requires": "pc", "category": "pc"},
+    {"id": "pc_screen_recording", "name": "PC screen recording", "description": "records a short screen-capture clip on the PC",
+     "aliases": ["record my PC screen", "record a clip of my screen"], "confirm": False, "requires": "pc", "category": "pc"},
     {"id": "pc_apps", "name": "PC windows", "description": "lists what's open on the PC",
      "aliases": ["what's open on my PC"], "confirm": False, "requires": "pc", "category": "pc"},
     {"id": "pc_health", "name": "PC health", "description": "reports PC CPU, RAM, disk, and uptime",

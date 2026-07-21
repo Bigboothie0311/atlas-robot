@@ -796,6 +796,12 @@ def is_vision_command(text):
 
     normalized = " ".join(normalized.split())
 
+    # "screen" always means the PC monitor, never the room the Pi's own
+    # camera looks at — route those to _pc_dispatch's screenshot handling
+    # instead of hijacking them into a Pi selfie via run_vision_command().
+    if "screen" in normalized.split():
+        return False
+
     exact_commands = {
         "what do you see",
         "you see",
@@ -1170,6 +1176,9 @@ PC_SCREENSHOT_PHRASES = {
     "show me my pc screen", "show my pc screen", "what's on my pc screen",
     "whats on my pc screen", "screenshot my pc", "take a screenshot of my pc",
     "show me what's on my computer", "capture my pc screen",
+    "take a picture of my screen", "take a picture of the pc screen",
+    "take a photo of my screen", "take a photo of the pc screen",
+    "take a screenshot of my screen", "take a screenshot",
 }
 
 NEWEST_SCREENSHOT_PHRASES = {

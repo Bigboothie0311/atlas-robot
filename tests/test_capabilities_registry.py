@@ -1,0 +1,25 @@
+"""Regression: capabilities.REGISTRY must list every real device action so
+the model's system prompt (capabilities.instruction_summary()) never tells
+it to refuse something it can actually do via run_atlas_agent."""
+import capabilities
+
+
+def test_registry_has_no_duplicate_ids():
+    ids = [entry["id"] for entry in capabilities.REGISTRY]
+    assert len(ids) == len(set(ids))
+
+
+def test_self_recording_clip_is_listed():
+    ids = {entry["id"] for entry in capabilities.REGISTRY}
+    assert "self_record_clip" in ids
+
+
+def test_pc_screen_recording_is_listed():
+    ids = {entry["id"] for entry in capabilities.REGISTRY}
+    assert "pc_screen_recording" in ids
+
+
+def test_instruction_summary_mentions_recording():
+    summary = capabilities.instruction_summary()
+    assert "self-recording clip" in summary
+    assert "PC screen recording" in summary

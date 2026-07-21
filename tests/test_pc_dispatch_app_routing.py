@@ -80,3 +80,43 @@ def test_active_window_phrase_routes_to_pc_control(monkeypatch):
 
 def test_unrelated_phrase_is_not_a_pc_command():
     assert listen_and_answer._pc_dispatch("what time is it") is None
+
+
+def test_take_a_picture_of_my_screen_routes_to_pc_screenshot(monkeypatch):
+    monkeypatch.setattr(
+        listen_and_answer.pc_control,
+        "screenshot_to_hud",
+        lambda: "Here's your PC screen.",
+    )
+
+    result = listen_and_answer._pc_dispatch("take a picture of my screen")
+
+    assert result == "Here's your PC screen."
+
+
+def test_take_a_picture_of_the_pc_screen_routes_to_pc_screenshot(monkeypatch):
+    monkeypatch.setattr(
+        listen_and_answer.pc_control,
+        "screenshot_to_hud",
+        lambda: "Here's your PC screen.",
+    )
+
+    result = listen_and_answer._pc_dispatch("take a picture of the pc screen")
+
+    assert result == "Here's your PC screen."
+
+
+def test_is_vision_command_does_not_swallow_screen_phrases():
+    # Regression: "take a picture of my screen" was matching the Pi's
+    # own camera-vision fuzzy rule (words {take, picture}) before
+    # _pc_dispatch ever got a chance to route it to the PC screenshot
+    # tool, so the Pi took a selfie instead of capturing the PC screen.
+    assert listen_and_answer.is_vision_command(
+        "take a picture of my screen"
+    ) is False
+    assert listen_and_answer.is_vision_command(
+        "take a picture of the pc screen"
+    ) is False
+    # Genuine Pi camera requests must still work.
+    assert listen_and_answer.is_vision_command("take a picture") is True
+    assert listen_and_answer.is_vision_command("what do you see") is True
