@@ -5,9 +5,17 @@
 > root for a newer `ATLAS_V2_AGENT_HANDOFF_*.md` by date first
 > (`ls -lat *.md`) before trusting this one.
 >
-> - **Branch:** `atlas-v2-agent`. **300 tests passing** (`./venv/bin/python
->   -m unittest discover -s tests -p "test_*.py"` — this repo's own
->   `venv/`, not system Python, which is missing `psutil` and others).
+> - **Branch:** `atlas-v2-agent`. **728 tests passing** (`./venv/bin/python
+>   -m pytest tests/` — this repo's own `venv/`, not system Python, which
+>   is missing `psutil` and others). **Use pytest, not `unittest
+>   discover`** — confirmed live: `unittest discover` silently collects
+>   *zero* tests from files written as plain pytest functions with
+>   `tmp_path`/`monkeypatch` fixtures (e.g. all of
+>   `tests/agent/test_content_tools.py`) instead of `unittest.TestCase`
+>   subclasses — no error, no warning, it just contributes 0 passing
+>   tests to the total. A prior version of this checkpoint said "300
+>   tests passing" from a `unittest discover` run that had silently
+>   skipped that file — wrong number, corrected here.
 > - **Phase 11 (self-showcase edit pipeline) and Phase 12 (Instagram
 >   publish) are DONE and live_verified** — see
 >   `implementation_ledger.py` entries `phase11_showcase_media` and
@@ -31,6 +39,20 @@
 >   Fixed both. **Evaluated `github.com/calesthio/OpenMontage`** (Wesley's
 >   ask: "let him edit videos in a not-so-shitty way") — verdict below,
 >   not adopted.
+> - **Round 2, same day: actual choppiness fix + "no repetition" +
+>   readiness.** The published Reel was choppy because HUD video capture
+>   was 2fps still-stitching, not a CPU problem (measured live: this Pi
+>   sits well under half its CPU capacity even mid-recording). Switched
+>   `hud_capture.record_hud_clip()` to `wf-recorder` (installed via apt)
+>   for real continuous 24fps capture. The default tour was also one
+>   fixed, word-for-word script every time — replaced with
+>   `_build_default_tour()`, which randomizes phrasing and which extra
+>   real-feature beats show up. `atlas-wake.service` restarted to
+>   actually load all of this. **Ready now:** "hey atlas, record a video
+>   of yourself for Instagram" records a smooth, non-repeating Reel, then
+>   pauses for a spoken yes/no before publishing (that confirmation gate
+>   is deliberate and untouched). Full detail in "Same day, round 2"
+>   below.
 
 ## What got built
 
@@ -215,9 +237,11 @@ skills directory. None of that matches this project's actual constraints:
   ffmpeg, no paid generation APIs) — see [[feedback_outbound_calls_policy]]
   in memory. OpenMontage's whole value proposition assumes paid
   generation providers.
-- It'd add a Node.js/Remotion runtime dependency to a Raspberry Pi that's
-  already resource-constrained enough that HUD capture runs at a fixed
-  2fps (`hud_capture.CAPTURE_FPS`).
+- It'd add a Node.js/Remotion runtime dependency to this Raspberry Pi.
+  (Was going to cite the old fixed 2fps HUD capture here as evidence of
+  how resource-constrained this Pi is — turned out that wasn't actually
+  a CPU-constraint problem at all; see the follow-up right below, same
+  day, where that got fixed and CPU headroom got measured directly.)
 - It has no "record my own live screen" input mode at all — its inputs
   are text prompts, reference videos to remix, or AI-generated/stock
   footage. Atlas's whole self-showcase premise (his own real HUD,
@@ -235,3 +259,86 @@ ffmpeg, already a dependency:
   of the current hard cuts (would need to move off the pure stream-copy
   concat demuxer to an `xfade`-based filter graph, i.e. a real
   re-encode, not just a copy).
+
+## Same day, round 2: the actual choppiness fix, "no repetition," readiness
+
+Wesley watched the real published Reel and it was choppy, and asked for
+(a) that fixed, maybe by killing processes during recording, (b) "record
+a video of yourself for Instagram" to self-generate/edit/upload a fresh,
+non-repeating video every time with one voice command, and (c) the
+OpenMontage exploration explained above (his intent: let Atlas edit
+video "in a not-so-shitty way").
+
+**Root cause of the choppiness, confirmed live, was not CPU contention.**
+Sampled `top` during an actual `hud_capture.record_hud_clip()` call:
+total system CPU stayed at 25-37% used (62-75% idle) across this Pi's 4
+cores, even while chromium (rendering the live HUD — the thing being
+recorded) was itself using ~25-30%. There was no resource fight to
+resolve, so **no processes get killed during recording** — that would've
+solved nothing real and only added risk (e.g. killing the wake listener
+mid-session). The actual cause was architectural: `record_hud_clip()`
+frame-stitched periodic `grim` stills at a fixed **2fps** because no
+real video-capture tool was installed for this wlroots/`cage` kiosk.
+
+**Fix:** installed `wf-recorder` (`sudo apt install -y wf-recorder`,
+now in [README.md](README.md)'s cage/HUD setup section as a required
+system package) — it's the wlroots-native continuous screen recorder,
+confirmed live it works against `cage`. Rewrote `hud_capture.
+record_hud_clip()` around it: starts `wf-recorder` as a subprocess for
+the beat's duration, stops it with SIGINT (its documented stop signal)
+instead of stitching stills. **Confirmed live:** a direct 4.8s test
+recording came back as real, continuous 24fps (116 actual frames, not
+stitched stills); a full `content.record_self_showcase` run through the
+real registered tool (not a mock) produced a proper 1080x1920, 24fps
+Reel end to end. `CAPTURE_FPS` raised from `2` to `24` to match.
+`capture_frame()` (single-still `grim` grabs, used elsewhere for plain
+screenshots) is untouched — this only changed video capture.
+`tests/test_hud_capture.py`'s `RecordHudClipTests` rewritten for the new
+`Popen`/SIGINT flow instead of the old stitching-loop mocks.
+
+**"No repetition":** `DEFAULT_TOUR` was one fixed tuple — every
+"record a promo video" call with no custom `beats` produced the
+*exact* same narration script, word for word, every single time. That's
+the boring-repetition half of Wesley's complaint (the choppiness was the
+other half). Replaced with `_build_default_tour()` in
+`atlas_agent/content_tools.py`: weather radar and self-diagnostics
+always run (they're the only two beats with a real HUD-driving action,
+and the existing test asserts on them), but their phrasing is now
+randomly chosen from `WEATHER_LINES`/`DIAGNOSTICS_LINES`, intro/outro
+phrasing is randomized from `INTRO_LINES`/`OUTRO_LINES`, and 0-2 extra
+beats get randomly sampled in from `EXTRA_BEATS` (system status,
+printer, gaming PC — all `action="idle"` since those panels are already
+part of the always-visible HUD dashboard per `hud/app.js`, not separate
+overlays). New tests: `test_build_default_tour_always_includes_
+weather_and_diagnostics` and `test_build_default_tour_varies_across_
+calls` (30 calls, asserts more than one distinct script came out).
+
+**Readiness for "hey atlas, record a video of yourself for Instagram"
+end to end (record → edit → confirm → publish), one command:**
+- The mechanics already exist and are unchanged by this session: a
+  multi-step plan runs `content.record_self_showcase` then
+  `content.publish_to_instagram`; hitting the latter's
+  `PermissionLevel.CONFIRMATION_REQUIRED` pauses the whole task at
+  `WorkflowStatus.WAITING_CONFIRMATION` (`atlas_agent/workflow.py`) —
+  Atlas will ask to confirm the exact video/caption out loud before
+  actually posting, then finish once told yes. **That gate is
+  deliberate and wasn't touched or weakened** — "no repetition" is
+  solved by varying the content generated, not by removing the one
+  safety check on the only public, irreversible action in this codebase.
+- **Both services that needed today's code were restarted** —
+  `atlas-wake.service` (imports `listen_and_answer` →
+  `atlas_agent.content_tools` → `hud_capture`/`content_pipeline`/
+  `instagram_publish`, so it had none of today's fixes loaded in memory
+  until restarted) came back up clean, no import errors
+  (`journalctl -u atlas-wake.service`, confirmed empty for
+  error/traceback/exception). `atlas-robot.service` (`robot_hub.py`)
+  wasn't touched this session, so it didn't need restarting.
+- **Net: yes, ready now.** Saying "hey atlas, record a video of
+  yourself for Instagram" should record a smooth (not choppy), varied
+  (not repeated) Reel, then ask to confirm before publishing.
+- Not yet done, mentioned above as a real but separate follow-up:
+  burned-in captions, crossfade transitions. Doesn't block readiness.
+
+**Test count, corrected:** 728 passing via `pytest tests/` (this repo's
+`venv/`). See the checkpoint block at the top of this file for why
+`unittest discover` under-counts.
