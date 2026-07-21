@@ -5,20 +5,22 @@
 > `ATLAS_V2_AGENT_HANDOFF_*.md` by date first (`ls -lat *.md`) before
 > trusting this one.
 >
-> - **Branch / HEAD:** `atlas-v2-agent` — HEAD is `9030897` ("fix: retry
->   then fall back to muted capture on busy mic in capture_clip()").
->   `git log -1` to confirm it's still there. **662 tests passing.**
-> - **⏸️ LEFT OFF HERE (2026-07-21, iteration 3):** the mic-contention
->   blocker below is now code-fixed and unit-tested but **not yet
->   live-voice-verified** — say "Hey Atlas, record a 10 second clip of
->   yourself" for real and confirm it either records with audio or falls
->   back to a muted clip, not a hard failure. After that passes, the
->   remaining Phase-4-closing work is untouched this session: (1) the HUD
->   recording-state indicator (`/screen`-flag pattern, `hud/app.js` /
->   `robot_hub.py` — not started), (2) Phase 11 edit pipeline (not
->   started). See "What's left to fully close Phase 4" below for the
->   full punch list, unchanged except item 1 is now done pending live
->   verification.
+> - **Branch / HEAD:** `atlas-v2-agent` — HEAD is `d693854` ("feat: add
+>   HUD recording-state indicator for self-recording clips"). `git log -1`
+>   to confirm it's still there. **666 tests passing.**
+> - **⏸️ LEFT OFF HERE (2026-07-21, iteration 4):** both remaining
+>   Phase-4-closing items from the prior checkpoint are now code-complete
+>   and unit-tested, but **neither is live-voice-verified yet** — see the
+>   "What Wesley needs to test" list at the very bottom of this file for
+>   the exact order to run them in. **Stopped deliberately before Phase
+>   11** (the self-showcase edit-and-post pipeline): it needs real
+>   decisions only Wesley can make — Instagram API credentials/OAuth,
+>   licensed background audio (copyright-sensitive, can't just pick
+>   something), and branding/caption style — plus it ends in an actual
+>   public Instagram post, which the safety model explicitly requires
+>   confirming with Wesley before ever building the auto-post path. That
+>   is the "critical, ask first" boundary for this session, not a scope
+>   decision made lightly.
 > - **Phase / milestone:** Phase 4, milestone 1 (spoken-command tests,
 >   see below) plus an out-of-band Phase 3 fix Wesley reported directly:
 >   he asked Atlas to turn off his PC and it didn't work.
@@ -131,15 +133,12 @@ for the full history this session builds on.
 
 ## What's left on the PC-shutdown fix
 
-1. **Wesley needs to deploy the updated companion.** Copy
-   `windows-companion/atlas_companion.py` to the real Windows PC (same
-   path as before, e.g. `C:\atlas-companion\atlas_companion.py`) and
-   restart it. This also picks up the earlier, still-undeployed
-   `focus_or_open_app`/`active_window` fixes from Phase 3 milestone 1.
-2. After deploying, live-verify by voice: "Hey Atlas, shut down my PC"
-   (confirm the 60-second warning and that `shutdown /a` cancels it),
-   then "empty the recycle bin" and a YouTube search command. Flip the
-   `phase3_pc_companion` ledger's `external_blockers` once confirmed.
+~~Done.~~ Wesley deployed the updated companion and live-confirmed "shut
+down my PC" works (2026-07-21). `phase3_pc_companion` ledger flipped to
+`live_verified` for shutdown_pc/cancel_pc_shutdown/empty_recycle_bin/
+youtube_search. `focus_or_open_app`/`active_window` rode along on the
+same deploy but weren't separately re-confirmed — flag it if Wesley
+reports either misbehaving.
 
 ## What's left to fully close Phase 4
 
@@ -170,23 +169,76 @@ for the full history this session builds on.
      fall back to muted/video-only capture if the device is busy.)
 2. Once self-recording-by-voice is live-verified end to end (see item 1),
    flip `phase4_screen_capture` to `live_verified` in the ledger.
-3. Add the HUD recording-state indicator (Phase 4's own spec still wants
-   one — same `/screen`-flag pattern already used for dark-mode;
-   `hud/app.js` / `robot_hub.py` untouched so far).
-4. Then move to Phase 11 (edit pipeline) — the capture primitives it
-   needs already exist and are proven end to end (screenshot confirmed
-   live; self-recording blocked only by the mic-contention bug above,
-   which Phase 11 will also need solved).
+3. ~~**Add the HUD recording-state indicator.**~~ **Done 2026-07-21
+   (iteration 4), pending live verification.** New `/hud/recording` flag
+   endpoint (same `/screen`-flag pattern as dark mode), `recording_active`
+   in `GET /state`, a `recording-active` body class toggled by
+   `hud/app.js`, and a pulsing red "REC" dot in the masthead
+   (`hud/style.css`). Wired into `capture_self_clip` in
+   `atlas_agent/pi_tools.py` (flag on before the capture, off in a
+   `finally` after) via a best-effort HTTP notifier that swallows its own
+   failures. Scoped to Pi self-recording only — **not** wired to PC
+   screen recording (`pc.start_screen_recording`), which would need a
+   separate design for polling PC state back to the Pi HUD; flag that as
+   a follow-up if Wesley wants it too. 4 new tests, 666 passing.
+   Committed as `d693854`. `atlas-robot`/`atlas-wake`/`atlas-hud`
+   restarted clean, confirmed `recording_active: false` in a live
+   `GET /state`. **Still needs a real live-voice test** — confirm the REC
+   dot actually appears on the physical kiosk during self-recording and
+   disappears after.
+4. **Phase 11 (edit pipeline) — deliberately not started.** This is where
+   this session stopped. It needs decisions only Wesley can make before
+   any code gets written:
+   - **Instagram credentials/OAuth.** No API access exists yet at all.
+   - **Licensed background audio.** Can't just grab something off the
+     internet — copyright risk. Needs a real source (royalty-free
+     library, an actual license, or Wesley's own audio).
+   - **Branding/caption style.** Logo overlay? Watermark? Caption tone?
+     Nothing defined yet.
+   - **Which editing approach.** Deterministic FFmpeg filter chains vs.
+     something higher-level — not evaluated this session.
+   - The pipeline's last step is a **real public Instagram post**, which
+     the safety model (see the main mission doc, "Safety and Authority
+     Model") explicitly requires confirming the exact media and caption
+     with Wesley before ever sending — this isn't a capability to just
+     build silently and gate behind a runtime confirmation prompt later;
+     the credentials and content-source decisions above have to happen
+     with Wesley first.
+   The capture primitives Phase 11 will consume already exist and are
+   proven end to end (PC screenshot confirmed live; Pi self-recording
+   fixed this session, pending its own live-voice confirmation above).
 
 ## Next session
 
 Verify state first (`git log -1`, `./venv/bin/python -m pytest tests/ -q`
-should show 652+ passing). Then tackle the mic-contention bug (item 1
-above) — it's a real, reproducible, well-understood bug, not a mystery;
-the fix just needs a live PC/mic test cycle to confirm, which costs
-voice-turn round trips with Wesley same as any other live verification.
-Same loop as always: graphify orientation (max 3 queries) → tests first
-→ implement → full suite → `graphify update .` (only if source changed)
-→ restart only affected services → live verify → commit exact paths →
-update `implementation_ledger.py` honestly. Query the ledger by voice
-with "what is your upgrade status".
+should show 666+ passing). Everything code-side for this session's two
+fixes is done — what's left is live voice verification (see the
+checklist below) and then, only after Wesley weighs in on the Phase 11
+questions above, starting the edit pipeline. Same loop as always:
+graphify orientation (max 3 queries) → tests first → implement → full
+suite → `graphify update .` (only if source changed) → restart only
+affected services → live verify → commit exact paths → update
+`implementation_ledger.py` honestly. Query the ledger by voice with
+"what is your upgrade status".
+
+## What Wesley needs to test (in order)
+
+Say each of these for real, one at a time, and report back what actually
+happened (words spoken, what you heard/saw) in this same order:
+
+1. **"Hey Atlas, record a 10 second clip of yourself."**
+   Confirms the mic-contention fix. Pass = either a full clip with audio,
+   or Atlas mentioning/behaving like a muted clip (no hard failure, no
+   hang). Watch the HUD at the same time for #2.
+2. **While that's recording, look at the HUD kiosk screen.**
+   A small red pulsing "REC" dot should appear in the top-right masthead
+   area next to the uplink status line, and disappear once the recording
+   finishes. Confirms the new recording-state indicator.
+3. *(Optional sanity check, not new this session)* **"Hey Atlas, take a
+   picture of my screen."** — confirms the Session 4 screenshot routing
+   fix is still solid after this session's restarts.
+
+Report back in that order — which one(s) passed, which didn't, and
+anything Atlas said or the HUD showed that seemed off. That determines
+whether `phase4_screen_capture` gets flipped to `live_verified` or needs
+another round.
