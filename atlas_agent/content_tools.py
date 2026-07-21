@@ -205,8 +205,12 @@ def _build_default_tour(
             )
         )
 
-    return (
-        {"narration": random.choice(INTRO_LINES), "action": "idle"},
+    # Weather and diagnostics always show up somewhere (the only two
+    # beats with a real HUD-driving action, and existing callers rely
+    # on that), but not always in the same relative order or position
+    # -- shuffled together with whatever extra/PC beats got picked, so
+    # the whole middle of the tour, not just its phrasing, varies.
+    middle = [
         {
             "narration": random.choice(WEATHER_LINES),
             "action": "weather_open",
@@ -217,6 +221,12 @@ def _build_default_tour(
         },
         *extra,
         *pc_demo,
+    ]
+    random.shuffle(middle)
+
+    return (
+        {"narration": random.choice(INTRO_LINES), "action": "idle"},
+        *middle,
         {"narration": random.choice(OUTRO_LINES), "action": "idle"},
     )
 
