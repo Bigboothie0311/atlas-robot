@@ -111,6 +111,26 @@ DEFAULT_CONFIG = {
     ],
 }
 
+# Live ffmpeg handles, keyed by pid, so stop_recording can ask ffmpeg to
+# finish cleanly on stdin instead of killing it. taskkill without /F posts
+# WM_CLOSE, which a CREATE_NO_WINDOW console process never receives, so the
+# old kill silently did nothing and ffmpeg kept growing the file while the
+# Pi tried to download it. A hard /F kill stops it but truncates the mp4
+# before the moov atom is written, leaving an unplayable file -- so 'q'
+# first, /F only as a last resort.
+_RECORDING_PROCESSES: dict[int, object] = {}
+_RECORDING_QUIT_TIMEOUT_SECONDS = 20
+_RECORDING_SETTLE_SECONDS = 0.5
+_RECORDING_STABLE_CHECKS = 3
+
+# MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK
+_MOUSE_MOVE_ABSOLUTE = 0x0001 | 0x8000 | 0x4000
+# How finely a drag path is resampled, and how long each sample rests.
+# Dense samples are what make the stroke a line instead of a dot, and the
+# pause keeps it visible on a 30fps screen recording.
+_DRAG_SAMPLE_PIXELS = 12
+_DRAG_STEP_MILLISECONDS = 12
+
 _CONTROL_LOCK = threading.RLock()
 _CONTROL_ENABLED = True
 _CONTROL_STOP_REASON = None
@@ -661,9 +681,15 @@ def act_start_recording(body):
     ])
 
     try:
-        process = subprocess.Popen(command, creationflags=_NO_WINDOW)
+        # stdin stays open so stop_recording can send 'q' and let ffmpeg
+        # finalize the container itself.
+        process = subprocess.Popen(
+            command, stdin=subprocess.PIPE, creationflags=_NO_WINDOW
+        )
     except OSError as error:
         return {"ok": False, "error": f"could not start ffmpeg: {error}"}
+
+    _RECORDING_PROCESSES[process.pid] = process
 
     active = {
         "pid": process.pid,
@@ -680,6 +706,74 @@ def act_start_recording(body):
     return {"ok": True, **active}
 
 
+def _stop_ffmpeg(pid):
+    """Stop the recording process, preferring a clean shutdown.
+
+    ffmpeg finalizes the mp4 (writes the moov atom) when it is told to
+    quit on stdin. Killing it instead leaves a file that will not play,
+    and killing it *without* /F does not stop it at all when it was
+    started with CREATE_NO_WINDOW.
+    """
+    process = _RECORDING_PROCESSES.pop(pid, None) if pid else None
+
+    if process is not None:
+        try:
+            if process.stdin is not None:
+                process.stdin.write(b"q")
+                process.stdin.flush()
+                process.stdin.close()
+        except (OSError, ValueError):
+            pass
+        try:
+            process.wait(timeout=_RECORDING_QUIT_TIMEOUT_SECONDS)
+            return
+        except Exception:
+            pass
+
+    if not pid or not _pid_running(pid):
+        return
+
+    # Either the companion restarted and lost the handle, or ffmpeg
+    # ignored the quit. /F is required: without it taskkill cannot stop a
+    # windowless console process at all.
+    for arguments in (
+        ["taskkill", "/PID", str(pid), "/T"],
+        ["taskkill", "/PID", str(pid), "/T", "/F"],
+    ):
+        try:
+            subprocess.run(
+                arguments,
+                capture_output=True,
+                timeout=10,
+                creationflags=_NO_WINDOW,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
+        time.sleep(1)
+        if not _pid_running(pid):
+            return
+
+
+def _wait_for_stable_file(path, checks=_RECORDING_STABLE_CHECKS):
+    """Return True once the file's size stops changing."""
+    previous = -1
+    stable = 0
+    for _ in range(40):
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return False
+        if size == previous and size > 0:
+            stable += 1
+            if stable >= checks:
+                return True
+        else:
+            stable = 0
+        previous = size
+        time.sleep(_RECORDING_SETTLE_SECONDS)
+    return False
+
+
 def act_stop_recording(_body):
     """Stops the in-progress recording and verifies the file actually
     landed on disk with real bytes before reporting success."""
@@ -692,21 +786,17 @@ def act_stop_recording(_body):
     pid = active.get("pid")
     path = Path(active["path"])
 
-    if pid and _pid_running(pid):
-        try:
-            subprocess.run(
-                ["taskkill", "/PID", str(pid)],
-                timeout=10,
-                creationflags=_NO_WINDOW,
-            )
-        except (OSError, subprocess.SubprocessError):
-            pass
-        time.sleep(1)  # let ffmpeg flush the moov atom cleanly
-
+    _stop_ffmpeg(pid)
     _save_recording_state({"active": None})
 
     if not path.is_file() or path.stat().st_size == 0:
         return {"ok": False, "error": "recording file is missing or empty"}
+
+    # Only report success once the file has actually stopped growing.
+    # The Pi verifies the download by size+hash, so handing back a path
+    # that is still being written fails verification every retry.
+    if not _wait_for_stable_file(path):
+        return {"ok": False, "error": "recording file never stopped growing"}
 
     meta = {
         **active,
@@ -901,19 +991,46 @@ def _focus_window(match_substring):
     the foreground. Title-based (WScript.Shell.AppActivate) — no
     coordinates, no clicks, nothing arbitrary."""
     escaped = match_substring.replace("'", "''")
+    # The companion runs as a background scheduled task, and Windows
+    # refuses SetForegroundWindow to a process that does not already own
+    # the foreground. ShowWindow alone made the window visible but never
+    # focused, so callers that verify focus saw failure forever -- the
+    # desktop agent burned its whole step budget retrying instead of
+    # working. Attaching to the current foreground thread's input queue
+    # lifts that restriction for the duration of the call.
     script = (
         "Add-Type @'\nusing System;using System.Runtime.InteropServices;"
-        "public class AtlasFocus{[DllImport(\"user32.dll\")]public static extern bool ShowWindow(IntPtr h,int n);"
-        "[DllImport(\"user32.dll\")]public static extern bool SetForegroundWindow(IntPtr h);}\n'@;"
+        "public class AtlasFocus{"
+        "[DllImport(\"user32.dll\")]public static extern bool ShowWindow(IntPtr h,int n);"
+        "[DllImport(\"user32.dll\")]public static extern bool SetForegroundWindow(IntPtr h);"
+        "[DllImport(\"user32.dll\")]public static extern bool BringWindowToTop(IntPtr h);"
+        "[DllImport(\"user32.dll\")]public static extern IntPtr GetForegroundWindow();"
+        "[DllImport(\"user32.dll\")]public static extern uint GetWindowThreadProcessId(IntPtr h,IntPtr p);"
+        "[DllImport(\"user32.dll\")]public static extern bool AttachThreadInput(uint a,uint b,bool f);"
+        "[DllImport(\"kernel32.dll\")]public static extern uint GetCurrentThreadId();}\n'@;"
         "$p=Get-Process|Where-Object{$_.MainWindowTitle -like "
         f"'*{escaped}*'}}|Select-Object -First 1;"
         "if(-not $p){exit 3};"
-        "[AtlasFocus]::ShowWindow($p.MainWindowHandle,9)|Out-Null;"
-        "$w=New-Object -ComObject WScript.Shell;"
-        f"$w.AppActivate('{escaped}')|Out-Null;"
-        "[AtlasFocus]::SetForegroundWindow($p.MainWindowHandle)|Out-Null"
+        "$h=$p.MainWindowHandle;"
+        "[AtlasFocus]::ShowWindow($h,9)|Out-Null;"
+        "$fg=[AtlasFocus]::GetForegroundWindow();"
+        "$ft=[AtlasFocus]::GetWindowThreadProcessId($fg,[IntPtr]::Zero);"
+        "$ct=[AtlasFocus]::GetCurrentThreadId();"
+        "$attached=$false;"
+        "if($ft -ne $ct){$attached=[AtlasFocus]::AttachThreadInput($ct,$ft,$true)};"
+        "[AtlasFocus]::BringWindowToTop($h)|Out-Null;"
+        "[AtlasFocus]::SetForegroundWindow($h)|Out-Null;"
+        "if($attached){[AtlasFocus]::AttachThreadInput($ct,$ft,$false)|Out-Null}"
     )
-    return _run_hidden_powershell(script, timeout=10).returncode == 0
+    # WScript.Shell's AppActivate used to run here too, but it can block
+    # indefinitely on Electron windows; the timeout then escaped as a 500
+    # instead of a clean "focus failed". The Win32 path above is what
+    # actually beats the foreground lock, so the COM call is gone and any
+    # remaining slowness degrades to False.
+    try:
+        return _run_hidden_powershell(script, timeout=10).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def act_focus_or_open_app(body):
@@ -1260,33 +1377,54 @@ def act_desktop_input(body):
             return {"ok": False, "error": "button must be left/right/middle"}
         down, up = buttons[button]
 
-        first_x, first_y = points[0]
+        # SetCursorPos teleports the pointer without emitting mouse-move
+        # input, so Paint saw a press and a release at unrelated spots and
+        # drew a dot. Real MOUSEEVENTF_MOVE|ABSOLUTE|VIRTUALDESK events are
+        # what an app tracks as a stroke. Coordinates are normalized against
+        # the virtual desktop, the same space observe_desktop screenshots use.
+        dense: list[tuple[int, int]] = [points[0]]
+        for (x0, y0), (x1, y1) in zip(points, points[1:]):
+            span = max(abs(x1 - x0), abs(y1 - y0))
+            steps = max(1, min(120, span // _DRAG_SAMPLE_PIXELS))
+            for step in range(1, steps + 1):
+                dense.append((
+                    int(round(x0 + (x1 - x0) * step / steps)),
+                    int(round(y0 + (y1 - y0) * step / steps)),
+                ))
+
+        first_x, first_y = dense[0]
+        moves = "".join(
+            f"m {px} {py};" for px, py in dense[1:]
+        )
         script = (
             "Add-Type @'\nusing System;using System.Runtime.InteropServices;"
             "public class AtlasInput{[DllImport(\"user32.dll\")]public static extern bool SetCursorPos(int X,int Y);"
             "[DllImport(\"user32.dll\")]public static extern void mouse_event(uint f,uint x,uint y,int d,UIntPtr e);}\n'@;"
-            f"[AtlasInput]::SetCursorPos({first_x},{first_y})|Out-Null;"
-            "Start-Sleep -Milliseconds 60;"
+            "Add-Type -AssemblyName System.Windows.Forms;"
+            "$v=[System.Windows.Forms.SystemInformation]::VirtualScreen;"
+            "function m($x,$y){"
+            "$nx=[int](($x-$v.Left)*65535/[Math]::Max(1,$v.Width-1));"
+            "$ny=[int](($y-$v.Top)*65535/[Math]::Max(1,$v.Height-1));"
+            f"[AtlasInput]::mouse_event({_MOUSE_MOVE_ABSOLUTE},$nx,$ny,0,[UIntPtr]::Zero);"
+            "Start-Sleep -Milliseconds " + str(_DRAG_STEP_MILLISECONDS) + "};"
+            f"m {first_x} {first_y};"
+            "Start-Sleep -Milliseconds 120;"
             f"[AtlasInput]::mouse_event({down},0,0,0,[UIntPtr]::Zero);"
+            "Start-Sleep -Milliseconds 80;"
+            + moves +
+            "Start-Sleep -Milliseconds 80;"
+            f"[AtlasInput]::mouse_event({up},0,0,0,[UIntPtr]::Zero);"
         )
-        # Small pauses between samples keep the stroke smooth enough for
-        # Paint to interpolate, and keep it visible on a 30fps recording.
-        for point_x, point_y in points[1:]:
-            script += (
-                f"[AtlasInput]::SetCursorPos({point_x},{point_y})|Out-Null;"
-                "Start-Sleep -Milliseconds 25;"
-            )
-        script += f"[AtlasInput]::mouse_event({up},0,0,0,[UIntPtr]::Zero);"
 
-        result = _run_hidden_powershell(script, timeout=120)
+        result = _run_hidden_powershell(script, timeout=180)
         if result.returncode:
             return {"ok": False, "error": result.stderr.strip() or "drag failed"}
         return {
             "ok": True,
             "action": action,
-            "points": len(points),
+            "points": len(dense),
             "start": {"x": first_x, "y": first_y},
-            "end": {"x": points[-1][0], "y": points[-1][1]},
+            "end": {"x": dense[-1][0], "y": dense[-1][1]},
         }
 
     if action == "text":
@@ -1344,11 +1482,18 @@ def act_window_control(body):
         return {"ok": False, "error": "title is required"}
     if action == "focus":
         _focus_window(title)
-        time.sleep(0.25)
+        # Focus is asynchronous: the window manager needs a moment to
+        # settle, and a single immediate check reported failure for a
+        # window that did come forward.
+        focused = False
+        for _ in range(8):
+            time.sleep(0.25)
+            active = str(act_active_window({}).get("title") or "")
+            if title.lower() in active.lower():
+                focused = True
+                break
         return {
-            "ok": title.lower() in str(
-                act_active_window({}).get("title") or ""
-            ).lower(),
+            "ok": focused,
             "action": action,
             "title": title,
         }

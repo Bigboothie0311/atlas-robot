@@ -107,9 +107,28 @@ DESKTOP_EXPORT_PACKAGE_FOLDERS = frozenset(
     {"subtitles", "translations", "trials"}
 )
 
+# Named visual requirements the owner can ask for out loud. These are
+# contracts, not suggestions: "include MS Paint" has to produce a real
+# drawing, not a generic "PC shot" or yet more HUD footage.
 _MS_PAINT_REQUEST = re.compile(
-    r"\b(?:microsoft\s+paint|ms\s+paint|mspaint)\b",
+    r"\b(?:microsoft\s+paint|ms\s+paint|mspaint|paint)\b",
     re.IGNORECASE,
+)
+_NOTEPAD_REQUEST = re.compile(r"\bnote\s?pad\b", re.IGNORECASE)
+_YOUTUBE_REQUEST = re.compile(r"\byou\s?tube\b", re.IGNORECASE)
+
+NOTEPAD_MESSAGES: tuple[str, ...] = (
+    "Hey - Atlas here. A Raspberry Pi is typing this on a gaming PC, "
+    "live, because someone asked me to prove I actually can.",
+    "This is being typed by a robot on a real keyboard. No edit, no "
+    "cut. If the typos land, they are mine.",
+    "Message from a Raspberry Pi to whoever is watching: the machine "
+    "you are looking at is not mine, and I am still driving it.",
+)
+YOUTUBE_QUERIES: tuple[str, ...] = (
+    "raspberry pi robot build timelapse",
+    "homelab automation raspberry pi projects",
+    "diy robotics raspberry pi voice assistant",
 )
 
 
@@ -191,6 +210,201 @@ def _export_reel_to_desktop(
         }
 
 
+# A picture Atlas draws stroke by stroke, in canvas coordinates for a
+# maximized Paint window on a 1920x1080 desktop: house, roof, door, two
+# windows, sun, and a horizon line. Deterministic on purpose -- three
+# live runs of the vision-driven agent ended with Paint open and the
+# canvas blank, and an explicitly requested Paint Reel must never ship
+# without a drawing in it.
+PAINT_DRAWINGS: dict[str, tuple[tuple[tuple[int, int], ...], ...]] = {
+    "a little house on a hill": (
+        ((700, 780), (700, 560), (1100, 560), (1100, 780), (700, 780)),
+        ((700, 560), (900, 420), (1100, 560)),
+        ((860, 780), (860, 680), (940, 680), (940, 780)),
+        ((760, 610), (820, 610), (820, 660), (760, 660), (760, 610)),
+        ((990, 610), (1050, 610), (1050, 660), (990, 660), (990, 610)),
+        (
+            (1270, 400), (1330, 360), (1390, 400),
+            (1390, 470), (1330, 505), (1270, 470), (1270, 400),
+        ),
+        ((450, 780), (1500, 780)),
+    ),
+    "a robot that looks a bit like me": (
+        ((760, 400), (1140, 400), (1140, 700), (760, 700), (760, 400)),
+        ((850, 480), (910, 480), (910, 540), (850, 540), (850, 480)),
+        ((990, 480), (1050, 480), (1050, 540), (990, 540), (990, 480)),
+        ((860, 620), (950, 650), (1040, 620)),
+        ((950, 400), (950, 320)),
+        ((910, 300), (990, 300), (990, 330), (910, 330), (910, 300)),
+        ((760, 500), (680, 500), (680, 620)),
+        ((1140, 500), (1220, 500), (1220, 620)),
+    ),
+    "a rocket heading somewhere better": (
+        ((950, 330), (1030, 500), (1030, 700), (870, 700), (870, 500), (950, 330)),
+        ((870, 560), (780, 700), (870, 690)),
+        ((1030, 560), (1120, 700), (1030, 690)),
+        ((910, 480), (990, 480), (990, 550), (910, 550), (910, 480)),
+        ((900, 700), (930, 800), (950, 720), (970, 800), (1000, 700)),
+        ((600, 400), (640, 400)),
+        ((1300, 480), (1340, 480)),
+    ),
+    "a sleepy cat": (
+        (
+            (860, 560), (940, 520), (1030, 560),
+            (1060, 650), (990, 710), (890, 710), (830, 650), (860, 560),
+        ),
+        ((860, 560), (845, 480), (905, 520)),
+        ((1030, 560), (1050, 480), (985, 520)),
+        ((890, 610), (920, 610)),
+        ((970, 610), (1000, 610)),
+        ((930, 645), (945, 660), (960, 645)),
+        ((1060, 660), (1180, 700), (1150, 620)),
+    ),
+    "mountains at sunrise": (
+        ((450, 760), (650, 520), (800, 700), (900, 600), (1080, 760)),
+        ((1000, 700), (1150, 520), (1330, 760)),
+        (
+            (700, 400), (760, 360), (820, 400),
+            (820, 470), (760, 505), (700, 470), (700, 400),
+        ),
+        ((450, 780), (1500, 780)),
+        ((520, 640), (560, 610), (600, 640)),
+        ((1180, 660), (1220, 630), (1260, 660)),
+    ),
+}
+PAINT_STROKES = PAINT_DRAWINGS["a little house on a hill"]
+# Toolbar coordinates for a maximized Paint window on a 1920x1080 desktop.
+# Ctrl+A switches Paint to the Selection tool, so without re-picking the
+# pencil every later drag draws a selection box instead of ink -- which is
+# exactly how a run finished with a blank canvas and every stroke "ok".
+PAINT_PENCIL_TOOL = (262, 88)
+PAINT_LAUNCH_SETTLE_SECONDS = 9.0
+PAINT_FOCUS_SETTLE_SECONDS = 1.5
+PAINT_STROKE_TIMEOUT_SECONDS = 180
+
+
+def _prepare_paint_canvas(pc_client: Any) -> None:
+    """Get Paint open, focused, maximized and blank BEFORE recording.
+
+    Launching and clearing on camera wasted most of the clip, so the beat
+    showed an app starting rather than a drawing appearing. It also never
+    closes Paint: closing with unsaved work raises a modal "save your
+    work?" dialog that silently swallows every later click.
+    """
+    windows = (
+        (pc_client.execute("active_apps", timeout_seconds=60).data or {})
+        .get("windows")
+        or []
+    )
+    if not any("paint" in str(title).lower() for title in windows):
+        pc_client.execute(
+            "launch_process",
+            {"executable": "mspaint.exe", "arguments": [], "hidden": False},
+            timeout_seconds=60,
+        )
+        time.sleep(PAINT_LAUNCH_SETTLE_SECONDS)
+
+    focused = pc_client.execute(
+        "window_control",
+        {"action": "focus", "title": "Paint"},
+        timeout_seconds=90,
+    )
+    if not (focused.data or {}).get("ok"):
+        raise RuntimeError("could not bring Microsoft Paint to the foreground")
+
+    pc_client.execute(
+        "window_control",
+        {"action": "maximize", "title": "Paint"},
+        timeout_seconds=60,
+    )
+    time.sleep(PAINT_FOCUS_SETTLE_SECONDS)
+
+    for keys in ("^a", "{DEL}", "{ESC}"):
+        pc_client.execute(
+            "desktop_input", {"action": "keys", "keys": keys},
+            timeout_seconds=60,
+        )
+        time.sleep(0.4)
+
+    # Back to the pencil: the clear above left the Selection tool active,
+    # under which every drag draws a selection box instead of ink.
+    pc_client.execute(
+        "desktop_input",
+        {
+            "action": "click",
+            "x": PAINT_PENCIL_TOOL[0],
+            "y": PAINT_PENCIL_TOOL[1],
+            "button": "left",
+        },
+        timeout_seconds=60,
+    )
+    time.sleep(0.6)
+
+
+def _draw_in_paint(
+    pc_client: Any,
+    clip_seconds: float,
+    subject: str | None = None,
+) -> dict[str, Any]:
+    """Draw one real picture in Paint, stroke by stroke, on camera."""
+    strokes = PAINT_DRAWINGS.get(str(subject or ""), PAINT_STROKES)
+
+    windows = (
+        (pc_client.execute("active_apps", timeout_seconds=60).data or {})
+        .get("windows")
+        or []
+    )
+    if not any("paint" in str(title).lower() for title in windows):
+        _prepare_paint_canvas(pc_client)
+
+    # Pace the strokes so the drawing is still visibly unfolding for the
+    # whole beat rather than finishing in the first second.
+    pause = max(0.2, (clip_seconds - 4.0) / max(1, len(strokes)))
+    drawn = 0
+    for stroke in strokes:
+        result = pc_client.execute(
+            "desktop_input",
+            {
+                "action": "drag",
+                "path": [list(point) for point in stroke],
+                "button": "left",
+            },
+            timeout_seconds=PAINT_STROKE_TIMEOUT_SECONDS,
+        )
+        if (result.data or {}).get("ok"):
+            drawn += 1
+        time.sleep(pause)
+
+    if drawn == 0:
+        raise RuntimeError("Microsoft Paint accepted no drawing strokes")
+
+    return {"ok": True, "strokes": drawn, "subject": subject}
+
+
+def _apply_best_hook(
+    plan: dict[str, Any],
+    model_hooks: list[Any] | tuple[Any, ...],
+) -> None:
+    """Promote the strongest generated hook to the plan's actual hook.
+
+    The candidate list used to be replaced while ``hook`` kept its weak
+    templated value, so a Reel shipped a hook scored 62 with a 90 sitting
+    unused in the very same payload.
+    """
+    cleaned = [
+        str(hook).strip() for hook in model_hooks if str(hook or "").strip()
+    ]
+    if len(cleaned) < 2:
+        return
+
+    plan["hook_candidates"] = [
+        {"text": hook, "score": max(50, 90 - index * 5)}
+        for index, hook in enumerate(cleaned)
+    ]
+    plan["hook"] = plan["hook_candidates"][0]["text"]
+    plan["hook_score"] = plan["hook_candidates"][0]["score"]
+
+
 def _required_pc_scene(mission: str | None) -> dict[str, Any] | None:
     """Return a deterministic scene for an explicit owner request.
 
@@ -199,33 +413,49 @@ def _required_pc_scene(mission: str | None) -> dict[str, Any] | None:
     deterministic so a request to show Paint cannot be generalized into a
     generic "PC shot" or silently replaced with more HUD footage.
     """
-    if not isinstance(mission, str) or not _MS_PAINT_REQUEST.search(mission):
+    if not isinstance(mission, str):
         return None
 
+    if _NOTEPAD_REQUEST.search(mission) and not _MS_PAINT_REQUEST.search(mission):
+        message = random.choice(NOTEPAD_MESSAGES)
+        return {
+            "narration": (
+                "You asked me to use Notepad, so I am typing this to you "
+                "live on the real machine, one keystroke at a time."
+            ),
+            "source": "pc",
+            "action": "idle",
+            "pc_action": {
+                "type": "type_text", "app": "notepad", "text": message,
+            },
+        }
+
+    if _YOUTUBE_REQUEST.search(mission) and not _MS_PAINT_REQUEST.search(mission):
+        return {
+            "narration": (
+                "You asked for YouTube, so here is my real browser pulling "
+                "up a search on the machine I actually control."
+            ),
+            "source": "pc",
+            "action": "idle",
+            "pc_action": {
+                "type": "youtube_search",
+                "query": random.choice(YOUTUBE_QUERIES),
+            },
+        }
+
+    if not _MS_PAINT_REQUEST.search(mission):
+        return None
+
+    subject = random.choice(sorted(PAINT_DRAWINGS))
     return {
         "narration": (
-            "You asked to watch me use Microsoft Paint, so here is the real "
-            "desktop while I make a clean original picture from scratch."
+            "You asked to watch me use Microsoft Paint, so here is my real "
+            f"desktop while I draw {subject}, stroke by stroke, right now."
         ),
         "source": "pc",
         "action": "idle",
-        "pc_action": {
-            "type": "desktop_goal",
-            "goal": (
-                "On camera, focus an existing Microsoft Paint window or open "
-                "Microsoft Paint exactly once if it is not running. Maximize "
-                "it, then draw a clean, simple original picture on the canvas "
-                "using drag strokes -- a click alone leaves no visible mark, "
-                "so every stroke must be a drag along a path of points. Keep "
-                "Paint as the only main app on screen, do not open a terminal "
-                "or duplicate Paint windows, and leave the finished painting "
-                "clearly visible."
-            ),
-            # Opening Paint, maximizing it, choosing a tool and drawing
-            # several strokes cannot fit in a handful of steps; too small a
-            # budget produced a Reel of Paint sitting open and untouched.
-            "max_steps": 14,
-        },
+        "pc_action": {"type": "paint_drawing", "subject": subject},
     }
 
 
@@ -238,15 +468,36 @@ def _ensure_required_pc_scene(
     if required is None:
         return directed
 
-    for beat in directed:
+    def is_paint_beat(beat: dict[str, Any]) -> bool:
         action = beat.get("pc_action")
-        if (
+        return (
             beat.get("source") == "pc"
             and isinstance(action, dict)
-            and action.get("type") == "desktop_goal"
-            and _MS_PAINT_REQUEST.search(str(action.get("goal") or ""))
-        ):
-            return directed
+            and (
+                action.get("type") == "paint_drawing"
+                or (
+                    action.get("type") == "desktop_goal"
+                    and _MS_PAINT_REQUEST.search(str(action.get("goal") or ""))
+                )
+            )
+        )
+
+    # A model-written Paint goal does NOT satisfy the request. It used to,
+    # and the vision agent then drew nothing while the beat's narration
+    # promised a picture that never appeared on screen. Any Paint beat the
+    # model wrote is replaced wholesale -- narration included -- so what is
+    # said and what is drawn always match.
+    existing = [index for index, beat in enumerate(directed) if is_paint_beat(beat)]
+    if existing:
+        first = existing[0]
+        kept = tuple(
+            beat for index, beat in enumerate(directed)
+            if index == first or index not in existing
+        )
+        return tuple(
+            required if index == first else beat
+            for index, beat in enumerate(kept)
+        )
 
     insert_at = max(1, len(directed) - 1)
     if len(directed) < 8:
@@ -633,6 +884,10 @@ def _perform_pc_action(
                     ),
                 },
             )
+        elif action_type == "paint_drawing":
+            _draw_in_paint(
+                pc_client, clip_seconds, pc_action.get("subject")
+            )
         elif action_type == "desktop_goal":
             if pc_demo_director is None:
                 raise RuntimeError("general desktop director is unavailable")
@@ -686,6 +941,8 @@ def _prepare_pc_demo_surface(
     action_type = pc_action.get("type")
     if action_type == "youtube_search":
         _perform_pc_action(pc_client, pc_action, strict=True)
+    elif action_type == "paint_drawing":
+        _prepare_paint_canvas(pc_client)
     elif action_type == "type_text":
         app = str(pc_action.get("app") or "notepad")
         result = pc_client.execute("focus_or_open_app", {"app": app})
@@ -716,13 +973,16 @@ def _record_pc_demo_clip(
     Raises PcDemoCaptureError with a clear reason on any failure --
     start, stop, or download -- never silently returns a bad path."""
     _prepare_pc_demo_surface(pc_client, pc_action)
-    is_desktop_goal = (
-        isinstance(pc_action, dict)
-        and pc_action.get("type") == "desktop_goal"
-    )
+    action_type = pc_action.get("type") if isinstance(pc_action, dict) else None
+    is_desktop_goal = action_type in ("desktop_goal", "paint_drawing")
     if is_desktop_goal:
         # One extra step covers the loop's final verification turn.
-        steps = int(pc_action.get("max_steps") or 3) + 1
+        steps = int(
+            pc_action.get("max_steps")
+            or (len(PAINT_DRAWINGS.get(
+                str(pc_action.get("subject") or ""), PAINT_STROKES
+            )) + 4 if action_type == "paint_drawing" else 3)
+        ) + 1
         recording_seconds = min(
             PC_DESKTOP_GOAL_MAX_RECORDING_SECONDS,
             max(
@@ -1522,12 +1782,10 @@ def register_content_tools(
                     generated_growth_assets.get("title")
                     or growth_plan.get("title")
                 )
-                model_hooks = generated_growth_assets.get("hook_candidates") or []
-                if len(model_hooks) >= 2:
-                    growth_plan["hook_candidates"] = [
-                        {"text": str(hook), "score": max(50, 90 - index * 5)}
-                        for index, hook in enumerate(model_hooks)
-                    ]
+                _apply_best_hook(
+                    growth_plan,
+                    generated_growth_assets.get("hook_candidates") or [],
+                )
                 translations = generated_growth_assets.get("translations") or {}
             except Exception as error:
                 growth_asset_error = f"{type(error).__name__}: {error}"

@@ -394,7 +394,14 @@ def test_stop_recording_kills_process_still_running(companion, monkeypatch, tmp_
     result = companion.act_stop_recording({})
 
     assert result["ok"] is True
-    assert killed == [["taskkill", "/PID", "555"]]
+    # _pid_running is stubbed True throughout, so the escalation runs to
+    # the end. Plain "taskkill /PID" posts WM_CLOSE, which a windowless
+    # ffmpeg never receives, so /F must be reached rather than assumed
+    # unnecessary.
+    assert killed == [
+        ["taskkill", "/PID", "555", "/T"],
+        ["taskkill", "/PID", "555", "/T", "/F"],
+    ]
 
 
 def test_stop_recording_reports_no_active_recording(companion, monkeypatch, tmp_path):
@@ -975,13 +982,14 @@ def test_desktop_input_supports_drag_for_freehand_drawing(
     assert result["points"] == 3
     script = scripts[0]
     # Button goes down once at the start, up once at the end, with the
-    # cursor moved through every intermediate point in between. Flags are
-    # emitted as decimal, matching the existing click path.
+    # pointer moved through the path in between. Flags are emitted as
+    # decimal, matching the existing click path.
     assert script.count("mouse_event(2,") == 1
     assert script.count("mouse_event(4,") == 1
-    assert "SetCursorPos(10,20)" in script
-    assert "SetCursorPos(30,40)" in script
-    assert "SetCursorPos(50,60)" in script
+    # The path is resampled, so the endpoints must appear as move calls
+    # even though intermediate samples are inserted between them.
+    assert "m 10 20;" in script
+    assert "m 50 60;" in script
 
 
 def test_desktop_input_drag_rejects_a_degenerate_path(companion):
@@ -989,3 +997,198 @@ def test_desktop_input_drag_rejects_a_degenerate_path(companion):
 
     assert result["ok"] is False
     assert "two" in result["error"].lower()
+
+
+# --- Regression: stop_recording never actually stopped ffmpeg ----------
+#
+# taskkill without /F posts WM_CLOSE, which a CREATE_NO_WINDOW console
+# process never receives. ffmpeg kept running and kept growing the file,
+# so the Pi's size/hash verification failed every retry. Proven live on
+# the PC: the mp4's last-write time was 45s after the Pi gave up.
+
+
+def test_stop_recording_asks_ffmpeg_to_finalize_then_waits_for_exit(
+    companion, tmp_path, monkeypatch
+):
+    media = tmp_path / "recording_x.mp4"
+    media.write_bytes(b"video bytes")
+    monkeypatch.setattr(
+        companion, "_load_recording_state",
+        lambda: {"active": {"pid": 4242, "path": str(media), "name": media.name}},
+    )
+    monkeypatch.setattr(companion, "_save_recording_state", lambda _s: None)
+    monkeypatch.setattr(companion, "_write_sidecar", lambda *_a: None)
+
+    class FakeFfmpeg:
+        def __init__(self):
+            self.stdin = self
+            self.written = []
+            self.waited = False
+            self.killed = False
+        def write(self, data):
+            self.written.append(data)
+        def flush(self):
+            pass
+        def close(self):
+            pass
+        def wait(self, timeout=None):
+            self.waited = True
+            return 0
+        def poll(self):
+            return 0 if self.waited else None
+
+    handle = FakeFfmpeg()
+    companion._RECORDING_PROCESSES[4242] = handle
+    try:
+        result = companion.act_stop_recording({})
+    finally:
+        companion._RECORDING_PROCESSES.pop(4242, None)
+
+    assert result["ok"] is True
+    # 'q' is how ffmpeg is told to finish and write the moov atom. A hard
+    # kill here would leave an unplayable file.
+    assert b"q" in b"".join(handle.written)
+    assert handle.waited is True
+
+
+def test_stop_recording_force_kills_when_ffmpeg_ignores_the_quit(
+    companion, tmp_path, monkeypatch
+):
+    media = tmp_path / "recording_y.mp4"
+    media.write_bytes(b"video bytes")
+    monkeypatch.setattr(
+        companion, "_load_recording_state",
+        lambda: {"active": {"pid": 909, "path": str(media), "name": media.name}},
+    )
+    monkeypatch.setattr(companion, "_save_recording_state", lambda _s: None)
+    monkeypatch.setattr(companion, "_write_sidecar", lambda *_a: None)
+    monkeypatch.setattr(companion, "_pid_running", lambda _p: True)
+    monkeypatch.setattr(companion.time, "sleep", lambda _s: None)
+
+    runs = []
+
+    def fake_run(command, **kwargs):
+        runs.append(command)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(companion.subprocess, "run", fake_run)
+
+    companion.act_stop_recording({})
+
+    taskkills = [c for c in runs if c and c[0] == "taskkill"]
+    assert taskkills, "no taskkill fallback was attempted"
+    # Without /F the kill is a no-op against a windowless console process.
+    assert any("/F" in c for c in taskkills), taskkills
+
+
+# --- Regression: focus always reported failure, so the agent looped ----
+#
+# The companion runs as a background scheduled task, and Windows refuses
+# SetForegroundWindow from a non-foreground process. Paint was restored
+# and visible but never became the foreground window, so window_control
+# focus returned ok:false forever and the desktop agent spent its whole
+# step budget retrying instead of drawing.
+
+
+def test_focus_script_attaches_thread_input_to_beat_foreground_lock(
+    companion, monkeypatch
+):
+    scripts = []
+    monkeypatch.setattr(
+        companion, "_run_hidden_powershell",
+        lambda script, **k: scripts.append(script)
+        or SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+    companion._focus_window("Untitled - Paint")
+
+    script = scripts[0]
+    assert "AttachThreadInput" in script
+    assert "GetWindowThreadProcessId" in script
+    assert "SetForegroundWindow" in script
+
+
+def test_focus_verification_retries_before_declaring_failure(
+    companion, monkeypatch
+):
+    monkeypatch.setattr(companion, "_focus_window", lambda _t: True)
+    monkeypatch.setattr(companion.time, "sleep", lambda _s: None)
+    titles = iter([None, "", "Untitled - Paint"])
+    monkeypatch.setattr(
+        companion, "act_active_window",
+        lambda _b: {"ok": True, "title": next(titles, "Untitled - Paint")},
+    )
+
+    result = companion.act_window_control(
+        {"action": "focus", "title": "Untitled - Paint"}
+    )
+
+    assert result["ok"] is True
+
+
+def test_focus_never_raises_when_powershell_times_out(companion, monkeypatch):
+    """A slow focus must degrade to ok:false, not a 500. Live: focusing a
+    non-foreground Electron window made the companion return an error
+    three times in a row instead of a clean failure."""
+    def boom(script, **kwargs):
+        raise companion.subprocess.TimeoutExpired(cmd="powershell", timeout=10)
+
+    monkeypatch.setattr(companion, "_run_hidden_powershell", boom)
+
+    assert companion._focus_window("Claude") is False
+
+    monkeypatch.setattr(companion.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(
+        companion, "act_active_window", lambda _b: {"ok": True, "title": "Other"}
+    )
+    result = companion.act_window_control({"action": "focus", "title": "Claude"})
+    assert result["ok"] is False
+
+
+def test_focus_uses_win32_only_and_not_the_blocking_com_call(
+    companion, monkeypatch
+):
+    """WScript.Shell AppActivate can block on Electron windows. The
+    AttachThreadInput + SetForegroundWindow path is what actually works."""
+    scripts = []
+    monkeypatch.setattr(
+        companion, "_run_hidden_powershell",
+        lambda script, **k: scripts.append(script)
+        or SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+    companion._focus_window("Claude")
+
+    assert "AppActivate" not in scripts[0]
+    assert "SetForegroundWindow" in scripts[0]
+
+
+def test_drag_synthesizes_real_motion_and_interpolates_the_path(
+    companion, monkeypatch
+):
+    """SetCursorPos teleports the cursor without emitting mouse-move
+    input, so Paint drew a dot instead of the stroke. Real MOUSEEVENTF
+    absolute moves plus interpolated points are what make a visible
+    line."""
+    scripts = []
+    monkeypatch.setattr(
+        companion, "_run_hidden_powershell",
+        lambda script, **k: scripts.append(script)
+        or SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+    result = companion.act_desktop_input({
+        "action": "drag",
+        "path": [[100, 100], [400, 100]],
+    })
+
+    assert result["ok"] is True
+    script = scripts[0]
+    # Absolute virtual-desktop motion events, not bare SetCursorPos.
+    assert "mouse_event" in script
+    # MOUSEEVENTF_MOVE|ABSOLUTE|VIRTUALDESK, emitted as decimal.
+    assert str(companion._MOUSE_MOVE_ABSOLUTE) in script
+    assert companion._MOUSE_MOVE_ABSOLUTE == 0x0001 | 0x8000 | 0x4000
+    # A 300px straight run must be broken into many samples.
+    assert script.count(";m ") + script.count("m 100 100;") >= 10
+    assert result["points"] >= 10

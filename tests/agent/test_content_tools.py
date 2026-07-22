@@ -1032,11 +1032,9 @@ def test_ms_paint_request_inserts_mandatory_recorded_desktop_scene():
         for beat in directed
         if beat.get("source") == "pc"
         and isinstance(beat.get("pc_action"), dict)
-        and beat["pc_action"].get("type") == "desktop_goal"
-        and "Microsoft Paint" in beat["pc_action"].get("goal", "")
+        and beat["pc_action"].get("type") == "paint_drawing"
     ]
     assert len(paint_beats) == 1
-    assert "do not open a terminal" in paint_beats[0]["pc_action"]["goal"]
 
 
 def test_save_and_delete_showcase_tools_are_verified(tmp_path):
@@ -1715,11 +1713,266 @@ def test_desktop_goal_beat_stops_recording_as_soon_as_the_goal_finishes(
     assert max(slept) < 30
 
 
-def test_paint_scene_budgets_enough_steps_to_actually_draw():
-    """Opening Paint, picking a tool and drawing strokes cannot happen in
-    the five steps the scene originally allowed."""
+def test_paint_scene_does_not_depend_on_the_vision_step_budget():
+    """The scene used to run the vision loop and needed a big step
+    budget. It is deterministic now, so there is no budget to exhaust."""
     from atlas_agent.content_tools import _required_pc_scene
 
     scene = _required_pc_scene("Record a Reel and include MS Paint.")
 
-    assert scene["pc_action"]["max_steps"] >= 10
+    assert "max_steps" not in scene["pc_action"]
+
+
+# --- Regression: "the same old HUD showcase, just different words" ----
+#
+# Live history showed 5 of the last 8 tours were HUD-panel-only, and the
+# rest differed only by which panels were focused. _tour_is_fresh
+# compared the candidate against recent_tours[-1] alone, so two
+# templates could alternate forever and still read as "fresh".
+
+
+def test_freshness_compares_against_every_recent_tour_not_just_the_last():
+    from atlas_agent.content_tools import _tour_is_fresh
+
+    template_a = [
+        {"source": "hud", "action": "focus_core"},
+        {"source": "hud", "action": "focus_system"},
+        {"source": "hud", "action": "focus_printer"},
+    ]
+    template_b = [
+        {"source": "hud", "action": "focus_terminal"},
+        {"source": "hud", "action": "focus_pc"},
+        {"source": "hud", "action": "focus_instagram"},
+    ]
+    recent = (
+        {"beats": template_a},
+        {"beats": template_b},
+    )
+
+    # Re-proposing template_a alternates with the *latest* tour but is a
+    # straight repeat of the one before it.
+    assert _tour_is_fresh(template_a, recent) is False
+
+
+def test_freshness_rejects_a_pure_reshuffle_of_the_same_panels():
+    from atlas_agent.content_tools import _tour_is_fresh
+
+    recent = ({"beats": [
+        {"source": "hud", "action": "focus_core"},
+        {"source": "hud", "action": "focus_system"},
+        {"source": "hud", "action": "focus_printer"},
+    ]},)
+    reshuffled = [
+        {"source": "hud", "action": "focus_printer"},
+        {"source": "hud", "action": "focus_core"},
+        {"source": "hud", "action": "focus_system"},
+    ]
+
+    assert _tour_is_fresh(reshuffled, recent) is False
+
+
+# --- The Paint beat must actually produce a drawing on camera ---------
+#
+# The vision-driven agent failed three live runs in a row: it opened
+# Paint, could not focus it, and burned its budget clicking the toolbar.
+# The scene the owner explicitly asked for is now deterministic so a
+# requested Paint Reel cannot ship without a visible drawing.
+
+
+def test_paint_scene_uses_the_deterministic_drawing_action():
+    from atlas_agent.content_tools import _required_pc_scene
+
+    scene = _required_pc_scene("Record a Reel and use MS Paint and draw on it.")
+
+    assert scene["pc_action"]["type"] == "paint_drawing"
+
+
+def test_prepare_paint_canvas_clears_and_reselects_the_pencil(monkeypatch):
+    from atlas_agent.content_tools import _prepare_paint_canvas
+    import atlas_agent.content_tools as content_tools_module
+
+    monkeypatch.setattr(content_tools_module.time, "sleep", lambda _s: None)
+    calls = []
+
+    class FakePC:
+        def execute(self, action, arguments=None, timeout_seconds=None):
+            calls.append((action, arguments))
+            if action == "active_apps":
+                return FakePCActionResult(
+                    True, {"ok": True, "windows": ["Untitled - Paint"]}
+                )
+            return FakePCActionResult(True, {"ok": True})
+
+    _prepare_paint_canvas(FakePC())
+
+    # Canvas is cleared with Ctrl+A then Delete rather than by closing
+    # Paint, which would raise a modal "save your work?" dialog that
+    # swallows every subsequent click.
+    keys = [
+        (arguments or {}).get("keys")
+        for action, arguments in calls
+        if action == "desktop_input"
+        and (arguments or {}).get("action") == "keys"
+    ]
+    assert "^a" in keys and "{DEL}" in keys
+
+    # Ctrl+A leaves the Selection tool active; without re-picking the
+    # pencil every later drag draws a selection box instead of ink.
+    clicks = [
+        (arguments or {})
+        for action, arguments in calls
+        if action == "desktop_input"
+        and (arguments or {}).get("action") == "click"
+    ]
+    assert clicks and (clicks[0]["x"], clicks[0]["y"]) == (
+        content_tools_module.PAINT_PENCIL_TOOL
+    )
+    assert any(a == "window_control" for a, _ in calls)
+
+
+def test_draw_in_paint_drags_every_stroke_of_the_chosen_subject(monkeypatch):
+    from atlas_agent.content_tools import _draw_in_paint, PAINT_DRAWINGS
+    import atlas_agent.content_tools as content_tools_module
+
+    monkeypatch.setattr(content_tools_module.time, "sleep", lambda _s: None)
+    calls = []
+
+    class FakePC:
+        def execute(self, action, arguments=None, timeout_seconds=None):
+            calls.append((action, arguments))
+            if action == "active_apps":
+                return FakePCActionResult(
+                    True, {"ok": True, "windows": ["Untitled - Paint"]}
+                )
+            return FakePCActionResult(True, {"ok": True})
+
+    _draw_in_paint(FakePC(), 20.0, "a sleepy cat")
+
+    drags = [
+        arguments for action, arguments in calls
+        if action == "desktop_input"
+        and (arguments or {}).get("action") == "drag"
+    ]
+    assert len(drags) == len(PAINT_DRAWINGS["a sleepy cat"])
+    assert all(len(d["path"]) >= 2 for d in drags)
+
+
+def test_paint_preparation_never_closes_paint(monkeypatch):
+    """Closing Paint with unsaved work opens a modal that blocks input."""
+    from atlas_agent.content_tools import _prepare_paint_canvas
+    import atlas_agent.content_tools as content_tools_module
+
+    monkeypatch.setattr(content_tools_module.time, "sleep", lambda _s: None)
+    calls = []
+
+    class FakePC:
+        def execute(self, action, arguments=None, timeout_seconds=None):
+            calls.append((action, arguments))
+            if action == "active_apps":
+                return FakePCActionResult(
+                    True, {"ok": True, "windows": ["Untitled - Paint"]}
+                )
+            return FakePCActionResult(True, {"ok": True})
+
+    _prepare_paint_canvas(FakePC())
+
+    assert not any(
+        (arguments or {}).get("action") == "close"
+        for action, arguments in calls
+        if action == "window_control"
+    )
+
+
+def test_a_model_written_paint_goal_is_replaced_by_the_reliable_scene():
+    """Live failure: the model wrote its own desktop_goal mentioning
+    Paint, which satisfied the guard, so the deterministic scene was
+    skipped. The vision agent then drew nothing and the narration
+    described a sketch that was never on screen."""
+    from atlas_agent.content_tools import _ensure_required_pc_scene
+
+    tour = (
+        {"narration": "Hook.", "action": "focus_core"},
+        {
+            "narration": "I'm sketching a two-box diagram in Paint.",
+            "source": "pc",
+            "action": "idle",
+            "pc_action": {
+                "type": "desktop_goal",
+                "goal": "Open Microsoft Paint and draw two labeled boxes",
+                "max_steps": 12,
+            },
+        },
+        {"narration": "What next?", "action": "idle"},
+    )
+
+    directed = _ensure_required_pc_scene(tour, "Record a Reel with MS Paint.")
+
+    paint = [
+        beat for beat in directed
+        if isinstance(beat.get("pc_action"), dict)
+        and beat["pc_action"].get("type") == "paint_drawing"
+    ]
+    assert len(paint) == 1
+    # No leftover vision-driven Paint goal whose narration promises a
+    # picture the deterministic scene will not draw.
+    assert not any(
+        isinstance(beat.get("pc_action"), dict)
+        and beat["pc_action"].get("type") == "desktop_goal"
+        for beat in directed
+    )
+
+
+def test_each_paint_reel_draws_a_different_subject():
+    from atlas_agent.content_tools import _required_pc_scene, PAINT_DRAWINGS
+
+    subjects = {
+        _required_pc_scene("include ms paint")["pc_action"].get("subject")
+        for _ in range(60)
+    }
+    assert len(subjects) > 1
+    assert subjects <= set(PAINT_DRAWINGS)
+
+
+def test_best_model_hook_replaces_the_weak_templated_one():
+    """A live Reel shipped a hook scored 62 while candidates scoring 90
+    sat unused: the candidate list was replaced but the chosen hook was
+    not, so captions and packaging kept the clunky template."""
+    from atlas_agent.content_tools import _apply_best_hook
+
+    plan = {"hook": "Can a Raspberry Pi really do the thing?", "hook_score": 62}
+    _apply_best_hook(plan, ["Pi coordinates. PC does the heavy lifting.",
+                            "A visual handoff between Pi and PC.",
+                            "Not equivalent - working together."])
+
+    assert plan["hook"] == "Pi coordinates. PC does the heavy lifting."
+    assert plan["hook_score"] == 90
+    assert [c["text"] for c in plan["hook_candidates"]][0] == plan["hook"]
+
+
+def test_apply_best_hook_keeps_the_original_when_nothing_better_arrives():
+    from atlas_agent.content_tools import _apply_best_hook
+
+    plan = {"hook": "Original hook.", "hook_score": 70}
+    _apply_best_hook(plan, [])
+
+    assert plan["hook"] == "Original hook."
+    assert plan["hook_score"] == 70
+
+
+def test_named_app_requests_other_than_paint_are_honoured():
+    """"...and include Notepad" must produce a real Notepad beat, the
+    same way a Paint request produces a real drawing."""
+    from atlas_agent.content_tools import _required_pc_scene
+
+    notepad = _required_pc_scene("record a video and include notepad")
+    assert notepad is not None
+    assert notepad["pc_action"]["type"] == "type_text"
+    assert notepad["pc_action"]["app"] == "notepad"
+    assert notepad["pc_action"]["text"].strip()
+
+    youtube = _required_pc_scene("record a video and pull up youtube")
+    assert youtube is not None
+    assert youtube["pc_action"]["type"] == "youtube_search"
+    assert youtube["pc_action"]["query"].strip()
+
+    assert _required_pc_scene("just record a normal video") is None

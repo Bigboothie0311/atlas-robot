@@ -202,3 +202,52 @@ def test_desktop_prompt_teaches_the_drag_contract():
     # keep reaching for the click it already knows.
     assert "click" in ACTION_ARGUMENT_GUIDE.lower()
     assert "drag" in ACTION_ARGUMENT_GUIDE.lower()
+
+
+def test_repeated_failing_action_is_called_out_to_the_model():
+    """Live failure: focus returned ok:false every time, and the agent
+    spent its entire step budget on focus -> list -> focus -> list
+    instead of drawing. A repeat of a known-failed action must be named
+    explicitly so the model changes approach."""
+    from atlas_agent.desktop_autonomy import DesktopAutonomyAgent
+
+    prompts = []
+
+    class Responses:
+        def create(self, **kwargs):
+            prompts.append(kwargs["input"][0]["content"][0]["text"])
+            return SimpleNamespace(
+                output=[SimpleNamespace(
+                    type="function_call",
+                    name="submit_desktop_step",
+                    arguments=json.dumps({
+                        "status": "act",
+                        "action": "window",
+                        "arguments_json": json.dumps(
+                            {"action": "focus", "title": "Untitled - Paint"}
+                        ),
+                        "summary": "focus paint",
+                    }),
+                )],
+                usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+            )
+
+    class FailingFocusPC:
+        def execute(self, action, arguments=None, timeout_seconds=None):
+            if action == "observe_desktop":
+                return SimpleNamespace(
+                    ok=True,
+                    data={"ok": True, "image_b64": "x", "active_window": "Other",
+                          "windows": ["Untitled - Paint"], "cursor": {}},
+                    error=None,
+                )
+            return SimpleNamespace(
+                ok=True, data={"ok": False, "action": "focus"}, error=None
+            )
+
+    DesktopAutonomyAgent(
+        SimpleNamespace(responses=Responses()), "gpt-test", FailingFocusPC()
+    ).run("Draw in Paint", max_steps=4)
+
+    later = " ".join(prompts[2:]).lower()
+    assert "already failed" in later or "repeat" in later, later

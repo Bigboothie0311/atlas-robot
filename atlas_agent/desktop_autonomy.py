@@ -109,6 +109,12 @@ class DesktopAutonomyAgent:
         started = time.monotonic()
         trace: list[dict[str, Any]] = []
         previous = "No actions have been taken yet."
+        # Signatures of actions that have already come back ok=false. A
+        # live Paint run spent its entire budget on focus -> list ->
+        # focus -> list because nothing told the model that the focus it
+        # kept retrying had already failed.
+        failed_signatures: dict[str, int] = {}
+        warning = ""
         input_tokens = 0
         output_tokens = 0
 
@@ -160,6 +166,7 @@ class DesktopAutonomyAgent:
                                     "is satisfied; no further action is allowed.\n"
                                     if position > max_steps else ""
                                 )
+                                + warning
                                 + f"ACTIVE WINDOW: {data.get('active_window')}\n"
                                 f"OPEN WINDOWS: {data.get('windows')}\n"
                                 f"CURSOR: {data.get('cursor')}\n"
@@ -260,6 +267,26 @@ class DesktopAutonomyAgent:
             }
             trace.append(trace_entry)
             previous = json.dumps(trace_entry, default=str)[:3000]
+
+            signature = json.dumps(
+                [action, arguments], default=str, sort_keys=True
+            )
+            if trace_entry["ok"]:
+                failed_signatures.pop(signature, None)
+                warning = ""
+            else:
+                failed_signatures[signature] = (
+                    failed_signatures.get(signature, 0) + 1
+                )
+                repeats = failed_signatures[signature]
+                warning = (
+                    f"WARNING: this exact action has ALREADY FAILED "
+                    f"{repeats} time(s). Do not repeat it. Achieve the goal "
+                    "another way -- for example, click directly on the "
+                    "target window instead of focusing it by title, or "
+                    "proceed with the work if the window is already "
+                    "visible in the screenshot.\n"
+                )
 
         return {
             "ok": False,

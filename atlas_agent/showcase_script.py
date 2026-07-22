@@ -49,6 +49,10 @@ PC_ACTION_TYPES: tuple[str, ...] = (
 MIN_BEATS = 3
 MAX_BEATS = 8
 MAX_PC_BEATS = 2
+# A desktop goal needs enough turns to open an app, focus it, and produce
+# a visibly finished result. The old ceiling of 5 could not, and exceeding
+# it rejected the entire tour into the canned HUD-only fallback.
+MAX_DESKTOP_GOAL_STEPS = 14
 MIN_REEL_SECONDS = 40
 MAX_REEL_SECONDS = 80
 
@@ -207,7 +211,7 @@ def _tour_schema(*, pc_demo_available: bool) -> dict[str, Any]:
                                 "max_steps": {
                                     "type": ["integer", "null"],
                                     "minimum": 1,
-                                    "maximum": 5,
+                                    "maximum": MAX_DESKTOP_GOAL_STEPS,
                                 },
                             },
                             "required": [
@@ -261,11 +265,12 @@ def _instructions(*, pc_demo_available: bool, context: dict[str, Any]) -> str:
         for beat in tour.get("beats", [])
     )
     pc_guidance = (
-        "You may include zero to "
+        "Include at least one and at most "
         f"{MAX_PC_BEATS} beats with source='pc'. Those record the "
-        "Windows gaming PC's screen instead of your own. A PC beat is "
-        "optional: use one only when it makes today's story visibly better, "
-        "never just to tick a capability box. You have broad creative freedom "
+        "Windows gaming PC's screen instead of your own. A tour built only "
+        "from HUD panels is the one thing you must not make: those all look "
+        "alike no matter how the wording changes, so at least one beat has to "
+        "show real work happening on the PC. You have broad creative freedom "
         "through desktop_goal: draw, arrange a clean visual, use an app, make "
         "a small artifact, inspect something, or perform another safe bounded "
         "task. Keep it polished on camera: use one main app or surface, focus "
@@ -276,7 +281,7 @@ def _instructions(*, pc_demo_available: bool, context: dict[str, Any]) -> str:
         "video, {type: 'type_text', app: 'notepad', text: ...} to "
         "open Notepad and type a message the viewer reads on screen "
         "while you narrate, or {type: 'desktop_goal', goal: ..., "
-        "max_steps: 1..5} to let you observe and freely operate the real "
+        "max_steps: 1.." + str(MAX_DESKTOP_GOAL_STEPS) + "} to let you observe and freely operate the real "
         "desktop with mouse, keyboard, windows, apps, processes, and "
         "non-system files. YouTube is one rare option, not the default. "
         + (
@@ -453,9 +458,13 @@ def _validate_pc_action(raw: Any) -> dict[str, Any] | None:
                 f"{privacy_reason}."
             )
         max_steps = raw.get("max_steps") or 3
-        if not isinstance(max_steps, int) or not 1 <= max_steps <= 5:
+        if (
+            not isinstance(max_steps, int)
+            or not 1 <= max_steps <= MAX_DESKTOP_GOAL_STEPS
+        ):
             raise ShowcaseScriptError(
-                "A generated desktop_goal max_steps was outside 1-5."
+                "A generated desktop_goal max_steps was outside "
+                f"1-{MAX_DESKTOP_GOAL_STEPS}."
             )
         return {
             "type": "desktop_goal",

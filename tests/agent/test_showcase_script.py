@@ -638,3 +638,37 @@ def test_narration_length_limit_is_declared_in_the_schema():
 
     assert narration.get("maxLength") == MAX_NARRATION_CHARS
     assert str(MAX_NARRATION_CHARS) in narration["description"]
+
+
+def test_desktop_goal_step_ceiling_matches_what_a_real_task_needs():
+    """A 5-step ceiling cannot open an app, focus it, and produce a
+    visible result. Worse, exceeding it rejected the whole tour and
+    silently fell back to the canned HUD-only one."""
+    from atlas_agent.showcase_script import _validate_beat
+
+    beat = _validate_beat(
+        {
+            "narration": "Watch me actually make something on the PC.",
+            "source": "pc",
+            "action": "idle",
+            "pc_action": {
+                "type": "desktop_goal",
+                "goal": "Draw a simple picture in Paint",
+                "max_steps": 12,
+            },
+        },
+        pc_demo_available=True,
+    )
+
+    assert beat["pc_action"]["max_steps"] == 12
+
+
+def test_pc_guidance_asks_for_a_real_pc_beat_instead_of_discouraging_one():
+    """Live history: 5 of the last 8 tours had no PC beat at all, so
+    every video was another walk around the same HUD panels."""
+    from atlas_agent.showcase_script import _instructions
+
+    text = _instructions(pc_demo_available=True, context={})
+
+    assert "optional" not in text.lower().split("pc beat")[1][:200]
+    assert "at least one" in text.lower()
