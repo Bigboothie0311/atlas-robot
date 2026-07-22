@@ -359,7 +359,10 @@ def _draw_in_paint(
 
     # Pace the strokes so the drawing is still visibly unfolding for the
     # whole beat rather than finishing in the first second.
-    pause = max(0.2, (clip_seconds - 4.0) / max(1, len(strokes)))
+    # Keep the gap between strokes small: the drags themselves consume
+    # most of the beat, and finishing early leaves the completed picture
+    # on screen for the rest of the clip instead of cutting mid-stroke.
+    pause = 0.3
     drawn = 0
     for stroke in strokes:
         result = pc_client.execute(
@@ -449,9 +452,14 @@ def _required_pc_scene(mission: str | None) -> dict[str, Any] | None:
 
     subject = random.choice(sorted(PAINT_DRAWINGS))
     return {
+        # Long enough that edit_reel's narration-length trim leaves the
+        # whole drawing on camera. A short line cut the clip after seven
+        # seconds and the picture was still half-finished when it ended.
         "narration": (
-            "You asked to watch me use Microsoft Paint, so here is my real "
-            f"desktop while I draw {subject}, stroke by stroke, right now."
+            "You asked to watch me use Microsoft Paint, so this is my real "
+            f"desktop, live: I am drawing {subject}, one stroke at a time, "
+            "with my own cursor. No timelapse, no cut, no imported image. "
+            "Watch it appear."
         ),
         "source": "pc",
         "action": "idle",

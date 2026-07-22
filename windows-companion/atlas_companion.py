@@ -128,8 +128,8 @@ _MOUSE_MOVE_ABSOLUTE = 0x0001 | 0x8000 | 0x4000
 # How finely a drag path is resampled, and how long each sample rests.
 # Dense samples are what make the stroke a line instead of a dot, and the
 # pause keeps it visible on a 30fps screen recording.
-_DRAG_SAMPLE_PIXELS = 12
-_DRAG_STEP_MILLISECONDS = 12
+_DRAG_SAMPLE_PIXELS = 16
+_DRAG_STEP_MILLISECONDS = 7
 
 _CONTROL_LOCK = threading.RLock()
 _CONTROL_ENABLED = True
