@@ -24,6 +24,7 @@ from atlas_agent.planning_service import (
 from atlas_agent.router import ToolRouter
 from atlas_agent.runtime import AgentRuntime
 from atlas_agent.sftp_client import SFTPClient
+from atlas_agent.showcase_script import generate_showcase_tour
 from atlas_agent.task_queue import TaskQueue
 from atlas_agent.tool_registry import ToolRegistry
 from atlas_agent.verifier import ResultVerifier
@@ -130,12 +131,20 @@ def build_pc_agent_runtime(
         ),
         mission_store_path=mission_store_path,
     )
+    def write_showcase_script(**kwargs: Any):
+        return generate_showcase_tour(
+            openai_client,
+            model,
+            **kwargs,
+        )
+
     register_content_tools(
         registry,
         verifier,
         staging_directory=staging_directory,
         pc_client=pc_client,
         sftp_client=sftp_client,
+        script_writer=write_showcase_script,
     )
 
     if recordings_remote_root is not None:

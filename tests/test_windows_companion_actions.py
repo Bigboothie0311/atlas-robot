@@ -517,3 +517,206 @@ def test_open_app_still_accepts_legacy_string_paths(companion, monkeypatch):
 
     assert result == {"ok": True, "opened": "legacy"}
     assert launched == [[r"C:\Legacy\app.exe"]]
+
+
+def _typing_companion(companion, monkeypatch, *, foreground="Untitled - Notepad"):
+    """Sets up a companion whose Notepad is already open and focused, and
+    records every PowerShell command type_text issues."""
+    companion.CONFIG = {
+        **companion.CONFIG,
+        "approved_apps": {
+            "notepad": {"path": "notepad.exe", "match": "Notepad"},
+        },
+    }
+    monkeypatch.setattr(
+        companion, "_open_window_titles", lambda: [foreground]
+    )
+    monkeypatch.setattr(companion, "_focus_window", lambda match: None)
+    monkeypatch.setattr(
+        companion, "act_active_window", lambda _body: {
+            "ok": True, "title": foreground,
+        }
+    )
+    monkeypatch.setattr(companion.time, "sleep", lambda _seconds: None)
+
+    commands = []
+    monkeypatch.setattr(
+        companion.subprocess,
+        "run",
+        lambda args, **kwargs: commands.append(args)
+        or SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+    return commands
+
+
+def test_type_text_sends_the_message_to_the_focused_app(
+    companion, monkeypatch
+):
+    commands = _typing_companion(companion, monkeypatch)
+
+    result = companion.act_type_text(
+        {"app": "notepad", "text": "hey viewers"}
+    )
+
+    assert result["ok"] is True
+    assert result["app"] == "notepad"
+    assert result["characters"] == len("hey viewers")
+    script = commands[-1][-1]
+    assert "SendKeys" in script
+    assert "hey vi" in script
+
+
+def test_type_text_refuses_an_app_outside_the_whitelist(
+    companion, monkeypatch
+):
+    _typing_companion(companion, monkeypatch)
+
+    result = companion.act_type_text({"app": "solitaire", "text": "hi"})
+
+    assert result["ok"] is False
+    assert "approved_apps" in result["error"]
+
+
+def test_type_text_refuses_when_another_window_stole_focus(
+    companion, monkeypatch
+):
+    """The whole safety story of type_text is that keystrokes only ever
+    land in the approved window that was asked for -- if focus moved
+    between the AppActivate and the send, it must refuse, not type the
+    message into whatever is actually there."""
+    commands = _typing_companion(
+        companion, monkeypatch, foreground="Online Banking - Chrome"
+    )
+    monkeypatch.setattr(
+        companion, "_open_window_titles", lambda: ["Untitled - Notepad"]
+    )
+
+    result = companion.act_type_text(
+        {"app": "notepad", "text": "hey viewers"}
+    )
+
+    assert result["ok"] is False
+    assert commands == []
+
+
+def test_type_text_refuses_a_privacy_blocked_foreground_window(
+    companion, monkeypatch
+):
+    commands = _typing_companion(
+        companion, monkeypatch, foreground="1Password - Notepad"
+    )
+
+    result = companion.act_type_text({"app": "notepad", "text": "hi"})
+
+    assert result["ok"] is False
+    assert "privacy-blocked" in result["error"]
+    assert commands == []
+
+
+def test_type_text_refuses_text_over_the_configured_limit(
+    companion, monkeypatch
+):
+    commands = _typing_companion(companion, monkeypatch)
+    companion.CONFIG = {**companion.CONFIG, "max_type_text_chars": 10}
+
+    result = companion.act_type_text(
+        {"app": "notepad", "text": "x" * 11}
+    )
+
+    assert result["ok"] is False
+    assert "10-character limit" in result["error"]
+    assert commands == []
+
+
+def test_type_text_refuses_control_characters(companion, monkeypatch):
+    commands = _typing_companion(companion, monkeypatch)
+
+    result = companion.act_type_text(
+        {"app": "notepad", "text": "hi\x1b[2Jthere"}
+    )
+
+    assert result["ok"] is False
+    assert "control characters" in result["error"]
+    assert commands == []
+
+
+def test_type_text_escapes_sendkeys_command_characters(
+    companion, monkeypatch
+):
+    """A bare '+' or '%' in the message is a SendKeys modifier, not a
+    character -- unescaped it would swallow the next keystroke instead
+    of appearing on screen."""
+    commands = _typing_companion(companion, monkeypatch)
+
+    result = companion.act_type_text(
+        {"app": "notepad", "text": "100% (up)"}
+    )
+
+    assert result["ok"] is True
+    script = commands[-1][-1]
+    assert "{%}" in script
+    assert "{(}" in script
+    assert "{)}" in script
+
+
+def test_type_text_turns_newlines_into_enter_keys(companion, monkeypatch):
+    commands = _typing_companion(companion, monkeypatch)
+
+    result = companion.act_type_text(
+        {"app": "notepad", "text": "line one\nline two"}
+    )
+
+    assert result["ok"] is True
+    assert "{ENTER}" in commands[-1][-1]
+
+
+def test_type_text_paces_keystrokes_to_the_requested_duration(
+    companion, monkeypatch
+):
+    """The Reel syncs typing to the beat's narration length, so a longer
+    duration must produce a slower per-chunk sleep."""
+    commands = _typing_companion(companion, monkeypatch)
+    text = "a message for the viewers at home"
+
+    companion.act_type_text(
+        {"app": "notepad", "text": text, "duration_seconds": 20}
+    )
+    slow = commands[-1][-1]
+
+    companion.act_type_text(
+        {"app": "notepad", "text": text, "duration_seconds": 5}
+    )
+    fast = commands[-1][-1]
+
+    def sleep_ms(script):
+        return int(script.split("Start-Sleep -Milliseconds ")[1].split()[0])
+
+    assert sleep_ms(slow) > sleep_ms(fast)
+
+
+def test_type_text_duration_is_capped_by_config(companion, monkeypatch):
+    commands = _typing_companion(companion, monkeypatch)
+    companion.CONFIG = {**companion.CONFIG, "max_type_text_seconds": 5}
+
+    companion.act_type_text(
+        {"app": "notepad", "text": "hello", "duration_seconds": 9999}
+    )
+
+    script = commands[-1][-1]
+    chunk_ms = int(script.split("Start-Sleep -Milliseconds ")[1].split()[0])
+    chunks = script.count("'") // 2
+    assert chunk_ms * chunks <= 5000
+
+
+def test_type_text_is_a_registered_action(companion):
+    assert companion.ACTIONS["type_text"] is companion.act_type_text
+
+
+def test_notepad_ships_in_the_default_approved_apps(companion):
+    """Unlike the other approved_apps entries, notepad's path needs no
+    per-PC editing -- the showcase Reel's "talk to viewers" beat depends
+    on it being there out of the box."""
+    entry = companion.DEFAULT_CONFIG["approved_apps"]["notepad"]
+
+    assert entry["path"] == "notepad.exe"
+    assert entry["match"] == "Notepad"

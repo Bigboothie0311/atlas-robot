@@ -25,13 +25,30 @@ messages, or delete anything outside the predefined maintenance scripts.
 | `stop_recording` | Stop the in-progress recording and verify the file landed on disk |
 | `list_recordings` | List every capture/recording's metadata, newest first |
 | `youtube_search` | Open a YouTube search (long-form only) full-screen in the browser |
+| `type_text` | Type a message into an approved app's window (Notepad by default) |
 | `shutdown_pc` | Schedule a shutdown 60 seconds out (`shutdown /s /t 60`) |
 | `cancel_pc_shutdown` | Abort a pending scheduled shutdown (`shutdown /a`) |
 | `empty_recycle_bin` | Empty the Recycle Bin |
 
-`capture_screenshot`, `capture_window`, and `start_recording` all refuse a
-privacy-blocked window (see `privacy_blocked_window_substrings` in the
-config — password managers, email, banking, etc. by default).
+`capture_screenshot`, `capture_window`, `start_recording`, and `type_text`
+all refuse a privacy-blocked window (see `privacy_blocked_window_substrings`
+in the config — password managers, email, banking, etc. by default).
+
+`type_text` is the only action that synthesizes keystrokes, so it is fenced
+in beyond that: the target must be a named entry in `approved_apps` (never
+an arbitrary window title), and after focusing it the service re-checks the
+**foreground** window title against that entry before sending a single key —
+if anything else grabbed focus in between, the keystrokes are refused rather
+than typed into whatever is actually there. Length and pacing are capped by
+`max_type_text_chars` and `max_type_text_seconds`. It exists so Atlas can
+open Notepad and write a message to viewers on camera during a self-showcase
+Reel; `duration_seconds` paces the typing to finish as that beat's narration
+does.
+
+Note that `approved_apps` in your `companion_config.json` **replaces** the
+default list rather than merging with it — if you want the Notepad typing
+beat, add a `notepad` entry (`{"path": "notepad.exe", "match": "Notepad"}`)
+to your own config.
 
 Every request needs the shared `X-Companion-Token`. No token, no action.
 

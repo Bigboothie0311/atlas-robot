@@ -19,13 +19,22 @@ stitched into the same final Reel by concat_clips(). This is not the
 old mistake: it's an explicitly-flagged, additional clip source
 alongside the HUD, not a replacement for it, and only available when
 this runtime was actually built with a PC connection (pc_client/
-sftp_client both non-None). It drives a varied "tour" of real states
-between narrated clips -- randomized phrasing, beat selection, and
-whether a PC demo beat appears at all, by default (see
-_build_default_tour()), so repeated recordings don't produce the same
-video twice -- or a fully custom script via 'beats' -- edits each with
-content_pipeline.edit_reel, and concatenates them. Nothing it does is
-public or destructive, so it stays at permission_level=0.
+sftp_client both non-None). A "source": "pc" beat can also type a
+message into Notepad on camera (pc_action type_text), which is how
+Atlas talks to viewers in text mid-video before hopping back to his own
+screen; the typing is paced to finish just as that beat's narration
+does. It edits each clip with content_pipeline.edit_reel and
+concatenates them. Nothing it does is public or destructive, so it
+stays at permission_level=0.
+
+With no explicit 'beats', the tour is now written fresh at record time
+by the model (atlas_agent/showcase_script.py) with Atlas's real live
+state as context -- what to talk about, how many beats, whether to hop
+to the PC and what to do there. The older canned tour
+(_build_default_tour()) is kept purely as the offline fallback for when
+scripting fails: it randomizes phrasing, beat selection, and order, but
+its *content* is a fixed handful of talking points, which is exactly
+why every early Reel felt like the same video.
 
 content.publish_to_instagram is the one tool in this codebase that uses
 PermissionLevel.CONFIRMATION_REQUIRED: it's the step the safety model
@@ -61,6 +70,12 @@ RECORDING_BUFFER_SECONDS = 3
 # Lets the HUD's own CSS transition/animation finish before frame
 # capture starts, so the clip doesn't open on a mid-transition frame.
 HUD_ACTION_SETTLE_SECONDS = 1.0
+
+# How far before the end of a "type_text" beat the typing should finish.
+# edit_reel trims each clip back to its narration length, so typing
+# paced to the full clip would get cut off mid-word; this lands the last
+# character just inside the final cut.
+TYPING_LEAD_SECONDS = 2.0
 
 # The default tour for "make a promo video of yourself" -- an honest,
 # narrated walk through real, currently-working features. Wesley's ask:
@@ -286,7 +301,11 @@ class PcDemoCaptureError(RuntimeError):
     pass
 
 
-def _perform_pc_action(pc_client: Any, pc_action: dict[str, Any] | None) -> None:
+def _perform_pc_action(
+    pc_client: Any,
+    pc_action: dict[str, Any] | None,
+    clip_seconds: float = 0.0,
+) -> None:
     """Drives one real action on the PC during a "source": "pc" beat --
     best-effort, like _apply_hud_action: an unrecognized or missing
     action just leaves the desktop showing whatever it already was
@@ -304,6 +323,24 @@ def _perform_pc_action(pc_client: Any, pc_action: dict[str, Any] | None) -> None
         elif action_type == "open_app":
             pc_client.execute(
                 "open_app", {"app": str(pc_action.get("app", ""))}
+            )
+        elif action_type == "type_text":
+            # duration_seconds paces the companion's keystrokes to
+            # finish around the same time the narration does, so the
+            # typing is still visibly in progress for the whole beat
+            # instead of completing in the first second and leaving a
+            # static shot -- and isn't still going when edit_reel trims
+            # the clip back to the narration's length. TYPING_LEAD_
+            # SECONDS lands the last character just before the cut.
+            pc_client.execute(
+                "type_text",
+                {
+                    "app": str(pc_action.get("app") or "notepad"),
+                    "text": str(pc_action.get("text", "")),
+                    "duration_seconds": max(
+                        1.0, clip_seconds - TYPING_LEAD_SECONDS
+                    ),
+                },
             )
     except Exception as error:
         print(
@@ -345,7 +382,7 @@ def _record_pc_demo_clip(
             f"{start_result.error or start_data.get('error')}"
         )
 
-    _perform_pc_action(pc_client, pc_action)
+    _perform_pc_action(pc_client, pc_action, clip_seconds)
     time.sleep(clip_seconds)
 
     stop_result = pc_client.execute("stop_recording")
@@ -371,6 +408,59 @@ def _record_pc_demo_clip(
     return str(download_result.local_path)
 
 
+def _live_context() -> dict[str, Any]:
+    """Real, current facts handed to the script writer so unscripted
+    commentary stays honest -- Atlas talks about what is actually on his
+    display and actually true of the machine right now, rather than
+    inventing a capability. Best-effort: a stats hiccup just means a
+    thinner brief, never a failed recording."""
+    context: dict[str, Any] = {}
+
+    try:
+        import hud_stats
+
+        context["hud"] = hud_stats.get_hud_stats()
+    except Exception as error:
+        context["hud_error"] = str(error)
+
+    try:
+        import diagnostics
+
+        context["diagnostics"] = diagnostics.run_structured_checks()
+    except Exception as error:
+        context["diagnostics_error"] = str(error)
+
+    return context
+
+
+def _resolve_tour(
+    script_writer: Any,
+    *,
+    pc_demo_available: bool,
+) -> tuple[dict[str, Any], ...]:
+    """Picks the tour for a default (no explicit 'beats') recording.
+
+    Prefers a freshly written, unscripted one; falls back to the canned
+    randomized tour if scripting is unavailable or returns anything this
+    runtime can't actually execute. The fallback is the point: a dead
+    API key or a budget stop should cost variety, not the video."""
+    if script_writer is None:
+        return _build_default_tour(pc_demo_available=pc_demo_available)
+
+    try:
+        return script_writer(
+            pc_demo_available=pc_demo_available,
+            context=_live_context(),
+        )
+    except Exception as error:
+        print(
+            "Unscripted showcase generation failed, falling back to "
+            f"the canned tour: {error}",
+            flush=True,
+        )
+        return _build_default_tour(pc_demo_available=pc_demo_available)
+
+
 def register_content_tools(
     registry: ToolRegistry,
     verifier: ResultVerifier,
@@ -378,6 +468,7 @@ def register_content_tools(
     staging_directory: str | Path,
     pc_client: Any = None,
     sftp_client: Any = None,
+    script_writer: Any = None,
 ) -> list[AtlasTool]:
     staging_path = Path(staging_directory)
 
@@ -403,10 +494,12 @@ def register_content_tools(
                 "default tour"
             )
 
-        tour = beats if beats else _build_default_tour(
+        is_custom_script = bool(beats)
+        tour = beats if beats else _resolve_tour(
+            script_writer,
             pc_demo_available=(
                 pc_client is not None and sftp_client is not None
-            )
+            ),
         )
         staging_path.mkdir(parents=True, exist_ok=True)
 
@@ -432,29 +525,54 @@ def register_content_tools(
                     + RECORDING_BUFFER_SECONDS
                 )
 
+                # A PC beat that can't be captured is fatal only when
+                # the caller explicitly asked for it: they named that
+                # clip, so silently substituting a different one would
+                # be lying about what got recorded. In a tour Atlas
+                # wrote himself, the PC hop is his own idea and the PC
+                # being asleep or unreachable shouldn't cost the whole
+                # video -- that beat just gets recorded on the HUD
+                # instead, narration and all.
+                record_on_hud = source != "pc"
+
                 if source == "pc":
                     if pc_client is None or sftp_client is None:
-                        Path(wav_path).unlink(missing_ok=True)
-                        return {
-                            "ok": False,
-                            "error": (
-                                "This beat asked for a PC demo clip, "
-                                "but this runtime wasn't configured "
-                                "with a PC connection."
-                            ),
-                        }
-                    try:
-                        raw_clip_path = _record_pc_demo_clip(
-                            pc_client,
-                            sftp_client,
-                            beat.get("pc_action"),
-                            clip_seconds,
-                            mission,
-                        )
-                    except PcDemoCaptureError as error:
-                        Path(wav_path).unlink(missing_ok=True)
-                        return {"ok": False, "error": str(error)}
-                else:
+                        if is_custom_script:
+                            Path(wav_path).unlink(missing_ok=True)
+                            return {
+                                "ok": False,
+                                "error": (
+                                    "This beat asked for a PC demo "
+                                    "clip, but this runtime wasn't "
+                                    "configured with a PC connection."
+                                ),
+                            }
+                        record_on_hud = True
+                    else:
+                        try:
+                            raw_clip_path = _record_pc_demo_clip(
+                                pc_client,
+                                sftp_client,
+                                beat.get("pc_action"),
+                                clip_seconds,
+                                mission,
+                            )
+                        except PcDemoCaptureError as error:
+                            if is_custom_script:
+                                Path(wav_path).unlink(missing_ok=True)
+                                return {
+                                    "ok": False,
+                                    "error": str(error),
+                                }
+
+                            print(
+                                "PC beat failed, recording it on the "
+                                f"HUD instead: {error}",
+                                flush=True,
+                            )
+                            record_on_hud = True
+
+                if record_on_hud:
                     _apply_hud_action(action)
                     time.sleep(HUD_ACTION_SETTLE_SECONDS)
 
@@ -562,14 +680,12 @@ def register_content_tools(
                 "opening an app) before hopping back -- then edits "
                 "everything into one 9:16 Reel, returning the finished "
                 "local video path and a draft caption. Does not "
-                "publish anything. With no 'beats', runs a varied "
-                "default tour -- weather radar and self-diagnostics "
-                "always show up on the HUD, phrasing, a few extra real "
-                "HUD feature beats (system status, printer, gaming PC), "
-                "and whether a PC demo beat appears at all are all "
-                "randomized, so repeated calls don't produce the same "
-                "script, beat mix, or clip twice in a row. Not a fixed "
-                "script either way: pass 'beats' with any narration "
+                "publish anything. With no 'beats', Atlas writes the "
+                "whole video fresh at record time -- what he talks "
+                "about, in what order, how many beats, and whether he "
+                "hops over to the PC and what he does there -- using "
+                "his real current state as context, so no two videos "
+                "are the same. Pass 'beats' with any narration "
                 "lines, in any order, any length, mixing HUD and PC "
                 "beats however wanted, to record a fully custom video "
                 "saying and showing whatever is asked for instead."
@@ -612,10 +728,15 @@ def register_content_tools(
                                 "beat fails with a clear error. "
                                 "'pc_action' optionally drives one real "
                                 "action on the PC during that clip: "
-                                "{type: 'youtube_search', query: str} "
-                                "or {type: 'open_app', app: str}; "
-                                "omitted or unrecognized just records "
-                                "the PC screen as-is."
+                                "{type: 'youtube_search', query: str}, "
+                                "{type: 'open_app', app: str}, or "
+                                "{type: 'type_text', app: 'notepad', "
+                                "text: str} to open Notepad and type a "
+                                "message on screen for viewers to read "
+                                "while narrating over it (paced to "
+                                "finish as the beat ends); omitted or "
+                                "unrecognized just records the PC "
+                                "screen as-is."
                             ),
                             "items": {
                                 "type": "object",
@@ -647,9 +768,15 @@ def register_content_tools(
                                                     "string", "null",
                                                 ],
                                             },
+                                            "text": {
+                                                "type": [
+                                                    "string", "null",
+                                                ],
+                                            },
                                         },
                                         "required": [
                                             "type", "query", "app",
+                                            "text",
                                         ],
                                         "additionalProperties": False,
                                     },

@@ -8,8 +8,12 @@ from atlas_agent.content_tools import (
     INTRO_LINES,
     MAX_EXTRA_BEATS,
     OUTRO_LINES,
+    TYPING_LEAD_SECONDS,
+    PcDemoCaptureError,
     WEATHER_LINES,
     _build_default_tour,
+    _perform_pc_action,
+    _resolve_tour,
     register_content_tools,
 )
 from atlas_agent.executor import ToolExecutor
@@ -594,3 +598,280 @@ def test_publish_to_instagram_surfaces_publish_error(tmp_path, monkeypatch):
     assert result.output["ok"] is False
     assert "instagram_content_publish" in result.output["error"]
     assert verification.verified is False
+
+
+def test_resolve_tour_prefers_the_unscripted_writer(tmp_path):
+    written = ({"narration": "Something new today.", "action": "idle"},)
+
+    tour = _resolve_tour(
+        lambda **kwargs: written, pc_demo_available=False
+    )
+
+    assert tour is written
+
+
+def test_resolve_tour_tells_the_writer_whether_a_pc_is_connected():
+    seen = {}
+
+    def writer(**kwargs):
+        seen.update(kwargs)
+        return ({"narration": "hi", "action": "idle"},)
+
+    _resolve_tour(writer, pc_demo_available=True)
+
+    assert seen["pc_demo_available"] is True
+    assert isinstance(seen["context"], dict)
+
+
+def test_resolve_tour_falls_back_to_the_canned_tour_on_failure(capsys):
+    """A dead API key or a budget stop should cost variety, not the
+    video -- the recording still has to produce something postable."""
+    def writer(**kwargs):
+        raise RuntimeError("no api key")
+
+    tour = _resolve_tour(writer, pc_demo_available=False)
+
+    actions = [beat["action"] for beat in tour]
+    assert "weather_open" in actions
+    assert "diagnostics" in actions
+    assert "no api key" in capsys.readouterr().out
+
+
+def test_resolve_tour_uses_the_canned_tour_when_no_writer_is_configured():
+    tour = _resolve_tour(None, pc_demo_available=False)
+
+    assert tour[0]["narration"] in INTRO_LINES
+
+
+def test_record_self_showcase_uses_the_unscripted_tour(tmp_path, monkeypatch):
+    """End to end: with a script writer configured, the recorded video's
+    narration comes from the writer, not the canned line pools."""
+    registry = ToolRegistry()
+    verifier = ResultVerifier()
+    register_content_tools(
+        registry,
+        verifier,
+        staging_directory=tmp_path,
+        script_writer=lambda **kwargs: (
+            {"narration": "Unscripted opener.", "action": "idle"},
+            {"narration": "Unscripted closer.", "action": "idle"},
+        ),
+    )
+
+    def fake_render(text):
+        wav_path = tmp_path / f"narration_{len(text)}_{text[:4]}.wav"
+        _write_wav(wav_path)
+        return str(wav_path)
+
+    monkeypatch.setattr(content_pipeline, "render_narration", fake_render)
+    monkeypatch.setattr(
+        hud_capture,
+        "record_hud_clip",
+        lambda seconds, out_path: Path(out_path).write_bytes(b"clip"),
+    )
+    monkeypatch.setattr(
+        content_pipeline,
+        "edit_reel",
+        lambda video, wav, out: Path(out).write_bytes(b"edited"),
+    )
+    monkeypatch.setattr(
+        content_pipeline,
+        "concat_clips",
+        lambda clips, out: Path(out).write_bytes(b"reel"),
+    )
+    monkeypatch.setattr(
+        content_pipeline, "build_caption", lambda text: text
+    )
+    monkeypatch.setattr("requests.post", lambda *args, **kwargs: None)
+
+    result = execute(
+        registry,
+        ToolCall(
+            tool_name="content.record_self_showcase",
+            arguments={"mission": None, "beats": None},
+        ),
+    )
+
+    assert result.output["ok"] is True
+    assert result.output["caption"] == (
+        "Unscripted opener. Unscripted closer."
+    )
+
+
+def test_perform_pc_action_types_text_paced_to_the_beat(monkeypatch):
+    """edit_reel trims each clip back to its narration length, so the
+    typing has to finish just inside that cut -- not after it, which
+    would show a half-typed message."""
+    calls = []
+    pc_client = mock.Mock()
+    pc_client.execute.side_effect = lambda action, body=None: calls.append(
+        (action, body)
+    )
+
+    _perform_pc_action(
+        pc_client,
+        {"type": "type_text", "app": "notepad", "text": "hi viewers"},
+        clip_seconds=12.0,
+    )
+
+    action, body = calls[0]
+    assert action == "type_text"
+    assert body["app"] == "notepad"
+    assert body["text"] == "hi viewers"
+    assert body["duration_seconds"] == 12.0 - TYPING_LEAD_SECONDS
+
+
+def test_perform_pc_action_keeps_a_positive_duration_on_short_beats(
+    monkeypatch,
+):
+    calls = []
+    pc_client = mock.Mock()
+    pc_client.execute.side_effect = lambda action, body=None: calls.append(
+        (action, body)
+    )
+
+    _perform_pc_action(
+        pc_client,
+        {"type": "type_text", "text": "hi"},
+        clip_seconds=0.5,
+    )
+
+    assert calls[0][1]["duration_seconds"] == 1.0
+    assert calls[0][1]["app"] == "notepad"
+
+
+def test_perform_pc_action_survives_a_failed_type_text(monkeypatch):
+    """Best-effort, same as every other beat action: a typing failure
+    means that beat shows an untyped Notepad, not an aborted recording."""
+    pc_client = mock.Mock()
+    pc_client.execute.side_effect = RuntimeError("companion offline")
+
+    _perform_pc_action(
+        pc_client, {"type": "type_text", "text": "hi"}, clip_seconds=5.0
+    )
+
+
+def _stub_pipeline(tmp_path, monkeypatch):
+    """Stubs out narration/capture/edit so a recording runs instantly."""
+    def fake_render(text):
+        wav_path = tmp_path / f"n_{abs(hash(text)) % 10000}.wav"
+        _write_wav(wav_path)
+        return str(wav_path)
+
+    monkeypatch.setattr(content_pipeline, "render_narration", fake_render)
+    monkeypatch.setattr(
+        content_pipeline,
+        "edit_reel",
+        lambda video, wav, out: Path(out).write_bytes(b"edited"),
+    )
+    monkeypatch.setattr(
+        content_pipeline,
+        "concat_clips",
+        lambda clips, out: Path(out).write_bytes(b"reel"),
+    )
+    monkeypatch.setattr(
+        content_pipeline, "build_caption", lambda text: text
+    )
+    monkeypatch.setattr("requests.post", lambda *args, **kwargs: None)
+
+
+def test_generated_pc_beat_falls_back_to_the_hud_when_the_pc_fails(
+    tmp_path, monkeypatch, capsys
+):
+    """Atlas choosing a PC hop himself must not mean an unreachable PC
+    costs the whole video -- that beat records on the HUD instead."""
+    registry = ToolRegistry()
+    verifier = ResultVerifier()
+    pc_client = mock.Mock()
+    sftp_client = mock.Mock()
+
+    register_content_tools(
+        registry,
+        verifier,
+        staging_directory=tmp_path,
+        pc_client=pc_client,
+        sftp_client=sftp_client,
+        script_writer=lambda **kwargs: (
+            {"narration": "On my screen.", "action": "idle"},
+            {
+                "narration": "Now the PC.",
+                "action": "idle",
+                "source": "pc",
+                "pc_action": {"type": "type_text", "text": "hi"},
+            },
+        ),
+    )
+    _stub_pipeline(tmp_path, monkeypatch)
+
+    hud_clips = []
+    monkeypatch.setattr(
+        hud_capture,
+        "record_hud_clip",
+        lambda seconds, out_path: hud_clips.append(out_path)
+        or Path(out_path).write_bytes(b"clip"),
+    )
+    monkeypatch.setattr(
+        "atlas_agent.content_tools._record_pc_demo_clip",
+        mock.Mock(side_effect=PcDemoCaptureError("PC is asleep")),
+    )
+
+    result = execute(
+        registry,
+        ToolCall(
+            tool_name="content.record_self_showcase",
+            arguments={"mission": None, "beats": None},
+        ),
+    )
+
+    assert result.output["ok"] is True
+    # Both beats made it into the reel, the failed one on the HUD.
+    assert len(hud_clips) == 2
+    assert "PC is asleep" in capsys.readouterr().out
+
+
+def test_explicit_pc_beat_still_fails_loudly_when_the_pc_fails(
+    tmp_path, monkeypatch
+):
+    """The opposite case: a caller who named a specific PC clip must be
+    told it didn't happen, not handed a HUD clip pretending it did."""
+    registry = ToolRegistry()
+    verifier = ResultVerifier()
+
+    register_content_tools(
+        registry,
+        verifier,
+        staging_directory=tmp_path,
+        pc_client=mock.Mock(),
+        sftp_client=mock.Mock(),
+    )
+    _stub_pipeline(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        hud_capture,
+        "record_hud_clip",
+        lambda seconds, out_path: Path(out_path).write_bytes(b"clip"),
+    )
+    monkeypatch.setattr(
+        "atlas_agent.content_tools._record_pc_demo_clip",
+        mock.Mock(side_effect=PcDemoCaptureError("PC is asleep")),
+    )
+
+    result = execute(
+        registry,
+        ToolCall(
+            tool_name="content.record_self_showcase",
+            arguments={
+                "mission": None,
+                "beats": [
+                    {
+                        "narration": "Watch the PC.",
+                        "action": "idle",
+                        "source": "pc",
+                        "pc_action": None,
+                    }
+                ],
+            },
+        ),
+    )
+
+    assert result.output["ok"] is False
+    assert "PC is asleep" in result.output["error"]

@@ -60,7 +60,20 @@ DEFAULT_CONFIG = {
             "path": r"C:\Program Files\Google\Chrome\Application\chrome.exe",
             "match": "Chrome",
         },
+        # Notepad is what type_text writes into for on-camera "talking
+        # to viewers" beats in the self-showcase Reel. It ships with
+        # Windows, so unlike the entries above this path needs no
+        # per-PC editing.
+        "notepad": {
+            "path": "notepad.exe",
+            "match": "Notepad",
+        },
     },
+    # Hard ceiling on how much text one type_text call may send, and
+    # how long it may spend pacing it out. Bounds the only action that
+    # synthesizes keystrokes.
+    "max_type_text_chars": 400,
+    "max_type_text_seconds": 120,
     # name -> full command list. ONLY these predefined scripts can run.
     "maintenance_scripts": {
         "clear_temp": ["cmd", "/c", "del", "/q", "/s", r"%TEMP%\*"],
@@ -702,6 +715,171 @@ def act_focus_or_open_app(body):
     return {"ok": True, "app": name, "action": "launched"}
 
 
+# SendKeys treats these as command characters; a literal one has to be
+# wrapped in braces or it silently becomes a modifier/grouping token
+# (e.g. a bare "+" means Shift and would swallow the next character).
+_SENDKEYS_LITERALS = set("+^%~(){}[]")
+
+# Chunk size for paced typing. Small enough that a chunk boundary looks
+# like a natural pause on camera rather than a stall, large enough that
+# a 400-character message doesn't need hundreds of PowerShell calls.
+_TYPE_TEXT_CHUNK_CHARS = 6
+_TYPE_TEXT_DEFAULT_CHUNK_MS = 90
+
+
+def _escape_for_sendkeys(text):
+    """Escapes one line of user text into a SendKeys-safe literal."""
+    return "".join(
+        "{" + char + "}" if char in _SENDKEYS_LITERALS else char
+        for char in text
+    )
+
+
+def _sendkeys_chunks(text):
+    """Splits text into SendKeys-escaped chunks, with newlines emitted
+    as their own {ENTER} chunk so multi-line messages keep their
+    line breaks."""
+    chunks = []
+
+    for index, line in enumerate(text.split("\n")):
+        if index:
+            chunks.append("{ENTER}")
+
+        escaped = _escape_for_sendkeys(line)
+        for start in range(0, len(escaped), _TYPE_TEXT_CHUNK_CHARS):
+            piece = escaped[start:start + _TYPE_TEXT_CHUNK_CHARS]
+            if piece:
+                chunks.append(piece)
+
+    return chunks
+
+
+def act_type_text(body):
+    """Types a message into an approved app's window — the on-camera
+    "Atlas talks to viewers in Notepad" beat of the self-showcase Reel.
+
+    This is the only action that synthesizes keystrokes, so it is
+    deliberately fenced in:
+
+      * the target must be a named entry in approved_apps, same
+        whitelist open_app/focus_or_open_app use — never an arbitrary
+        window title,
+      * the window is focused first and then the FOREGROUND title is
+        re-checked against that entry's match before a single key is
+        sent, so if anything else stole focus in between the keystrokes
+        are refused rather than typed into whatever is actually there,
+      * a privacy-blocked foreground title refuses outright, same as
+        screenshots and recordings,
+      * length and duration are capped by config.
+
+    Optional 'duration_seconds' paces the typing to finish at roughly
+    that mark, which is what the Reel uses to sync typing to the length
+    of the beat's narration.
+    """
+    name = str(body.get("app", "")).strip()
+    text = str(body.get("text", ""))
+
+    approved = CONFIG.get("approved_apps", {})
+    entry = approved.get(name)
+
+    if not isinstance(entry, dict):
+        return {"ok": False, "error": f"app '{name}' not in approved_apps"}
+
+    if not text.strip():
+        return {"ok": False, "error": "text is empty"}
+
+    max_chars = int(CONFIG.get("max_type_text_chars", 400))
+    if len(text) > max_chars:
+        return {
+            "ok": False,
+            "error": f"text is longer than the {max_chars}-character limit",
+        }
+
+    # Newline is the only control character a typed message may carry;
+    # anything else is a terminal/agent escape sequence, not a message.
+    if any(char < " " and char != "\n" for char in text):
+        return {
+            "ok": False,
+            "error": "text contains control characters",
+        }
+
+    match = str(entry.get("match") or name)
+
+    # Focus (opening it first if it isn't running) so the keystrokes
+    # have somewhere legitimate to land.
+    focus_result = act_focus_or_open_app({"app": name})
+    if not focus_result.get("ok"):
+        return focus_result
+
+    if focus_result.get("action") == "launched":
+        # A freshly launched app needs a moment before its window can
+        # take focus, let alone keyboard input.
+        time.sleep(2)
+        _focus_window(match)
+
+    time.sleep(0.5)
+
+    foreground = act_active_window({}).get("title")
+
+    if _window_is_privacy_blocked(foreground):
+        return {
+            "ok": False,
+            "error": f"privacy-blocked window is focused: {foreground}",
+        }
+
+    if not foreground or match.lower() not in foreground.lower():
+        return {
+            "ok": False,
+            "error": (
+                f"'{name}' is not the foreground window "
+                f"(focused: {foreground or 'nothing'}); refused to type"
+            ),
+        }
+
+    chunks = _sendkeys_chunks(text)
+
+    if not chunks:
+        return {"ok": False, "error": "text produced no typeable content"}
+
+    max_seconds = int(CONFIG.get("max_type_text_seconds", 120))
+    requested_seconds = float(body.get("duration_seconds") or 0)
+
+    if requested_seconds > 0:
+        pace_seconds = min(requested_seconds, max_seconds)
+        chunk_ms = max(10, int(1000 * pace_seconds / len(chunks)))
+    else:
+        chunk_ms = _TYPE_TEXT_DEFAULT_CHUNK_MS
+
+    quoted = ",".join(
+        "'" + chunk.replace("'", "''") + "'" for chunk in chunks
+    )
+    script = (
+        "$w = New-Object -ComObject WScript.Shell; "
+        f"foreach ($c in @({quoted})) {{ "
+        "$w.SendKeys($c); "
+        f"Start-Sleep -Milliseconds {chunk_ms} }}"
+    )
+
+    # Bounded by chunk pacing above, plus headroom for PowerShell's own
+    # startup so a slow COM handshake doesn't look like a hang.
+    timeout_seconds = min(max_seconds, chunk_ms * len(chunks) / 1000) + 20
+
+    try:
+        subprocess.run(
+            ["powershell", "-NoProfile", "-Command", script],
+            capture_output=True, text=True, timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "typing timed out"}
+
+    return {
+        "ok": True,
+        "app": name,
+        "window": foreground,
+        "characters": len(text),
+    }
+
+
 def act_active_window(_body):
     """Returns the current foreground window's title via the Win32 API
     — the single focused window, distinct from act_active_apps' full
@@ -773,6 +951,7 @@ ACTIONS = {
     "system_info": act_system_info,
     "open_app": act_open_app,
     "focus_or_open_app": act_focus_or_open_app,
+    "type_text": act_type_text,
     "active_window": act_active_window,
     "capture_screenshot": act_capture_screenshot,
     "capture_window": act_capture_window,
