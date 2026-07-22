@@ -109,6 +109,8 @@ function addCosmeticTerminalLine() {
 
 let lastQaTimestamp = 0;
 let lastGalleryKey = null;
+let lastReelPreviewToken = null;
+let reelPreviewTimer = null;
 
 function pad(value) {
   return String(value).padStart(2, "0");
@@ -507,6 +509,58 @@ function applyAlertAndScreen(state) {
   }
 }
 
+const SHOWCASE_FOCUS_CLASSES = [
+  "showcase-focus-system",
+  "showcase-focus-printer",
+  "showcase-focus-pc",
+  "showcase-focus-instagram",
+  "showcase-focus-terminal",
+  "showcase-focus-core",
+];
+
+function applyShowcaseFocus(state) {
+  document.body.classList.remove(...SHOWCASE_FOCUS_CLASSES);
+  if (state.showcase_focus) {
+    document.body.classList.add(`showcase-focus-${state.showcase_focus}`);
+  }
+}
+
+function applyReelPreview(state) {
+  const preview = state.reel_preview || {};
+  const overlay = document.getElementById("reel-preview-overlay");
+  const video = document.getElementById("reel-preview-video");
+
+  if (!preview.active || !preview.token) {
+    overlay.classList.remove("visible");
+    if (reelPreviewTimer !== null) {
+      clearTimeout(reelPreviewTimer);
+      reelPreviewTimer = null;
+    }
+    if (lastReelPreviewToken !== null) {
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
+      lastReelPreviewToken = null;
+    }
+    return;
+  }
+
+  overlay.classList.add("visible");
+  if (preview.token === lastReelPreviewToken) return;
+
+  lastReelPreviewToken = preview.token;
+  video.muted = true; // HDMI audio is played by the hub in exact sync.
+  video.src = `/hud/reel_preview/media?token=${encodeURIComponent(preview.token)}`;
+  video.load();
+
+  const delayMs = Math.max(0, Number(preview.starts_at || 0) * 1000 - Date.now());
+  reelPreviewTimer = setTimeout(() => {
+    reelPreviewTimer = null;
+    video.currentTime = 0;
+    video.play().catch((error) => console.error("Reel preview failed", error));
+  }, delayMs);
+}
+
 // Contextual HUD layouts. Most panels are shared; layout classes let CSS
 // promote the security/diagnostics/alert views over the idle default.
 const LAYOUT_CLASSES = [
@@ -648,12 +702,14 @@ async function pollState() {
     applyTimers(state);
     applyAuth(state);
     applyAlertAndScreen(state);
+    applyShowcaseFocus(state);
     applyGreetingAndThreat(state);
     applyLayout(state);
     applyImage(state);
     applyGallery(state);
     applyQaLog(state);
     applyWeatherOverlay(state);
+    applyReelPreview(state);
   } catch (error) {
     console.error("state poll failed", error);
   }
@@ -744,6 +800,13 @@ async function pollStats() {
     const instagramFollowers = document.getElementById("instagram-followers");
     const instagramAccount = document.getElementById("instagram-account");
     const instagramLatest = document.getElementById("instagram-latest");
+    const instagramGrowth = document.getElementById("instagram-growth");
+    const growth = stats.growth || {};
+    const nextGrowthPlan = growth.next_plan || {};
+    const missionCount = growth.viewer_missions_waiting || 0;
+    instagramGrowth.textContent = nextGrowthPlan.series
+      ? `NEXT · ${nextGrowthPlan.series.toUpperCase()} · ${missionCount} VIEWER MISSIONS`
+      : `GROWTH MEMORY · ${missionCount} VIEWER MISSIONS`;
 
     if (instagram.available) {
       instagramPanel.classList.remove("offline");

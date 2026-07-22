@@ -10,6 +10,7 @@ import cost_ledger
 import instagram_stats
 import pc_stats
 import storage_monitor
+from atlas_growth import GrowthStore
 
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 
@@ -265,6 +266,19 @@ def get_uptime_seconds():
     return round(time.time() - psutil.boot_time())
 
 
+def get_growth_stats():
+    """Read only local aggregate data; never expose comments on the HUD."""
+    try:
+        return GrowthStore().report()
+    except (OSError, ValueError):
+        return {
+            "drafts": 0,
+            "published": 0,
+            "viewer_missions_waiting": 0,
+            "next_plan": None,
+        }
+
+
 def get_hud_stats():
     return {
         "weather": get_weather_stats(),
@@ -279,5 +293,6 @@ def get_hud_stats():
         # The HUD polls every five seconds; never put a social API call on
         # that rendering path. robot_hub keeps this snapshot warm.
         "instagram": instagram_stats.get_stats(allow_fetch=False),
+        "growth": get_growth_stats(),
         "station_name": robot_config.get("STATION_NAME", "STATION-01"),
     }

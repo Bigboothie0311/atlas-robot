@@ -81,6 +81,11 @@ class VoiceRuntimeOwner:
                 confirm=confirm
             )
 
+    def resolve_pending(self, *, action: str) -> AgentVoiceResponse:
+        with self._lock:
+            controller = self._get_controller_locked()
+            return controller.resolve_pending(action=action)
+
     def close(self) -> None:
         with self._lock:
             if self._closed:

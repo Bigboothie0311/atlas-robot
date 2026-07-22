@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 from atlas_agent.voice_controller import (
@@ -34,10 +35,22 @@ class FakeRuntime:
 
 
 class FakeBundle:
-    def __init__(self, runtime, *, executor=None, verifier=None):
+    def __init__(
+        self,
+        runtime,
+        *,
+        executor=None,
+        verifier=None,
+        event_bus=None,
+        staging_directory=None,
+        registry=None,
+    ):
         self.runtime = runtime
         self.executor = executor
         self.verifier = verifier
+        self.event_bus = event_bus
+        self.staging_directory = staging_directory
+        self.registry = registry
         self.closed = False
 
     def close(self):
@@ -67,6 +80,14 @@ class FakeVerifier:
     def verify(self, call, result):
         self.calls.append((call, result))
         return self.verification
+
+
+class FakeEventBus:
+    def __init__(self):
+        self.events = []
+
+    def publish(self, event):
+        self.events.append(event)
 
 
 def make_result(
@@ -1463,20 +1484,39 @@ def test_record_self_showcase_summary_names_file_and_invites_posting():
             ),
         ),
     )
-    controller = AgentVoiceController(
-        FakeBundle(FakeRuntime(result=make_result(workflow)))
-    )
+    event_bus = FakeEventBus()
+    controller = AgentVoiceController(FakeBundle(
+        FakeRuntime(result=make_result(workflow)),
+        event_bus=event_bus,
+    ))
 
     response = controller.handle_goal("Record a promo Reel.")
 
     assert response.ok is True
     assert "reel_123.mp4" in response.text
-    assert (
-        "/home/atlas/atlas-staging/incoming/reel_123.mp4"
-        in response.text
-    )
     assert "A quick look at my HUD." in response.text
     assert "post it" in response.text.lower()
+    assert "save it" in response.text.lower()
+    assert "played it back" in response.text.lower()
+    assert response.workflow_status == "waiting_confirmation"
+    assert response.confirmation_call_id is not None
+    assert controller._pending is not None
+    assert controller._pending.call.tool_name == (
+        "content.publish_to_instagram"
+    )
+    assert controller._pending.call.arguments == {
+        "video_path": (
+            "/home/atlas/atlas-staging/incoming/reel_123.mp4"
+        ),
+        "caption": "A quick look at my HUD.\n\n#atlas",
+        "mission": None,
+    }
+    assert event_bus.events[-1].name == (
+        "agent.workflow.waiting_confirmation"
+    )
+    assert event_bus.events[-1].data["confirmation_call_id"] == (
+        response.confirmation_call_id
+    )
 
 
 def test_record_self_showcase_summary_reports_real_failure():
@@ -1501,6 +1541,232 @@ def test_record_self_showcase_summary_reports_real_failure():
     response = controller.handle_goal("Record a promo Reel.")
 
     assert "no HUD frames were captured" in response.text
+    assert controller._pending is None
+
+
+def test_successful_reel_is_reported_when_a_diagnostic_step_runs_after_it():
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.COMPLETED,
+        confirmation_call_id=None,
+        error=None,
+        steps=(
+            make_step(
+                position=1,
+                call_id="record-call",
+                tool_name="content.record_self_showcase",
+                output={
+                    "ok": True,
+                    "video_path": "/tmp/reel_real.mp4",
+                    "caption": "A real finished Reel.",
+                    "mission": "Show a real capability.",
+                },
+            ),
+            make_step(
+                position=2,
+                call_id="diagnostic-call",
+                tool_name="pi.run_diagnostics",
+                output={"count": 1, "findings": [{"ok": True}]},
+            ),
+        ),
+    )
+    controller = AgentVoiceController(
+        FakeBundle(FakeRuntime(result=make_result(workflow)))
+    )
+
+    response = controller.handle_goal("Record a Reel and check yourself.")
+
+    assert "reel_real.mp4" in response.text
+    assert "recorded and edited" in response.text
+    assert "diagnostic checks" not in response.text
+    assert response.workflow_status == "waiting_confirmation"
+    assert controller._pending.call.arguments["video_path"] == (
+        "/tmp/reel_real.mp4"
+    )
+
+
+def test_youtube_showcase_creates_private_upload_confirmation():
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.COMPLETED,
+        confirmation_call_id=None,
+        error=None,
+        steps=(
+            make_step(
+                tool_name="content.record_self_showcase",
+                output={
+                    "ok": True,
+                    "video_path": (
+                        "/home/atlas/atlas-staging/incoming/reel_yt.mp4"
+                    ),
+                    "caption": "Atlas runs on a Pi.\n\n#raspberrypi",
+                    "mission": "Show Atlas on YouTube",
+                    "growth_plan": {"title": "Atlas Raspberry Pi Build"},
+                },
+            ),
+        ),
+    )
+    controller = AgentVoiceController(FakeBundle(
+        FakeRuntime(result=make_result(workflow)),
+        registry={"content.publish_to_youtube": object()},
+    ))
+
+    response = controller.handle_goal("Record a YouTube Short about Atlas.")
+
+    assert response.workflow_status == "waiting_confirmation"
+    assert "privately to YouTube" in response.text
+    assert controller._pending.call.tool_name == "content.publish_to_youtube"
+    assert controller._pending.call.arguments == {
+        "video_path": (
+            "/home/atlas/atlas-staging/incoming/reel_yt.mp4"
+        ),
+        "title": "Atlas Raspberry Pi Build",
+        "description": "Atlas runs on a Pi.\n\n#raspberrypi",
+        "privacy_status": "private",
+        "mission": "Show Atlas on YouTube",
+    }
+
+
+def test_facebook_showcase_creates_page_publish_confirmation():
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.COMPLETED,
+        confirmation_call_id=None,
+        error=None,
+        steps=(
+            make_step(
+                tool_name="content.record_self_showcase",
+                output={
+                    "ok": True,
+                    "video_path": (
+                        "/home/atlas/atlas-staging/incoming/reel_fb.mp4"
+                    ),
+                    "caption": "Atlas runs on a Pi.\n\n#raspberrypi",
+                    "mission": "Show Atlas on Facebook",
+                    "growth_plan": {"title": "Atlas Raspberry Pi Build"},
+                },
+            ),
+        ),
+    )
+    controller = AgentVoiceController(FakeBundle(
+        FakeRuntime(result=make_result(workflow)),
+        registry={"content.publish_to_facebook": object()},
+    ))
+
+    response = controller.handle_goal("Record a Facebook Reel about Atlas.")
+
+    assert response.workflow_status == "waiting_confirmation"
+    assert "ATLAS AI Robot Facebook Page" in response.text
+    assert controller._pending.call.tool_name == "content.publish_to_facebook"
+    assert controller._pending.call.arguments == {
+        "video_path": (
+            "/home/atlas/atlas-staging/incoming/reel_fb.mp4"
+        ),
+        "title": "Atlas Raspberry Pi Build",
+        "description": "Atlas runs on a Pi.\n\n#raspberrypi",
+        "mission": "Show Atlas on Facebook",
+    }
+
+
+def test_showcase_creates_one_combined_social_confirmation():
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.COMPLETED,
+        confirmation_call_id=None,
+        error=None,
+        steps=(
+            make_step(
+                tool_name="content.record_self_showcase",
+                output={
+                    "ok": True,
+                    "video_path": (
+                        "/home/atlas/atlas-staging/incoming/reel_social.mp4"
+                    ),
+                    "caption": "Atlas runs on a Pi.\n\n#raspberrypi",
+                    "mission": "Show Atlas everywhere",
+                    "growth_plan": {"title": "Atlas Raspberry Pi Build"},
+                    "desktop_export": {
+                        "ok": True,
+                        "folder": r"C:\Users\wesle\Desktop\Atlas Reels\reel_social",
+                    },
+                },
+            ),
+        ),
+    )
+    controller = AgentVoiceController(FakeBundle(
+        FakeRuntime(result=make_result(workflow)),
+        registry={"content.publish_to_socials": object()},
+    ))
+
+    response = controller.handle_goal("Record a Reel about Atlas.")
+
+    assert response.workflow_status == "waiting_confirmation"
+    assert "both Instagram" in response.text
+    assert "Facebook" in response.text
+    assert "Windows Desktop" in response.text
+    assert controller._pending.call.tool_name == "content.publish_to_socials"
+    assert controller._pending.call.arguments == {
+        "video_path": (
+            "/home/atlas/atlas-staging/incoming/reel_social.mp4"
+        ),
+        "title": "Atlas Raspberry Pi Build",
+        "caption": "Atlas runs on a Pi.\n\n#raspberrypi",
+        "mission": "Show Atlas everywhere",
+    }
+
+
+def test_publish_to_facebook_summary_returns_permalink():
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.COMPLETED,
+        confirmation_call_id=None,
+        error=None,
+        steps=(
+            make_step(
+                tool_name="content.publish_to_facebook",
+                output={
+                    "ok": True,
+                    "video_id": "facebook-video-1",
+                    "permalink": (
+                        "https://www.facebook.com/reel/facebook-video-1"
+                    ),
+                    "publishing_status": "complete",
+                },
+            ),
+        ),
+    )
+    controller = AgentVoiceController(
+        FakeBundle(FakeRuntime(result=make_result(workflow)))
+    )
+
+    response = controller.handle_goal("Publish the Facebook Reel.")
+
+    assert response.ok is True
+    assert "ATLAS AI Robot Facebook Page" in response.text
+    assert "facebook-video-1" in response.text
+
+
+def test_publish_to_youtube_summary_reports_actual_privacy():
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.COMPLETED,
+        confirmation_call_id=None,
+        error=None,
+        steps=(
+            make_step(
+                tool_name="content.publish_to_youtube",
+                output={
+                    "ok": True,
+                    "video_id": "video-1",
+                    "permalink": "https://www.youtube.com/shorts/video-1",
+                    "privacy_status": "private",
+                },
+            ),
+        ),
+    )
+    controller = AgentVoiceController(
+        FakeBundle(FakeRuntime(result=make_result(workflow)))
+    )
+
+    response = controller.handle_goal("Upload the Short to YouTube.")
+
+    assert response.ok is True
+    assert "as private" in response.text
+    assert "https://www.youtube.com/shorts/video-1" in response.text
 
 
 def test_publish_to_instagram_summary_success():
@@ -1635,6 +1901,7 @@ def test_confirm_pending_false_cancels_without_executing():
     assert response.ok is True
     assert executor.calls == []
     assert controller._pending is None
+    assert "saved" in response.text.lower()
     assert "won't" in response.text.lower()
 
 
@@ -1694,6 +1961,136 @@ def test_confirm_pending_true_executes_and_reports_success():
         "https://www.instagram.com/reel/XYZ/" in response.text
     )
     assert controller._pending is None
+
+
+def test_post_first_verifies_desktop_copy_then_publishes(tmp_path):
+    video = tmp_path / "reel_789.mp4"
+    video.write_bytes(b"video")
+    pending_call = SimpleNamespace(
+        tool_name="content.publish_to_instagram",
+        arguments={
+            "video_path": str(video),
+            "caption": "hi",
+            "mission": "show MS Paint",
+        },
+        call_id="call-publish",
+    )
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.WAITING_CONFIRMATION,
+        confirmation_call_id="call-publish",
+        error=None,
+        steps=(SimpleNamespace(
+            position=1,
+            description="publish the Reel to Instagram.",
+            call=pending_call,
+            result=None,
+            verification=None,
+            error=None,
+        ),),
+    )
+
+    class Executor:
+        def __init__(self):
+            self.calls = []
+
+        def execute(self, call, *, confirmed):
+            self.calls.append((call.tool_name, confirmed))
+            if call.tool_name == "content.save_showcase":
+                return SimpleNamespace(output={
+                    "ok": True,
+                    "folder": r"C:\Users\wesle\Desktop\Atlas Reels\reel_789",
+                    "file_count": 1,
+                })
+            return SimpleNamespace(output={
+                "ok": True,
+                "permalink": "https://www.instagram.com/reel/XYZ/",
+            })
+
+    class Verifier:
+        def verify(self, call, result):
+            return SimpleNamespace(verified=True, reason="Verified.")
+
+    executor = Executor()
+    controller = AgentVoiceController(FakeBundle(
+        FakeRuntime(result=make_result(workflow)),
+        executor=executor,
+        verifier=Verifier(),
+        registry={
+            "content.publish_to_instagram": object(),
+            "content.save_showcase": object(),
+            "content.delete_showcase": object(),
+        },
+    ))
+    controller.handle_goal("Record a Reel showing MS Paint.")
+
+    response = controller.resolve_pending(action="post")
+
+    assert response.ok is True
+    assert executor.calls == [
+        ("content.save_showcase", False),
+        ("content.publish_to_instagram", True),
+    ]
+
+
+def test_delete_choice_runs_exact_reel_delete_without_posting(tmp_path):
+    video = tmp_path / "reel_790.mp4"
+    video.write_bytes(b"video")
+    pending_call = SimpleNamespace(
+        tool_name="content.publish_to_instagram",
+        arguments={
+            "video_path": str(video),
+            "caption": "hi",
+            "mission": None,
+        },
+        call_id="call-publish",
+    )
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.WAITING_CONFIRMATION,
+        confirmation_call_id="call-publish",
+        error=None,
+        steps=(SimpleNamespace(
+            position=1,
+            description="publish the Reel to Instagram.",
+            call=pending_call,
+            result=None,
+            verification=None,
+            error=None,
+        ),),
+    )
+
+    class Executor:
+        def __init__(self):
+            self.calls = []
+
+        def execute(self, call, *, confirmed):
+            self.calls.append((call.tool_name, confirmed))
+            video.unlink()
+            return SimpleNamespace(output={
+                "ok": True,
+                "video_path": str(video),
+                "deleted": [str(video)],
+            })
+
+    executor = Executor()
+    verifier = FakeVerifier(SimpleNamespace(verified=True, reason="Deleted."))
+    controller = AgentVoiceController(FakeBundle(
+        FakeRuntime(result=make_result(workflow)),
+        executor=executor,
+        verifier=verifier,
+        registry={
+            "content.publish_to_instagram": object(),
+            "content.save_showcase": object(),
+            "content.delete_showcase": object(),
+        },
+    ))
+    controller.handle_goal("Record a Reel.")
+
+    response = controller.resolve_pending(action="delete")
+
+    assert response.ok is True
+    assert executor.calls == [("content.delete_showcase", True)]
+    assert "not posted" in response.text.lower()
+    assert not video.exists()
 
 
 def test_confirm_pending_true_reports_real_verification_failure():
@@ -1828,3 +2225,257 @@ def test_new_goal_clears_stale_pending_confirmation():
     controller.handle_goal("What's the weather?")
 
     assert controller._pending is None
+
+
+def test_publish_confirmation_survives_controller_restart(tmp_path):
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    video_path = staging / "reel_123.mp4"
+    video_path.write_bytes(b"test-video")
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.COMPLETED,
+        confirmation_call_id=None,
+        error=None,
+        steps=(
+            make_step(
+                tool_name="content.record_self_showcase",
+                output={
+                    "ok": True,
+                    "video_path": str(video_path),
+                    "caption": "A durable caption.",
+                    "mission": "Show the real system.",
+                },
+            ),
+        ),
+    )
+    first = AgentVoiceController(FakeBundle(
+        FakeRuntime(result=make_result(workflow)),
+        staging_directory=staging,
+    ))
+
+    first.handle_goal("Record a Reel.")
+
+    pending_path = staging / "pending_instagram_publish.json"
+    assert pending_path.is_file()
+    confirmed_result = SimpleNamespace(
+        output={
+            "ok": True,
+            "permalink": "https://www.instagram.com/reel/DURABLE/",
+            "media_id": "durable-1",
+        },
+        error=None,
+    )
+    executor = FakeExecutor(result=confirmed_result)
+    verifier = FakeVerifier(
+        SimpleNamespace(verified=True, reason="Verified live.")
+    )
+    restarted = AgentVoiceController(FakeBundle(
+        FakeRuntime(),
+        executor=executor,
+        verifier=verifier,
+        staging_directory=staging,
+    ))
+
+    response = restarted.confirm_pending(confirm=True)
+
+    assert response.ok is True
+    assert executor.calls[0][0].arguments == {
+        "video_path": str(video_path.resolve()),
+        "caption": "A durable caption.",
+        "mission": "Show the real system.",
+    }
+    assert executor.calls[0][1] is True
+    assert not pending_path.exists()
+
+
+def test_youtube_confirmation_survives_controller_restart(tmp_path):
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    video_path = staging / "reel_youtube.mp4"
+    video_path.write_bytes(b"test-video")
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.COMPLETED,
+        confirmation_call_id=None,
+        error=None,
+        steps=(
+            make_step(
+                tool_name="content.record_self_showcase",
+                output={
+                    "ok": True,
+                    "video_path": str(video_path),
+                    "caption": "A durable YouTube description.",
+                    "mission": "Show the real system.",
+                    "growth_plan": {"title": "Durable Atlas Short"},
+                },
+            ),
+        ),
+    )
+    first = AgentVoiceController(FakeBundle(
+        FakeRuntime(result=make_result(workflow)),
+        staging_directory=staging,
+        registry={"content.publish_to_youtube": object()},
+    ))
+
+    first.handle_goal("Record a YouTube Short.")
+
+    pending_path = staging / "pending_instagram_publish.json"
+    payload = json.loads(pending_path.read_text())
+    assert payload["tool_name"] == "content.publish_to_youtube"
+    executor = FakeExecutor(result=SimpleNamespace(
+        output={
+            "ok": True,
+            "video_id": "video-1",
+            "permalink": "https://www.youtube.com/shorts/video-1",
+            "privacy_status": "private",
+        },
+        error=None,
+    ))
+    verifier = FakeVerifier(
+        SimpleNamespace(verified=True, reason="Verified live.")
+    )
+    restarted = AgentVoiceController(FakeBundle(
+        FakeRuntime(),
+        executor=executor,
+        verifier=verifier,
+        staging_directory=staging,
+        registry={"content.publish_to_youtube": object()},
+    ))
+
+    response = restarted.confirm_pending(confirm=True)
+
+    assert response.ok is True
+    call, confirmed = executor.calls[0]
+    assert confirmed is True
+    assert call.tool_name == "content.publish_to_youtube"
+    assert call.arguments["video_path"] == str(video_path.resolve())
+    assert call.arguments["privacy_status"] == "private"
+    assert not pending_path.exists()
+
+
+def test_facebook_confirmation_survives_controller_restart(tmp_path):
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    video_path = staging / "reel_facebook.mp4"
+    video_path.write_bytes(b"test-video")
+    workflow = SimpleNamespace(
+        status=WorkflowStatus.COMPLETED,
+        confirmation_call_id=None,
+        error=None,
+        steps=(
+            make_step(
+                tool_name="content.record_self_showcase",
+                output={
+                    "ok": True,
+                    "video_path": str(video_path),
+                    "caption": "A durable Facebook description.",
+                    "mission": "Show the real system.",
+                    "growth_plan": {"title": "Durable Atlas Reel"},
+                },
+            ),
+        ),
+    )
+    registry = {"content.publish_to_facebook": object()}
+    first = AgentVoiceController(FakeBundle(
+        FakeRuntime(result=make_result(workflow)),
+        staging_directory=staging,
+        registry=registry,
+    ))
+
+    first.handle_goal("Record a Facebook Reel.")
+
+    pending_path = staging / "pending_instagram_publish.json"
+    payload = json.loads(pending_path.read_text())
+    assert payload["tool_name"] == "content.publish_to_facebook"
+    executor = FakeExecutor(result=SimpleNamespace(
+        output={
+            "ok": True,
+            "video_id": "facebook-video-1",
+            "permalink": "https://www.facebook.com/reel/facebook-video-1",
+            "publishing_status": "complete",
+        },
+        error=None,
+    ))
+    verifier = FakeVerifier(
+        SimpleNamespace(verified=True, reason="Verified live.")
+    )
+    restarted = AgentVoiceController(FakeBundle(
+        FakeRuntime(),
+        executor=executor,
+        verifier=verifier,
+        staging_directory=staging,
+        registry=registry,
+    ))
+
+    response = restarted.confirm_pending(confirm=True)
+
+    assert response.ok is True
+    call, confirmed = executor.calls[0]
+    assert confirmed is True
+    assert call.tool_name == "content.publish_to_facebook"
+    assert call.arguments["video_path"] == str(video_path.resolve())
+    assert not pending_path.exists()
+
+
+def test_explicit_publish_recovers_newest_legacy_reel_manifest(tmp_path):
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    video_path = staging / "reel_456.mp4"
+    video_path.write_bytes(b"test-video")
+    manifest = staging / "reel_456.mp4.json"
+    manifest.write_text(json.dumps({
+        "video_path": str(video_path),
+        "caption": "Recovered caption.",
+        "mission": None,
+    }))
+    confirmed_result = SimpleNamespace(
+        output={
+            "ok": True,
+            "permalink": "https://www.instagram.com/reel/RECOVERED/",
+            "media_id": "recovered-1",
+        },
+        error=None,
+    )
+    executor = FakeExecutor(result=confirmed_result)
+    verifier = FakeVerifier(
+        SimpleNamespace(verified=True, reason="Verified live.")
+    )
+    controller = AgentVoiceController(FakeBundle(
+        FakeRuntime(),
+        executor=executor,
+        verifier=verifier,
+        staging_directory=staging,
+    ))
+
+    response = controller.confirm_pending(confirm=True)
+
+    assert response.ok is True
+    assert executor.calls[0][0].arguments["video_path"] == str(
+        video_path.resolve()
+    )
+    assert executor.calls[0][0].arguments["caption"] == (
+        "Recovered caption."
+    )
+
+
+def test_legacy_reel_recovery_rejects_path_outside_staging(tmp_path):
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    outside_video = tmp_path / "outside.mp4"
+    outside_video.write_bytes(b"test-video")
+    (staging / "reel_999.mp4.json").write_text(json.dumps({
+        "video_path": str(outside_video),
+        "caption": "Do not publish this.",
+        "mission": None,
+    }))
+    executor = FakeExecutor()
+    controller = AgentVoiceController(FakeBundle(
+        FakeRuntime(),
+        executor=executor,
+        staging_directory=staging,
+    ))
+
+    response = controller.confirm_pending(confirm=True)
+
+    assert response.ok is False
+    assert executor.calls == []
+    assert "nothing waiting" in response.text.lower()

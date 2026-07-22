@@ -12,12 +12,23 @@ Install: see windows-companion/README.md. Configure paths/token in
 companion_config.json next to this file.
 """
 import base64
+import hashlib
 import json
+import os
+import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+# The companion itself runs under pythonw, but Windows can still create a
+# visible console for CLI children. Besides looking rough on camera, a
+# transient PowerShell/ffmpeg window can steal foreground focus between the
+# approved-app check and a safe typing action. This flag is zero on non-
+# Windows hosts so the module remains unit-testable on the Pi.
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 CONFIG_PATH = Path(__file__).with_name("companion_config.json")
 
@@ -83,6 +94,14 @@ DEFAULT_CONFIG = {
     # the Pi only ever stages footage briefly before uploading it here.
     "recordings_folder": r"C:\Users\YOU\Videos\AtlasRecordings",
     "max_recording_seconds": 900,
+    # General desktop autonomy runs in the currently logged-in interactive
+    # session under this companion's existing *non-elevated* Windows token.
+    # Windows/UAC remains the system-modification boundary.
+    "general_control_enabled": True,
+    "general_control_max_text_chars": 5000,
+    "general_control_max_drag_points": 200,
+    "general_control_max_file_bytes": 10 * 1024 * 1024,
+    "general_control_process_timeout_seconds": 120,
     # Case-insensitive substrings of a window title that refuse a
     # screenshot/window-capture/recording of that window outright.
     "privacy_blocked_window_substrings": [
@@ -90,6 +109,14 @@ DEFAULT_CONFIG = {
         "gmail", "bank", "venmo", "paypal", "signal",
         "private browsing", "incognito",
     ],
+}
+
+_CONTROL_LOCK = threading.RLock()
+_CONTROL_ENABLED = True
+_CONTROL_STOP_REASON = None
+_GENERAL_CONTROL_ACTIONS = {
+    "observe_desktop", "desktop_input", "window_control", "clipboard",
+    "file_operation", "launch_process", "process_control",
 }
 
 
@@ -157,6 +184,159 @@ def _window_is_privacy_blocked(title):
     blocked = CONFIG.get("privacy_blocked_window_substrings", [])
     lowered = title.lower()
     return any(term.lower() in lowered for term in blocked)
+
+
+def _control_audit_path():
+    return CONFIG_PATH.with_name("control_audit.jsonl")
+
+
+def _audit_control(action, request, result):
+    """Append local evidence without duplicating screenshots or file contents."""
+    def summarize(value):
+        if isinstance(value, dict):
+            cleaned = {}
+            for key, item in value.items():
+                if key in {"image_b64", "data_b64"} and isinstance(item, str):
+                    cleaned[key] = {
+                        "omitted": True,
+                        "encoded_chars": len(item),
+                        "sha256": hashlib.sha256(item.encode("ascii")).hexdigest(),
+                    }
+                elif key in {"text", "content"} and isinstance(item, str):
+                    cleaned[key] = {
+                        "omitted": True,
+                        "characters": len(item),
+                        "sha256": hashlib.sha256(item.encode("utf-8")).hexdigest(),
+                    }
+                else:
+                    cleaned[key] = summarize(item)
+            return cleaned
+        if isinstance(value, list):
+            return [summarize(item) for item in value]
+        return value
+
+    entry = {
+        "ts": _utc_now_iso(),
+        "action": action,
+        "request": summarize(request),
+        "result": summarize(result),
+    }
+    try:
+        with _control_audit_path().open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, default=str) + "\n")
+    except OSError:
+        pass
+
+
+def _control_status_payload():
+    with _CONTROL_LOCK:
+        return {
+            "ok": True,
+            "enabled": bool(_CONTROL_ENABLED),
+            "stop_reason": _CONTROL_STOP_REASON,
+            "emergency_hotkey": "Ctrl+Alt+F12",
+        }
+
+
+def _require_control_enabled():
+    with _CONTROL_LOCK:
+        if not _CONTROL_ENABLED:
+            return {
+                "ok": False,
+                "error": (
+                    "general desktop control is emergency-stopped"
+                    + (
+                        f": {_CONTROL_STOP_REASON}"
+                        if _CONTROL_STOP_REASON else ""
+                    )
+                ),
+            }
+    return None
+
+
+def _set_control_enabled(enabled, reason=None):
+    global _CONTROL_ENABLED, _CONTROL_STOP_REASON
+    with _CONTROL_LOCK:
+        _CONTROL_ENABLED = bool(enabled)
+        _CONTROL_STOP_REASON = None if enabled else str(reason or "stopped")
+    return _control_status_payload()
+
+
+def _protected_windows_roots():
+    system_drive = os.environ.get("SystemDrive", "C:")
+    windows = os.environ.get("SystemRoot", rf"{system_drive}\Windows")
+    program_files = os.environ.get(
+        "ProgramFiles", rf"{system_drive}\Program Files"
+    )
+    program_files_x86 = os.environ.get(
+        "ProgramFiles(x86)", rf"{system_drive}\Program Files (x86)"
+    )
+    program_data = os.environ.get(
+        "ProgramData", rf"{system_drive}\ProgramData"
+    )
+    return (
+        windows,
+        program_files,
+        program_files_x86,
+        program_data,
+        rf"{system_drive}\Recovery",
+        rf"{system_drive}\System Volume Information",
+        str(CONFIG_PATH),
+    )
+
+
+def _canonical_path(value):
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("path must be a non-empty string")
+    expanded = os.path.expandvars(os.path.expanduser(value.strip()))
+    return os.path.realpath(os.path.abspath(expanded))
+
+
+def _path_is_protected(value):
+    candidate = os.path.normcase(_canonical_path(value))
+    for root in _protected_windows_roots():
+        normalized_root = os.path.normcase(_canonical_path(root))
+        try:
+            if os.path.commonpath((candidate, normalized_root)) == normalized_root:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def _allowed_user_path(value):
+    path = _canonical_path(value)
+    if _path_is_protected(path):
+        raise PermissionError("protected system/control path is excluded")
+    return Path(path)
+
+
+def _run_hidden_powershell(script, *, timeout=20):
+    return subprocess.run(
+        ["powershell", "-NoProfile", "-Command", script],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        creationflags=_NO_WINDOW,
+    )
+
+
+def _emergency_hotkey_monitor():
+    """Independent local Ctrl+Alt+F12 latch; no network request needed."""
+    if os.name != "nt":
+        return
+    import ctypes
+
+    user32 = ctypes.windll.user32
+    was_down = False
+    while True:
+        down = bool(user32.GetAsyncKeyState(0x11) & 0x8000) and bool(
+            user32.GetAsyncKeyState(0x12) & 0x8000
+        ) and bool(user32.GetAsyncKeyState(0x7B) & 0x8000)
+        if down and not was_down:
+            _set_control_enabled(False, "physical emergency hotkey")
+        was_down = down
+        time.sleep(0.05)
 
 
 def _pid_running(pid):
@@ -256,7 +436,7 @@ def act_volume(body):
         + "".join(f"$w.SendKeys([char]{ {'up':175,'down':174,'mute':173}[action] }); "
                   for _ in range(max(1, min(repeat, 10))))
     )
-    subprocess.run(["powershell", "-NoProfile", "-Command", script], timeout=10)
+    _run_hidden_powershell(script, timeout=10)
     return {"ok": True, "action": action}
 
 
@@ -271,7 +451,7 @@ def act_media(body):
         "$w = New-Object -ComObject WScript.Shell; "
         f"$w.SendKeys([char]{codes[action]})"
     )
-    subprocess.run(["powershell", "-NoProfile", "-Command", script], timeout=10)
+    _run_hidden_powershell(script, timeout=10)
     return {"ok": True, "action": action}
 
 
@@ -299,7 +479,7 @@ def act_screenshot(_body):
         "$g.CopyFromScreen($b.Location,[Drawing.Point]::Empty,$b.Size); "
         f"$bmp.Save('{out}')"
     )
-    subprocess.run(["powershell", "-NoProfile", "-Command", script], timeout=20)
+    _run_hidden_powershell(script, timeout=20)
     data = Path(out).read_bytes()
     Path(out).unlink(missing_ok=True)
     return {"ok": True, "image_b64": base64.b64encode(data).decode()}
@@ -333,7 +513,7 @@ def act_capture_screenshot(body):
         "$g.CopyFromScreen($b.Location,[Drawing.Point]::Empty,$b.Size); "
         f"$bmp.Save('{escaped_out}')"
     )
-    subprocess.run(["powershell", "-NoProfile", "-Command", script], timeout=20)
+    _run_hidden_powershell(script, timeout=20)
 
     if not out.is_file():
         return {"ok": False, "error": "screenshot capture failed"}
@@ -401,10 +581,7 @@ def act_capture_window(body):
         f"$bmp.Save('{escaped_out}'); "
         "Write-Output $p.MainWindowTitle"
     )
-    result = subprocess.run(
-        ["powershell", "-NoProfile", "-Command", script],
-        capture_output=True, text=True, timeout=20,
-    )
+    result = _run_hidden_powershell(script, timeout=20)
     matched_title = result.stdout.strip()
 
     if matched_title == "NO_MATCH" or not matched_title:
@@ -484,7 +661,7 @@ def act_start_recording(body):
     ])
 
     try:
-        process = subprocess.Popen(command)
+        process = subprocess.Popen(command, creationflags=_NO_WINDOW)
     except OSError as error:
         return {"ok": False, "error": f"could not start ffmpeg: {error}"}
 
@@ -517,7 +694,11 @@ def act_stop_recording(_body):
 
     if pid and _pid_running(pid):
         try:
-            subprocess.run(["taskkill", "/PID", str(pid)], timeout=10)
+            subprocess.run(
+                ["taskkill", "/PID", str(pid)],
+                timeout=10,
+                creationflags=_NO_WINDOW,
+            )
         except (OSError, subprocess.SubprocessError):
             pass
         time.sleep(1)  # let ffmpeg flush the moov atom cleanly
@@ -567,8 +748,7 @@ def act_active_apps(_body):
         "Get-Process | Where-Object {$_.MainWindowTitle} | "
         "Select-Object -ExpandProperty MainWindowTitle"
     )
-    result = subprocess.run(["powershell", "-NoProfile", "-Command", script],
-                            capture_output=True, text=True, timeout=15)
+    result = _run_hidden_powershell(script, timeout=15)
     titles = [t.strip() for t in result.stdout.splitlines() if t.strip()]
     return {"ok": True, "windows": titles}
 
@@ -600,7 +780,44 @@ def act_youtube_search(body):
     encoded = urllib.parse.quote(query)
     url = f"https://www.youtube.com/results?search_query={encoded}&sp=EgIYAg%3D%3D"
 
-    subprocess.Popen(["cmd", "/c", "start", "", url], shell=False)
+    if body.get("private"):
+        # Reel capture must not expose the owner's signed-in YouTube profile,
+        # recommendations, notifications, or browsing history. Launch a new
+        # InPrivate/Incognito window from a known browser binary and fail
+        # closed if neither browser is available.
+        escaped_url = url.replace("'", "''")
+        private_script = (
+            "$edge=@("
+            "\"${env:ProgramFiles(x86)}\\Microsoft\\Edge\\Application\\msedge.exe\","
+            "\"$env:ProgramFiles\\Microsoft\\Edge\\Application\\msedge.exe\""
+            ")|Where-Object{Test-Path $_}|Select-Object -First 1;"
+            "$chrome=@("
+            "\"$env:ProgramFiles\\Google\\Chrome\\Application\\chrome.exe\","
+            "\"$env:LocalAppData\\Google\\Chrome\\Application\\chrome.exe\""
+            ")|Where-Object{Test-Path $_}|Select-Object -First 1;"
+            "if($edge){"
+            f"Start-Process $edge -ArgumentList '--inprivate','--new-window','{escaped_url}';"
+            "exit 0};"
+            "if($chrome){"
+            f"Start-Process $chrome -ArgumentList '--incognito','--new-window','{escaped_url}';"
+            "exit 0};"
+            "[Console]::Error.Write('No private-capable browser found.');exit 1"
+        )
+        launch = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", private_script],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            creationflags=_NO_WINDOW,
+        )
+        if launch.returncode != 0:
+            return {
+                "ok": False,
+                "error": launch.stderr.strip()
+                or "could not open a private browser window",
+            }
+    else:
+        subprocess.Popen(["cmd", "/c", "start", "", url], shell=False)
 
     if body.get("fullscreen", True):
         # Give the browser a moment to open, then send F11.
@@ -609,7 +826,10 @@ def act_youtube_search(body):
             "$w = New-Object -ComObject WScript.Shell; "
             "$w.SendKeys('{F11}')"
         )
-        subprocess.Popen(["powershell", "-NoProfile", "-Command", script])
+        subprocess.Popen(
+            ["powershell", "-NoProfile", "-Command", script],
+            creationflags=_NO_WINDOW,
+        )
 
     return {"ok": True, "query": query}
 
@@ -642,10 +862,7 @@ def act_cancel_pc_shutdown(_body):
 
 def act_empty_recycle_bin(_body):
     script = "Clear-RecycleBin -Force -ErrorAction SilentlyContinue"
-    subprocess.run(
-        ["powershell", "-NoProfile", "-Command", script],
-        capture_output=True, text=True, timeout=20,
-    )
+    _run_hidden_powershell(script, timeout=20)
     return {"ok": True}
 
 
@@ -669,8 +886,13 @@ def _open_window_titles():
         "Get-Process | Where-Object {$_.MainWindowTitle} | "
         "Select-Object -ExpandProperty MainWindowTitle"
     )
-    result = subprocess.run(["powershell", "-NoProfile", "-Command", script],
-                            capture_output=True, text=True, timeout=15)
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-Command", script],
+        capture_output=True,
+        text=True,
+        timeout=15,
+        creationflags=_NO_WINDOW,
+    )
     return [t.strip() for t in result.stdout.splitlines() if t.strip()]
 
 
@@ -680,10 +902,18 @@ def _focus_window(match_substring):
     coordinates, no clicks, nothing arbitrary."""
     escaped = match_substring.replace("'", "''")
     script = (
-        "$w = New-Object -ComObject WScript.Shell; "
-        f"$w.AppActivate('{escaped}')"
+        "Add-Type @'\nusing System;using System.Runtime.InteropServices;"
+        "public class AtlasFocus{[DllImport(\"user32.dll\")]public static extern bool ShowWindow(IntPtr h,int n);"
+        "[DllImport(\"user32.dll\")]public static extern bool SetForegroundWindow(IntPtr h);}\n'@;"
+        "$p=Get-Process|Where-Object{$_.MainWindowTitle -like "
+        f"'*{escaped}*'}}|Select-Object -First 1;"
+        "if(-not $p){exit 3};"
+        "[AtlasFocus]::ShowWindow($p.MainWindowHandle,9)|Out-Null;"
+        "$w=New-Object -ComObject WScript.Shell;"
+        f"$w.AppActivate('{escaped}')|Out-Null;"
+        "[AtlasFocus]::SetForegroundWindow($p.MainWindowHandle)|Out-Null"
     )
-    subprocess.run(["powershell", "-NoProfile", "-Command", script], timeout=10)
+    return _run_hidden_powershell(script, timeout=10).returncode == 0
 
 
 def act_focus_or_open_app(body):
@@ -805,21 +1035,21 @@ def act_type_text(body):
 
     match = str(entry.get("match") or name)
 
-    # Focus (opening it first if it isn't running) so the keystrokes
-    # have somewhere legitimate to land.
-    focus_result = act_focus_or_open_app({"app": name})
-    if not focus_result.get("ok"):
-        return focus_result
-
-    if focus_result.get("action") == "launched":
-        # A freshly launched app needs a moment before its window can
-        # take focus, let alone keyboard input.
-        time.sleep(2)
+    foreground = None
+    for attempt in range(1, 4):
+        # Windows can reject one SetForegroundWindow call while another
+        # process is finishing startup. Re-open/refocus and verify up to
+        # three times before the safety gate refuses to type.
+        focus_result = act_focus_or_open_app({"app": name})
+        if not focus_result.get("ok"):
+            return focus_result
+        if focus_result.get("action") == "launched":
+            time.sleep(2)
         _focus_window(match)
-
-    time.sleep(0.5)
-
-    foreground = act_active_window({}).get("title")
+        time.sleep(0.5 * attempt)
+        foreground = act_active_window({}).get("title")
+        if foreground and match.lower() in foreground.lower():
+            break
 
     if _window_is_privacy_blocked(foreground):
         return {
@@ -867,7 +1097,10 @@ def act_type_text(body):
     try:
         subprocess.run(
             ["powershell", "-NoProfile", "-Command", script],
-            capture_output=True, text=True, timeout=timeout_seconds,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            creationflags=_NO_WINDOW,
         )
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": "typing timed out"}
@@ -901,10 +1134,407 @@ def act_active_window(_body):
         "[AtlasForeground]::GetWindowText($h, $sb, 256) | Out-Null; "
         "Write-Output $sb.ToString()"
     )
-    result = subprocess.run(["powershell", "-NoProfile", "-Command", script],
-                            capture_output=True, text=True, timeout=15)
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-Command", script],
+        capture_output=True,
+        text=True,
+        timeout=15,
+        creationflags=_NO_WINDOW,
+    )
     title = result.stdout.strip()
     return {"ok": True, "title": title or None}
+
+
+def act_control_status(_body):
+    return _control_status_payload()
+
+
+def act_control_stop(body):
+    return _set_control_enabled(False, body.get("reason") or "remote stop")
+
+
+def act_control_resume(_body):
+    if not CONFIG.get("general_control_enabled", True):
+        return {"ok": False, "error": "general control is disabled in config"}
+    return _set_control_enabled(True)
+
+
+def act_observe_desktop(_body):
+    blocked = _require_control_enabled()
+    if blocked:
+        return blocked
+    screenshot = act_screenshot({})
+    if not screenshot.get("ok"):
+        return screenshot
+    cursor = {"x": None, "y": None}
+    if os.name == "nt":
+        import ctypes
+
+        class Point(ctypes.Structure):
+            _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+        point = Point()
+        if ctypes.windll.user32.GetCursorPos(ctypes.byref(point)):
+            cursor = {"x": point.x, "y": point.y}
+    return {
+        "ok": True,
+        "image_b64": screenshot["image_b64"],
+        "active_window": act_active_window({}).get("title"),
+        "windows": act_active_apps({}).get("windows", []),
+        "cursor": cursor,
+    }
+
+
+def act_desktop_input(body):
+    blocked = _require_control_enabled()
+    if blocked:
+        return blocked
+    action = str(body.get("action", "")).strip().lower()
+    if action in {"move", "click", "double_click", "scroll"}:
+        x = int(body.get("x", 0))
+        y = int(body.get("y", 0))
+        button = str(body.get("button", "left")).lower()
+        if button not in {"left", "right", "middle"}:
+            return {"ok": False, "error": "button must be left/right/middle"}
+        flags = {
+            "left": (0x0002, 0x0004),
+            "right": (0x0008, 0x0010),
+            "middle": (0x0020, 0x0040),
+        }
+        down, up = flags[button]
+        clicks = 2 if action == "double_click" else 1
+        delta = int(body.get("delta", 0))
+        script = (
+            "Add-Type @'\nusing System;using System.Runtime.InteropServices;"
+            "public class AtlasInput{[DllImport(\"user32.dll\")]public static extern bool SetCursorPos(int X,int Y);"
+            "[DllImport(\"user32.dll\")]public static extern void mouse_event(uint f,uint x,uint y,int d,UIntPtr e);}\n'@;"
+            f"[AtlasInput]::SetCursorPos({x},{y})|Out-Null;"
+        )
+        if action in {"click", "double_click"}:
+            script += "".join(
+                f"[AtlasInput]::mouse_event({down},0,0,0,[UIntPtr]::Zero);"
+                f"[AtlasInput]::mouse_event({up},0,0,0,[UIntPtr]::Zero);"
+                for _ in range(clicks)
+            )
+        elif action == "scroll":
+            script += (
+                f"[AtlasInput]::mouse_event(0x0800,0,0,{delta},[UIntPtr]::Zero);"
+            )
+        result = _run_hidden_powershell(script)
+        if result.returncode:
+            return {"ok": False, "error": result.stderr.strip() or "input failed"}
+        return {"ok": True, "action": action, "x": x, "y": y}
+
+    if action == "drag":
+        # Freehand drawing needs the button held down across a path. Without
+        # this, the desktop agent could open Paint but had no action that
+        # could leave a mark, so it clicked, saw an unchanged canvas, and
+        # stalled out its whole step budget.
+        raw_path = body.get("path")
+        if not isinstance(raw_path, list) or len(raw_path) < 2:
+            return {
+                "ok": False,
+                "error": "drag requires a path of at least two [x,y] points",
+            }
+        limit = int(CONFIG.get("general_control_max_drag_points", 200))
+        if len(raw_path) > limit:
+            return {"ok": False, "error": f"drag path exceeds {limit} points"}
+        points = []
+        for item in raw_path:
+            if isinstance(item, dict):
+                item = [item.get("x"), item.get("y")]
+            if not isinstance(item, (list, tuple)) or len(item) != 2:
+                return {"ok": False, "error": "each drag point must be [x,y]"}
+            try:
+                points.append((int(item[0]), int(item[1])))
+            except (TypeError, ValueError):
+                return {"ok": False, "error": "drag coordinates must be integers"}
+
+        button = str(body.get("button", "left")).lower()
+        buttons = {
+            "left": (0x0002, 0x0004),
+            "right": (0x0008, 0x0010),
+            "middle": (0x0020, 0x0040),
+        }
+        if button not in buttons:
+            return {"ok": False, "error": "button must be left/right/middle"}
+        down, up = buttons[button]
+
+        first_x, first_y = points[0]
+        script = (
+            "Add-Type @'\nusing System;using System.Runtime.InteropServices;"
+            "public class AtlasInput{[DllImport(\"user32.dll\")]public static extern bool SetCursorPos(int X,int Y);"
+            "[DllImport(\"user32.dll\")]public static extern void mouse_event(uint f,uint x,uint y,int d,UIntPtr e);}\n'@;"
+            f"[AtlasInput]::SetCursorPos({first_x},{first_y})|Out-Null;"
+            "Start-Sleep -Milliseconds 60;"
+            f"[AtlasInput]::mouse_event({down},0,0,0,[UIntPtr]::Zero);"
+        )
+        # Small pauses between samples keep the stroke smooth enough for
+        # Paint to interpolate, and keep it visible on a 30fps recording.
+        for point_x, point_y in points[1:]:
+            script += (
+                f"[AtlasInput]::SetCursorPos({point_x},{point_y})|Out-Null;"
+                "Start-Sleep -Milliseconds 25;"
+            )
+        script += f"[AtlasInput]::mouse_event({up},0,0,0,[UIntPtr]::Zero);"
+
+        result = _run_hidden_powershell(script, timeout=120)
+        if result.returncode:
+            return {"ok": False, "error": result.stderr.strip() or "drag failed"}
+        return {
+            "ok": True,
+            "action": action,
+            "points": len(points),
+            "start": {"x": first_x, "y": first_y},
+            "end": {"x": points[-1][0], "y": points[-1][1]},
+        }
+
+    if action == "text":
+        text = str(body.get("text", ""))
+        limit = int(CONFIG.get("general_control_max_text_chars", 5000))
+        if not text or len(text) > limit:
+            return {"ok": False, "error": f"text must be 1-{limit} characters"}
+        chunks = _sendkeys_chunks(text)
+        quoted = ",".join(
+            "'" + chunk.replace("'", "''") + "'" for chunk in chunks
+        )
+        script = (
+            "$w=New-Object -ComObject WScript.Shell;"
+            f"foreach($c in @({quoted})){{$w.SendKeys($c);Start-Sleep -Milliseconds 20}}"
+        )
+        result = _run_hidden_powershell(script, timeout=120)
+        return {
+            "ok": result.returncode == 0,
+            "action": action,
+            "characters": len(text),
+            "error": result.stderr.strip() or None,
+        }
+
+    if action == "keys":
+        keys = str(body.get("keys", "")).strip()
+        if not keys or len(keys) > 200:
+            return {"ok": False, "error": "keys must be 1-200 characters"}
+        escaped = keys.replace("'", "''")
+        result = _run_hidden_powershell(
+            "$w=New-Object -ComObject WScript.Shell;"
+            f"$w.SendKeys('{escaped}')"
+        )
+        return {
+            "ok": result.returncode == 0,
+            "action": action,
+            "error": result.stderr.strip() or None,
+        }
+    return {
+        "ok": False,
+        "error": (
+            "action must be move/click/double_click/drag/scroll/text/keys"
+        ),
+    }
+
+
+def act_window_control(body):
+    blocked = _require_control_enabled()
+    if blocked:
+        return blocked
+    action = str(body.get("action", "focus")).strip().lower()
+    title = str(body.get("title", "")).strip()
+    if action == "list":
+        return act_active_apps({})
+    if not title:
+        return {"ok": False, "error": "title is required"}
+    if action == "focus":
+        _focus_window(title)
+        time.sleep(0.25)
+        return {
+            "ok": title.lower() in str(
+                act_active_window({}).get("title") or ""
+            ).lower(),
+            "action": action,
+            "title": title,
+        }
+    show_codes = {"minimize": 6, "maximize": 3, "restore": 9}
+    escaped = title.replace("'", "''")
+    if action == "close":
+        operation = "$p.CloseMainWindow()|Out-Null"
+    elif action in show_codes:
+        operation = f"[AtlasWindow]::ShowWindow($p.MainWindowHandle,{show_codes[action]})|Out-Null"
+    else:
+        return {"ok": False, "error": "unknown window action"}
+    script = (
+        "Add-Type @'\nusing System;using System.Runtime.InteropServices;"
+        "public class AtlasWindow{[DllImport(\"user32.dll\")]public static extern bool ShowWindow(IntPtr h,int n);}\n'@;"
+        "$p=Get-Process|Where-Object{$_.MainWindowTitle -like "
+        f"'*{escaped}*'}}|Select-Object -First 1;"
+        "if(-not $p){exit 3};" + operation
+    )
+    result = _run_hidden_powershell(script)
+    return {
+        "ok": result.returncode == 0,
+        "action": action,
+        "title": title,
+        "error": result.stderr.strip() or None,
+    }
+
+
+def act_clipboard(body):
+    blocked = _require_control_enabled()
+    if blocked:
+        return blocked
+    action = str(body.get("action", "read")).lower()
+    if action == "read":
+        result = _run_hidden_powershell("Get-Clipboard -Raw", timeout=15)
+        return {
+            "ok": result.returncode == 0,
+            "text": result.stdout,
+            "error": result.stderr.strip() or None,
+        }
+    if action == "write":
+        text = str(body.get("text", ""))
+        limit = int(CONFIG.get("general_control_max_text_chars", 5000))
+        if len(text) > limit:
+            return {"ok": False, "error": f"clipboard exceeds {limit} characters"}
+        encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
+        script = (
+            f"$b=[Convert]::FromBase64String('{encoded}');"
+            "$t=[Text.Encoding]::UTF8.GetString($b);Set-Clipboard -Value $t"
+        )
+        result = _run_hidden_powershell(script, timeout=15)
+        return {"ok": result.returncode == 0, "characters": len(text)}
+    return {"ok": False, "error": "clipboard action must be read/write"}
+
+
+def act_file_operation(body):
+    blocked = _require_control_enabled()
+    if blocked:
+        return blocked
+    operation = str(body.get("operation", "")).lower()
+    path = _allowed_user_path(body.get("path"))
+    limit = int(CONFIG.get("general_control_max_file_bytes", 10 * 1024 * 1024))
+    if operation == "stat":
+        return {
+            "ok": True,
+            "path": str(path),
+            "exists": path.exists(),
+            "is_dir": path.is_dir(),
+            "size": path.stat().st_size if path.is_file() else None,
+        }
+    if operation == "list":
+        if not path.is_dir():
+            return {"ok": False, "error": "path is not a directory"}
+        items = []
+        for item in list(path.iterdir())[:500]:
+            items.append({
+                "name": item.name,
+                "path": str(item),
+                "is_dir": item.is_dir(),
+                "size": item.stat().st_size if item.is_file() else None,
+            })
+        return {"ok": True, "path": str(path), "items": items}
+    if operation == "read":
+        if not path.is_file() or path.stat().st_size > limit:
+            return {"ok": False, "error": "file is missing or exceeds read limit"}
+        data = path.read_bytes()
+        return {
+            "ok": True,
+            "path": str(path),
+            "data_b64": base64.b64encode(data).decode("ascii"),
+        }
+    if operation in {"write", "append"}:
+        data_b64 = body.get("data_b64")
+        text = body.get("text")
+        data = (
+            base64.b64decode(data_b64, validate=True)
+            if isinstance(data_b64, str)
+            else str(text or "").encode("utf-8")
+        )
+        if len(data) > limit:
+            return {"ok": False, "error": "write exceeds configured limit"}
+        _allowed_user_path(str(path.parent))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("ab" if operation == "append" else "wb") as handle:
+            handle.write(data)
+        return {"ok": True, "path": str(path), "bytes": len(data)}
+    if operation == "mkdir":
+        path.mkdir(parents=True, exist_ok=True)
+        return {"ok": True, "path": str(path)}
+    if operation in {"copy", "move"}:
+        destination = _allowed_user_path(body.get("destination"))
+        _allowed_user_path(str(destination.parent))
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if operation == "copy":
+            if path.is_dir():
+                shutil.copytree(path, destination, dirs_exist_ok=True)
+            else:
+                shutil.copy2(path, destination)
+        else:
+            shutil.move(str(path), str(destination))
+        return {"ok": True, "path": str(path), "destination": str(destination)}
+    if operation == "delete":
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+        return {"ok": True, "path": str(path), "deleted": True}
+    return {"ok": False, "error": "unknown file operation"}
+
+
+def act_launch_process(body):
+    blocked = _require_control_enabled()
+    if blocked:
+        return blocked
+    executable = str(body.get("executable", "")).strip()
+    arguments = body.get("arguments") or []
+    if not executable or not isinstance(arguments, list) or not all(
+        isinstance(item, str) for item in arguments
+    ):
+        return {"ok": False, "error": "executable and string arguments are required"}
+    working_directory = body.get("working_directory")
+    cwd = str(_allowed_user_path(working_directory)) if working_directory else None
+    try:
+        process = subprocess.Popen(
+            [executable, *arguments],
+            cwd=cwd,
+            shell=False,
+            creationflags=_NO_WINDOW if body.get("hidden") else 0,
+        )
+    except OSError as error:
+        return {"ok": False, "error": str(error)}
+    return {"ok": True, "pid": process.pid, "executable": executable}
+
+
+def act_process_control(body):
+    blocked = _require_control_enabled()
+    if blocked:
+        return blocked
+    action = str(body.get("action", "list")).lower()
+    if action == "list":
+        script = (
+            "Get-Process|Select-Object Id,ProcessName,MainWindowTitle|"
+            "ConvertTo-Json -Compress"
+        )
+        result = _run_hidden_powershell(script, timeout=30)
+        try:
+            processes = json.loads(result.stdout or "[]")
+        except json.JSONDecodeError:
+            processes = []
+        return {"ok": result.returncode == 0, "processes": processes}
+    if action == "stop":
+        pid = int(body.get("pid", 0))
+        if pid <= 0 or pid == os.getpid():
+            return {"ok": False, "error": "invalid or protected process id"}
+        result = subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            creationflags=_NO_WINDOW,
+        )
+        return {
+            "ok": result.returncode == 0,
+            "pid": pid,
+            "error": result.stderr.strip() or None,
+        }
+    return {"ok": False, "error": "process action must be list/stop"}
 
 
 def act_system_info(_body):
@@ -919,8 +1549,7 @@ def act_system_info(_body):
         "$up=(Get-Date)-$os.LastBootUpTime; "
         "Write-Output (@{cpu=$cpu;ram_used=$ramUsed;disk_free=$diskFree;uptime_hours=[math]::Round($up.TotalHours)} | ConvertTo-Json -Compress)"
     )
-    result = subprocess.run(["powershell", "-NoProfile", "-Command", script],
-                            capture_output=True, text=True, timeout=20)
+    result = _run_hidden_powershell(script, timeout=20)
     try:
         return {"ok": True, **json.loads(result.stdout.strip())}
     except (json.JSONDecodeError, ValueError):
@@ -961,6 +1590,16 @@ ACTIONS = {
     "shutdown_pc": act_shutdown_pc,
     "cancel_pc_shutdown": act_cancel_pc_shutdown,
     "empty_recycle_bin": act_empty_recycle_bin,
+    "control_status": act_control_status,
+    "control_stop": act_control_stop,
+    "control_resume": act_control_resume,
+    "observe_desktop": act_observe_desktop,
+    "desktop_input": act_desktop_input,
+    "window_control": act_window_control,
+    "clipboard": act_clipboard,
+    "file_operation": act_file_operation,
+    "launch_process": act_launch_process,
+    "process_control": act_process_control,
 }
 
 
@@ -998,7 +1637,10 @@ class Handler(BaseHTTPRequestHandler):
             body = {}
 
         try:
-            self._send(200, action(body))
+            result = action(body)
+            if action_name in _GENERAL_CONTROL_ACTIONS:
+                _audit_control(action_name, body, result)
+            self._send(200, result)
         except Exception as error:
             self._send(500, {"ok": False, "error": str(error)})
 
@@ -1016,6 +1658,12 @@ def main():
         return
 
     _reconcile_orphaned_recording()
+    _set_control_enabled(CONFIG.get("general_control_enabled", True))
+    threading.Thread(
+        target=_emergency_hotkey_monitor,
+        name="atlas-emergency-hotkey",
+        daemon=True,
+    ).start()
 
     server = ThreadingHTTPServer((CONFIG["bind_host"], CONFIG["bind_port"]), Handler)
     print(f"A.T.L.A.S. companion listening on {CONFIG['bind_host']}:{CONFIG['bind_port']}")

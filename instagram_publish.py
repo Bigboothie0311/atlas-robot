@@ -45,6 +45,10 @@ REQUEST_TIMEOUT_SECONDS = 30
 STATUS_POLL_INTERVAL_SECONDS = 3
 STATUS_POLL_MAX_ATTEMPTS = 40  # ~2 minutes
 FUNNEL_STARTUP_TIMEOUT_SECONDS = 20
+FUNNEL_READINESS_ATTEMPTS = 10
+FUNNEL_READINESS_RETRY_SECONDS = 0.5
+CONTAINER_PROCESSING_ATTEMPTS = 2
+CONTAINER_RETRY_SECONDS = 2
 
 LEDGER_PATH = CONFIG_PATH.with_name("instagram_posts.json")
 
@@ -53,6 +57,16 @@ TERMINAL_ERROR_STATUSES = {"ERROR", "EXPIRED"}
 
 class InstagramPublishError(RuntimeError):
     pass
+
+
+class ContainerProcessingError(InstagramPublishError):
+    def __init__(self, container_id: str, status: str) -> None:
+        self.container_id = container_id
+        self.status = status
+        super().__init__(
+            "container processing failed with status "
+            f"{status} (container {container_id})"
+        )
 
 
 def _config():
@@ -224,7 +238,53 @@ def _funnel_video_url(video_path: Path):
     with _serve_file_locally(video_path) as (port, url_path):
         with _funnel_enabled(port):
             dns_name = _own_tailnet_dns_name()
-            yield f"https://{dns_name}{url_path}"
+            video_url = f"https://{dns_name}{url_path}"
+            _wait_for_public_video(
+                video_url,
+                expected_size=video_path.stat().st_size,
+            )
+            yield video_url
+
+
+def _wait_for_public_video(
+    video_url: str,
+    *,
+    expected_size: int,
+) -> None:
+    """Do not give Instagram a Funnel URL until it works end to end.
+
+    `tailscale funnel --bg` can return before the public HTTPS edge is
+    ready. Instagram treats an early fetch failure as an immediate terminal
+    container ERROR, so probe the same public URL first instead of relying
+    on the local listener alone.
+    """
+    last_detail = "no response"
+    for attempt in range(1, FUNNEL_READINESS_ATTEMPTS + 1):
+        try:
+            response = requests.head(
+                video_url,
+                timeout=REQUEST_TIMEOUT_SECONDS,
+            )
+            content_length = response.headers.get("Content-Length")
+            if (
+                response.status_code == 200
+                and content_length == str(expected_size)
+            ):
+                return
+            last_detail = (
+                f"HTTP {response.status_code}, "
+                f"Content-Length {content_length!r}"
+            )
+        except requests.RequestException as error:
+            last_detail = str(error)
+
+        if attempt < FUNNEL_READINESS_ATTEMPTS:
+            time.sleep(FUNNEL_READINESS_RETRY_SECONDS)
+
+    raise InstagramPublishError(
+        "public Reel URL did not become ready after "
+        f"{FUNNEL_READINESS_ATTEMPTS} attempts: {last_detail}"
+    )
 
 
 def create_container_with_video_url(
@@ -289,9 +349,7 @@ def poll_container_status(container_id: str) -> str:
             return status
 
         if status in TERMINAL_ERROR_STATUSES:
-            raise InstagramPublishError(
-                f"container processing failed with status {status}"
-            )
+            raise ContainerProcessingError(container_id, status)
 
         time.sleep(STATUS_POLL_INTERVAL_SECONDS)
 
@@ -389,10 +447,20 @@ def publish_reel(
         raise InstagramPublishError(f"video file not found: {path}")
 
     with _funnel_video_url(path) as video_url:
-        container_id = create_container_with_video_url(
-            video_url, caption
-        )
-        status = poll_container_status(container_id)
+        for attempt in range(1, CONTAINER_PROCESSING_ATTEMPTS + 1):
+            container_id = create_container_with_video_url(
+                video_url, caption
+            )
+            try:
+                status = poll_container_status(container_id)
+                break
+            except ContainerProcessingError as error:
+                if (
+                    error.status != "ERROR"
+                    or attempt == CONTAINER_PROCESSING_ATTEMPTS
+                ):
+                    raise
+                time.sleep(CONTAINER_RETRY_SECONDS)
 
     if dry_run:
         return {
@@ -410,6 +478,7 @@ def publish_reel(
         "timestamp": details.get("timestamp"),
         "caption": caption,
         "mission": mission,
+        "video_path": str(path.resolve()),
         "posted_at": time.time(),
     }
     _record_ledger_entry(entry)

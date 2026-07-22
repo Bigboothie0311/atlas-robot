@@ -42,6 +42,14 @@ class GetHudStatsIncludesNewKeysTests(unittest.TestCase):
             mock.patch.object(
                 hud_stats, "get_budget_stats", return_value={"spent_usd": 0.0}
             ),
+            mock.patch.object(
+                hud_stats, "get_network_stats", return_value={"ip": "test"}
+            ),
+            mock.patch.object(
+                hud_stats,
+                "get_growth_stats",
+                return_value={"viewer_missions_waiting": 2},
+            ),
             mock.patch.object(hud_stats.pc_stats, "get_gaming_pc_stats", return_value={}),
             mock.patch.object(
                 hud_stats.instagram_stats, "get_stats", return_value={}
@@ -53,6 +61,7 @@ class GetHudStatsIncludesNewKeysTests(unittest.TestCase):
         self.assertIn("budget", stats)
         self.assertEqual(stats["storage"], {"level": "ok"})
         self.assertEqual(stats["budget"], {"spent_usd": 0.0})
+        self.assertEqual(stats["growth"], {"viewer_missions_waiting": 2})
 
 
 if __name__ == "__main__":

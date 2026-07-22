@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify, send_file, send_from_directory
 import hmac
+import secrets
 import subprocess
 import tempfile
 import threading
@@ -195,6 +196,17 @@ IMAGE_EXTENSIONS = {
     "image/webp": ".webp",
     "image/gif": ".gif",
     "image/bmp": ".bmp",
+}
+
+REEL_PREVIEW_ROOT = Path("/home/atlas/atlas-staging/incoming")
+REEL_PREVIEW_START_DELAY_SECONDS = 2.0
+REEL_PREVIEW_FFMPEG_TIMEOUT_SECONDS = 30
+_reel_preview_lock = threading.Lock()
+_reel_preview_path = None
+_reel_preview_state = {
+    "active": False,
+    "token": None,
+    "starts_at": 0.0,
 }
 
 
@@ -398,6 +410,12 @@ def get_state():
 
     with _recording_lock:
         state["recording_active"] = _recording_active
+
+    with _showcase_focus_lock:
+        state["showcase_focus"] = _showcase_focus
+
+    with _reel_preview_lock:
+        state["reel_preview"] = _reel_preview_state.copy()
 
     return jsonify(state)
 
@@ -1226,6 +1244,12 @@ _weather_overlay_open = False
 _brightness_boost_lock = threading.Lock()
 _brightness_boost = False
 
+_showcase_focus_lock = threading.Lock()
+_showcase_focus = None
+VALID_SHOWCASE_FOCUSES = {
+    "system", "printer", "pc", "instagram", "terminal", "core",
+}
+
 
 @app.post("/screen")
 def set_screen():
@@ -1258,6 +1282,30 @@ def set_weather_overlay():
         open_ = _weather_overlay_open
 
     return jsonify({"ok": True, "open": open_})
+
+
+@app.post("/hud/showcase_focus")
+def set_showcase_focus():
+    """Spotlight one real dashboard panel during showcase capture."""
+    global _showcase_focus
+
+    data = request.get_json(silent=True) or {}
+    focus = data.get("focus")
+
+    if focus is not None:
+        focus = str(focus).strip().lower()
+
+    if focus not in VALID_SHOWCASE_FOCUSES and focus is not None:
+        return jsonify({
+            "ok": False,
+            "error": "unknown showcase focus",
+            "valid": sorted(VALID_SHOWCASE_FOCUSES),
+        }), 400
+
+    with _showcase_focus_lock:
+        _showcase_focus = focus
+
+    return jsonify({"ok": True, "focus": focus})
 
 
 @app.post("/hud/brightness_boost")
@@ -1295,6 +1343,144 @@ def set_recording():
         active = _recording_active
 
     return jsonify({"ok": True, "active": active})
+
+
+def _validated_reel_preview_path(raw_path):
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        raise ValueError("video_path must be a non-empty string")
+
+    root = REEL_PREVIEW_ROOT.resolve()
+    path = Path(raw_path).expanduser().resolve(strict=True)
+
+    if path.suffix.casefold() != ".mp4":
+        raise ValueError("preview media must be an MP4 file")
+
+    if root != path.parent and root not in path.parents:
+        raise ValueError("preview media is outside the Reel staging directory")
+
+    if not path.is_file() or path.stat().st_size <= 0:
+        raise ValueError("preview media is missing or empty")
+
+    return path
+
+
+@app.get("/hud/reel_preview/media")
+def reel_preview_media():
+    token = request.args.get("token")
+
+    with _reel_preview_lock:
+        active = _reel_preview_state["active"]
+        expected_token = _reel_preview_state["token"]
+        path = _reel_preview_path
+
+    if not active or not token or not hmac.compare_digest(
+        token, expected_token or ""
+    ):
+        return jsonify({"ok": False, "error": "preview is not active"}), 404
+
+    if path is None or not path.is_file():
+        return jsonify({"ok": False, "error": "preview media is missing"}), 404
+
+    return send_file(path, mimetype="video/mp4", conditional=True)
+
+
+@app.post("/hud/reel_preview")
+def play_reel_preview():
+    """Show one finished Reel on the HUD and play its audio over HDMI.
+
+    The request remains open until aplay finishes. That blocking contract is
+    intentional: the recording tool waits for this response, so Atlas asks
+    whether to post or save only after the owner has watched the whole Reel.
+    """
+    global _current_playback_process
+    global _playback_was_interrupted
+    global _reel_preview_path
+
+    data = request.get_json(silent=True) or {}
+
+    try:
+        video_path = _validated_reel_preview_path(data.get("video_path"))
+    except (OSError, ValueError) as error:
+        return jsonify({"ok": False, "error": str(error)}), 400
+
+    audio_file = tempfile.NamedTemporaryFile(
+        prefix="atlas_reel_preview_", suffix=".wav", delete=False
+    )
+    audio_path = Path(audio_file.name)
+    audio_file.close()
+
+    try:
+        extraction = subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                "-i", str(video_path), "-vn", "-c:a", "pcm_s16le",
+                "-ar", "48000", str(audio_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=REEL_PREVIEW_FFMPEG_TIMEOUT_SECONDS,
+        )
+        if extraction.returncode != 0 or audio_path.stat().st_size <= 0:
+            detail = extraction.stderr.strip() or "no audio was extracted"
+            return jsonify({
+                "ok": False,
+                "error": f"could not prepare Reel audio: {detail}",
+            }), 500
+
+        token = secrets.token_urlsafe(24)
+        starts_at = time.time() + REEL_PREVIEW_START_DELAY_SECONDS
+
+        with _reel_preview_lock:
+            _reel_preview_path = video_path
+            _reel_preview_state.update({
+                "active": True,
+                "token": token,
+                "starts_at": starts_at,
+            })
+
+        time.sleep(max(0.0, starts_at - time.time()))
+
+        with piper_lock:
+            with playback_lock:
+                _playback_was_interrupted = False
+
+            process = subprocess.Popen([
+                "aplay", "-D", AUDIO_DEVICE, str(audio_path)
+            ])
+
+            with playback_lock:
+                _current_playback_process = process
+
+            process.wait()
+
+            with playback_lock:
+                _current_playback_process = None
+                was_interrupted = _playback_was_interrupted
+
+            if process.returncode not in (None, 0) and not was_interrupted:
+                return jsonify({
+                    "ok": False,
+                    "error": (
+                        "Reel audio playback failed with code "
+                        f"{process.returncode}"
+                    ),
+                }), 500
+
+        return jsonify({"ok": True, "played": True})
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return jsonify({
+            "ok": False,
+            "error": f"Reel preview failed: {type(error).__name__}: {error}",
+        }), 500
+    finally:
+        with _reel_preview_lock:
+            _reel_preview_path = None
+            _reel_preview_state.update({
+                "active": False,
+                "token": None,
+                "starts_at": 0.0,
+            })
+        audio_path.unlink(missing_ok=True)
 
 
 @app.post("/stand_down")
@@ -1911,6 +2097,7 @@ def instagram_refresher_loop():
     while True:
         try:
             instagram_stats.get_stats()
+            instagram_stats.refresh_growth_memory()
         except Exception as error:
             print("Instagram refresh error:", type(error).__name__, error)
 

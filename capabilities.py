@@ -58,6 +58,10 @@ REGISTRY = [
      "aliases": ["what's the weather", "will it rain tomorrow"], "confirm": False, "requires": "none", "category": "information"},
     {"id": "instagram_stats", "name": "Instagram stats", "description": "reports Atlas's followers and latest-post performance from cached Instagram Insights",
      "aliases": ["how is Atlas doing online", "give me Instagram stats"], "confirm": False, "requires": "none", "category": "information"},
+    {"id": "content_growth_report", "name": "Reel growth report", "description": "reads Atlas's local Reel learning memory, best-performing series, and recommended next experiment",
+     "aliases": ["what Reel should you make next", "show me your growth report"], "confirm": False, "requires": "none", "category": "information"},
+    {"id": "viewer_video_missions", "name": "viewer video missions", "description": "lists sanitized draft video ideas derived from public comments without replying or publishing",
+     "aliases": ["what are viewers asking you to build", "show viewer missions"], "confirm": False, "requires": "none", "category": "content"},
 
     # --- Network & security ----------------------------------------
     {"id": "network_devices", "name": "network devices", "description": "lists the devices on your network",
@@ -148,7 +152,7 @@ REGISTRY = [
      "aliases": ["record my PC screen", "record a clip of my screen"], "confirm": False, "requires": "pc", "category": "pc"},
 
     # --- Self-showcase content -------------------------------------
-    {"id": "self_showcase_record", "name": "record a promo Reel", "description": "records a narrated tour of Atlas's own HUD screen (weather radar, self-diagnostics) and edits it into a 9:16 Reel -- this is the real self-recording path: his own screen, not the PC's, since the physical camera can't film Atlas (see the self_record_clip note above) and a PC screen recording would just show the owner's desktop, not Atlas",
+    {"id": "self_showcase_record", "name": "record a promo Reel", "description": "directs a fresh evidence-based 9:16 Reel using a rotating series, scored hook, HUD and requested recording-time PC shots; burns in Atlas branding, subtitles, chapters and a CTA, then locally prepares a cover, Trial variants, translations, collaboration draft and four platform export folders before previewing and asking whether to publish",
      "aliases": ["make a promo video of yourself", "record yourself a reel", "make an Instagram reel"], "confirm": False, "requires": "none", "category": "content"},
     {"id": "instagram_publish", "name": "Instagram publish", "description": "publishes an exact finished Reel and caption to the Instagram account",
      "aliases": ["post that to Instagram", "publish the reel"], "confirm": True, "requires": "none", "category": "content"},

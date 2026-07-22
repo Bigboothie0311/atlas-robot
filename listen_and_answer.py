@@ -24,6 +24,7 @@ import countdown
 import diagnostics
 import hud_stats
 import instagram_stats
+from atlas_growth import GrowthStore
 import interaction_control
 import logbook
 import macros
@@ -39,6 +40,8 @@ import wake_detection
 
 
 HUB = "http://127.0.0.1:5051"
+SPEAK_REQUEST_TIMEOUT_SECONDS = 120
+MODEL_MAX_OUTPUT_TOKENS = 600
 ATLAS_HUB = "http://127.0.0.1:5050"
 MODEL_PATH = "/home/atlas/atlas-robot/models/vosk-model-small-en-us-0.15"
 AUDIO_PATH = "/tmp/atlas-listen.wav"
@@ -228,7 +231,7 @@ def speak(text, play=True):
     response = requests.post(
         f"{HUB}/speak",
         json={"text": text, "play": play},
-        timeout=45
+        timeout=SPEAK_REQUEST_TIMEOUT_SECONDS
     )
     response.raise_for_status()
     return response.json().get("wav_path")
@@ -2625,6 +2628,26 @@ INSTAGRAM_STATS_PHRASES = {
 
 def is_instagram_stats_query(text):
     normalized = _normalize_phrase(text)
+
+    # Publishing and Insights share the noun "post", but they are
+    # opposite operations. Confirmed live 2026-07-21: "post your most
+    # recent reel to Instagram" landed here because "post" was treated
+    # as a metrics keyword, bypassing the pending-publication tool and
+    # producing no useful spoken answer. Reject action-shaped language
+    # before looking for broad social/metrics terms; noun-shaped questions
+    # such as "how did the latest Instagram post do" still fall through.
+    if (
+        re.match(r"^(?:please\s+)?post\b", normalized)
+        or re.search(r"\b(?:publish|upload)\b", normalized)
+        or re.search(
+            r"\b(?:can|could|will|would) you post\b",
+            normalized,
+        )
+        or re.search(r"\bpost (?:it|this|that|the|my|your|our)\b", normalized)
+        or re.search(r"\bhow (?:do|can) (?:i|you) post\b", normalized)
+    ):
+        return False
+
     if normalized in INSTAGRAM_STATS_PHRASES:
         return True
 
@@ -2675,6 +2698,18 @@ def run_instagram_stats_command():
             latest_parts.append(f"{_format_count(latest['saved'])} saves")
         if latest_parts:
             parts.append("The latest post has " + ", ".join(latest_parts))
+
+    try:
+        growth = GrowthStore().report()
+        waiting = int(growth.get("viewer_missions_waiting") or 0)
+        if waiting:
+            parts.append(
+                f"I also have {waiting} viewer-request video mission"
+                + ("" if waiting == 1 else "s")
+                + " drafted locally for your approval"
+            )
+    except (OSError, ValueError):
+        pass
 
     answer = ". ".join(parts) + "."
     if data.get("stale"):
@@ -3086,17 +3121,23 @@ def build_instructions_and_limits():
     today = datetime.now().strftime("%Y-%m-%d")
     owner_name = load_owner_name()
     quiet = _in_quiet_hours()
-    max_tokens = 120 if quiet else 300
+    # Spoken answers stay short because the instructions say so. Tool-call
+    # JSON still needs enough room, especially for a follow-up such as "yes"
+    # that expands into a detailed agent mission. The old quiet-hours cap of
+    # 120 truncated that function call as response.incomplete.
+    max_tokens = MODEL_MAX_OUTPUT_TOKENS
 
     instructions = (
-        f"You are A.T.L.A.S., {owner_name}'s desk robot — a physical "
+        f"You are Atlas, {owner_name}'s desk robot — a physical "
         "machine on their desk: Raspberry Pi 5 core, tactical HUD screen, "
         "speaker, mic, camera, with a 3D printer and the LAN under your "
         f"watch. Today's date is {today}. Your register is mission-control: "
         "calm, precise, a little dry — competence first, wit as seasoning. "
         "Lead with the answer in your first sentence; context after. "
         "Answer the way a smart friend who actually knows the answer would, "
-        "not a customer-service bot. Never open with filler like 'I'd be "
+        "not a customer-service bot. Always refer to yourself as Atlas, "
+        "without periods and never as separate letters. Never open with "
+        "filler like 'I'd be "
         "happy to help', 'great question', or 'I understand your concern'. "
         "If asked for a recommendation or opinion, commit to one — pick it, "
         "note a caveat after if it matters, never hedge with 'it depends'. "
@@ -3142,7 +3183,7 @@ def build_instructions_and_limits():
     )
 
     instructions += (
-        "\n\nYou are already running inside the A.T.L.A.S. application on "
+        "\n\nYou are already running inside the Atlas application on "
         "the Raspberry Pi described above. Never claim that this is an "
         "external chat lacking access to the Pi, and never tell the owner "
         "to build a companion service for capabilities listed above. This "
@@ -3475,7 +3516,7 @@ def answer_text_only(question):
 
 # How long the consumer waits for the next streamed sentence before
 # giving up. Confirmed live 2026-07-21: a real content.record_self_showcase
-# call (registered timeout_seconds=300 -- the longest of any agent tool)
+# call (registered timeout_seconds=900 -- the longest routine voice tool)
 # produces zero streamed text while it runs, since the whole recording
 # happens synchronously inside the model's tool-call handling. The old
 # 30s value abandoned the turn ("Sentence stream timed out...") and told
@@ -3484,7 +3525,7 @@ def answer_text_only(question):
 # valid Reel), just with nobody told. Set comfortably above the longest
 # registered agent tool timeout so no legitimate slow tool call gets
 # orphaned this way again.
-SENTENCE_STREAM_IDLE_TIMEOUT_SECONDS = 320
+SENTENCE_STREAM_IDLE_TIMEOUT_SECONDS = 960
 
 
 def ask_and_speak_streaming(question, model, retry_attempted=False):
@@ -3686,7 +3727,7 @@ def _answer_and_speak(text, model):
     the whole response. Returns (answer, interrupted)."""
     answer, interrupted = ask_and_speak_streaming(text, model)
 
-    print("A.T.L.A.S.:", answer)
+    print("Atlas:", answer)
     log_qa(text, strip_spoken_urls(answer))
 
     return answer, interrupted
@@ -4692,7 +4733,7 @@ def _handle_turn_body(model):
         instant_answer = parse_instant_answer(text)
 
         if instant_answer is not None:
-            print("A.T.L.A.S. instant answer:", instant_answer, flush=True)
+            print("Atlas instant answer:", instant_answer, flush=True)
             log_qa(text, instant_answer)
             speak(instant_answer)
             return
@@ -4700,7 +4741,7 @@ def _handle_turn_body(model):
         local_answer = handle_local_command(text, model)
 
         if local_answer is not None:
-            print("A.T.L.A.S. local command:", local_answer)
+            print("Atlas local command:", local_answer)
             log_qa(text, local_answer)
             speak(local_answer)
             return

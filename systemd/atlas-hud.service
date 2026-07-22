@@ -28,6 +28,8 @@ Requires=atlas-robot.service seatd.service
 Type=simple
 User=YOUR_USERNAME
 Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+Environment=FONTCONFIG_FILE=/etc/fonts/fonts.conf
 # The arrow on screen was cage's OWN default cursor, not Chromium's — cage
 # draws its built-in left_ptr sprite itself regardless of any pointer
 # device existing, which is why the HUD page's `cursor: none` never had
@@ -63,7 +65,7 @@ Environment=WLR_NO_HARDWARE_CURSORS=1
 # through either way so a genuinely stuck/disconnected display doesn't
 # block startup forever (Restart=on-failure below is still the safety net).
 ExecStartPre=/bin/bash -c 'for i in $(seq 1 30); do grep -q ^connected /sys/class/drm/card*-HDMI-*/status 2>/dev/null && break; sleep 1; done'
-ExecStart=/usr/bin/cage -- /usr/bin/chromium --kiosk --no-first-run --disable-restore-session-state --ozone-platform=wayland --start-fullscreen http://127.0.0.1:5051/hud
+ExecStart=/usr/bin/cage -- /usr/bin/chromium --kiosk --no-first-run --disable-restore-session-state --disable-background-networking --disable-component-update --disable-domain-reliability --disable-sync --disable-features=MediaRouter,OptimizationHints,AutofillServerCommunication --ozone-platform=wayland --start-fullscreen http://127.0.0.1:5051/hud
 # NOTE: there must be NO pointer input on this kiosk — not even a
 # virtual one. A uinput "cursor nudge" script used to run here as
 # ExecStartPost; it turned out to be the thing MAKING the cursor

@@ -153,7 +153,15 @@ class BuildCaptionTests(unittest.TestCase):
         caption = content_pipeline.build_caption("A short demo of A.T.L.A.S.")
 
         self.assertIn("A short demo of A.T.L.A.S.", caption)
-        self.assertIn("#atlas", caption)
+        self.assertIn("#raspberrypiprojects", caption)
+        self.assertEqual(
+            len(content_pipeline.HASHTAG_PATTERN.findall(caption)),
+            30,
+        )
+        self.assertEqual(
+            set(content_pipeline.HASHTAG_PATTERN.findall(caption)),
+            set(content_pipeline.RASPBERRY_PI_HASHTAGS),
+        )
 
     def test_truncates_long_narration(self):
         caption = content_pipeline.build_caption("x" * 3000)
@@ -165,7 +173,27 @@ class BuildCaptionTests(unittest.TestCase):
     def test_empty_narration_still_returns_hashtags(self):
         caption = content_pipeline.build_caption("   ")
 
-        self.assertIn("#atlas", caption)
+        self.assertEqual(
+            len(content_pipeline.HASHTAG_PATTERN.findall(caption)),
+            30,
+        )
+
+    def test_replaces_model_hashtags_with_fixed_raspberry_pi_set(self):
+        caption = content_pipeline.ensure_raspberry_pi_hashtags(
+            "A useful build. #random #unrelated #ai"
+        )
+
+        self.assertNotIn("#random", caption)
+        self.assertNotIn("#unrelated", caption)
+        self.assertNotIn("#ai", caption)
+        self.assertEqual(
+            content_pipeline.HASHTAG_PATTERN.findall(caption),
+            list(content_pipeline.RASPBERRY_PI_HASHTAGS),
+        )
+        self.assertLessEqual(
+            len(caption),
+            content_pipeline.CAPTION_MAX_LENGTH,
+        )
 
 
 if __name__ == "__main__":

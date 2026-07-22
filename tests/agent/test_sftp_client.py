@@ -160,6 +160,33 @@ def test_remote_file_info_is_parsed_and_validated(
     assert "-EncodedCommand" in runner.calls[0][0]
 
 
+def test_make_directory_uses_approved_remote_path(tmp_path) -> None:
+    payload = b"unused"
+    runner = FakeRunner(
+        info=remote_info(payload),
+        download_bytes=payload,
+        ssh_stdout=REMOTE_ROOT + r"\Atlas Reels\reel_123",
+    )
+    client = make_client(tmp_path, runner)
+
+    result = client.make_directory(
+        REMOTE_ROOT + r"\Atlas Reels\reel_123"
+    )
+
+    assert result.endswith(r"Atlas Reels\reel_123")
+    assert runner.calls[0][0][0] == "ssh"
+    assert "-EncodedCommand" in runner.calls[0][0]
+
+
+def test_make_directory_rejects_path_outside_approved_root(tmp_path) -> None:
+    payload = b"unused"
+    runner = FakeRunner(info=remote_info(payload), download_bytes=payload)
+    client = make_client(tmp_path, runner)
+
+    with pytest.raises(ValueError, match="outside approved roots"):
+        client.make_directory(r"C:\Windows\System32\Atlas")
+
+
 def test_download_is_verified_and_atomically_promoted(
     tmp_path,
 ) -> None:

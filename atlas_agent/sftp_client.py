@@ -524,6 +524,66 @@ class SFTPClient:
                 error=f"{type(exc).__name__}: {exc}",
             )
 
+    def make_directory(
+        self,
+        remote_path: str | PureWindowsPath,
+    ) -> str:
+        """Create an approved Windows directory, including its parents."""
+        path = self._validate_remote_path(remote_path)
+        escaped_path = str(path).replace("'", "''")
+        script = (
+            "$ErrorActionPreference='Stop';"
+            f"$p='{escaped_path}';"
+            "New-Item -ItemType Directory -Path $p -Force | Out-Null;"
+            "$f=Get-Item -LiteralPath $p -Force;"
+            "if(-not $f.PSIsContainer){throw 'Path is not a directory.'};"
+            "[Console]::Out.Write($f.FullName)"
+        )
+        encoded_script = base64.b64encode(
+            script.encode("utf-16-le")
+        ).decode("ascii")
+        command = [
+            "ssh",
+            "-i",
+            str(self.identity_file),
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "StrictHostKeyChecking=yes",
+            "-o",
+            "ConnectTimeout=5",
+            "-p",
+            str(self.port),
+            f"{self.username}@{self.host}",
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-EncodedCommand",
+            encoded_script,
+        ]
+        try:
+            completed = self._run_command(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=self.command_timeout_seconds,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise FileTransferError(
+                f"Could not create remote directory: {exc}"
+            ) from exc
+        if completed.returncode != 0:
+            detail = (
+                completed.stderr.strip()
+                or completed.stdout.strip()
+                or f"SSH exited with code {completed.returncode}"
+            )
+            raise FileTransferError(
+                f"Could not create remote directory: {detail}"
+            )
+        return str(path)
+
     def _validate_remote_path(
         self,
         remote_path: str | PureWindowsPath,

@@ -159,9 +159,11 @@ TOOLS = [
             "Use this ONLY when Atlas's own previous message just asked "
             "you to confirm or cancel a specific pending action (for "
             "example: after recording a self-showcase Reel, it will ask "
-            "whether to publish it to Instagram) and the owner's reply "
-            "is a direct answer to that -- 'yes', 'post it', 'go ahead', "
-            "'confirm', or 'no', 'cancel', 'don't', 'never mind'. This "
+            "whether to post, save, or delete it) and the owner's reply "
+            "is a direct answer to that. Use action='post' for 'post it' "
+            "or 'go ahead'; action='save' for 'save it' or 'keep it'; and "
+            "action='delete' for 'delete it' or 'throw it away'. Post and "
+            "save both require a verified Windows Desktop copy. This "
             "resumes the exact pending action (e.g. publishing the "
             "exact Reel just recorded); it does not start anything new "
             "and does not need a goal. Do not use this for a fresh, "
@@ -170,16 +172,15 @@ TOOLS = [
         "parameters": {
             "type": "object",
             "properties": {
-                "confirm": {
-                    "type": "boolean",
+                "action": {
+                    "type": "string",
+                    "enum": ["post", "save", "delete"],
                     "description": (
-                        "True if the owner said yes/confirm/go ahead/"
-                        "post it. False if the owner said no/cancel/"
-                        "don't/never mind."
+                        "Exactly how to resolve the finished Reel."
                     ),
                 },
             },
-            "required": ["confirm"],
+            "required": ["action"],
             "additionalProperties": False,
         },
         "strict": True,
@@ -239,6 +240,15 @@ def close_agent_runtime_owner() -> None:
 
     if owner is not None:
         owner.close()
+
+
+def run_agent_goal(goal: str, *, source: str = "proactive"):
+    """Public shared-runtime entry point for background autonomous goals."""
+    if not isinstance(goal, str) or not goal.strip():
+        raise ValueError("goal must be a non-empty string")
+    return _get_agent_runtime_owner().handle_goal(
+        goal.strip(), source=source
+    )
 
 
 def clear_agent_usage() -> None:
@@ -428,9 +438,7 @@ def run_tool_call(
 
     if name == "respond_to_pending_confirmation":
         owner = _get_agent_runtime_owner()
-        response = owner.confirm_pending(
-            confirm=bool(arguments.get("confirm"))
-        )
+        response = owner.resolve_pending(action=str(arguments.get("action") or ""))
         _record_agent_usage(
             response.input_tokens,
             response.output_tokens,

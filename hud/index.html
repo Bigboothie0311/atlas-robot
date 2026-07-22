@@ -3,6 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <title>A.T.L.A.S.</title>
+<!-- The kiosk has no site icon; an explicit empty data icon prevents
+     Chromium from generating a noisy /favicon.ico 404 on every reload. -->
+<link rel="icon" href="data:,">
 <link rel="stylesheet" href="/hud/static/style.css">
 </head>
 <body class="state-idle">
@@ -125,6 +128,7 @@
       <div class="panel-value" id="instagram-followers">--</div>
       <div class="panel-sub" id="instagram-account">SOCIAL LINK STANDBY</div>
       <div class="panel-sub" id="instagram-latest">LATEST POST --</div>
+      <div class="panel-sub" id="instagram-growth">GROWTH MEMORY STANDBY</div>
     </div>
 
     <div id="cosmetic-terminal">
@@ -158,6 +162,11 @@
 
   <div id="gallery-overlay">
     <div id="gallery-grid"></div>
+  </div>
+
+  <div id="reel-preview-overlay" aria-live="polite">
+    <video id="reel-preview-video" muted playsinline preload="auto"></video>
+    <div id="reel-preview-label">REEL REVIEW · LOCAL PREVIEW</div>
   </div>
 
   <div id="weather-overlay">

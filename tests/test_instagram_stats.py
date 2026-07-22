@@ -2,6 +2,7 @@ import unittest
 from unittest import mock
 
 import instagram_stats
+from atlas_growth import GrowthStore
 
 
 class InstagramStatsTests(unittest.TestCase):
@@ -61,6 +62,74 @@ class InstagramStatsTests(unittest.TestCase):
         self.assertTrue(data["configured"])
         self.assertTrue(data["stale"])
         self.assertFalse(data["available"])
+
+    @mock.patch.object(
+        instagram_stats,
+        "_load_config",
+        return_value={
+            "INSTAGRAM_ACCESS_TOKEN": "secret",
+            "INSTAGRAM_ACCOUNT_ID": "123",
+        },
+    )
+    @mock.patch.object(instagram_stats, "_request")
+    def test_growth_snapshot_fetches_history_insights_and_comments(
+        self, request, _load_config
+    ):
+        request.side_effect = [
+            {"data": [{
+                "id": "media-1",
+                "timestamp": "2026-07-21T12:00:00+00:00",
+                "like_count": 4,
+                "comments_count": 1,
+            }]},
+            {"data": [
+                {"name": "views", "values": [{"value": 120}]},
+                {"name": "shares", "values": [{"value": 5}]},
+            ]},
+            {"data": [{
+                "id": "comment-1",
+                "text": "Can you test a Pi camera?",
+                "username": "viewer",
+            }]},
+        ]
+
+        snapshot = instagram_stats.fetch_growth_snapshot(media_limit=5)
+
+        self.assertTrue(snapshot["configured"])
+        self.assertEqual(120, snapshot["media"][0]["insights"]["views"])
+        self.assertEqual(5, snapshot["media"][0]["insights"]["shares"])
+        self.assertEqual(
+            "comment-1", snapshot["media"][0]["public_comments"][0]["id"]
+        )
+
+    @mock.patch.object(instagram_stats, "fetch_growth_snapshot")
+    def test_growth_refresh_records_metrics_and_drafts_requests(self, fetch, tmp_path=None):
+        # unittest does not inject tmp_path; use a managed temporary directory.
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = GrowthStore(Path(directory) / "growth.sqlite3")
+            fetch.return_value = {
+                "configured": True,
+                "captured_at": 5000,
+                "media": [{
+                    "id": "media-1",
+                    "insights": {"views": 20},
+                    "public_comments": [{
+                        "id": "comment-1",
+                        "text": "Please build a Pi sensor next",
+                        "username": "viewer",
+                    }],
+                }],
+            }
+            result = instagram_stats.refresh_growth_memory(
+                store=store, force=True
+            )
+
+            self.assertTrue(result["refreshed"])
+            self.assertEqual(1, result["new_mission_drafts"])
+            self.assertEqual(1, store.report()["viewer_missions_waiting"])
 
 
 if __name__ == "__main__":

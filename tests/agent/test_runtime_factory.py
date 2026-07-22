@@ -13,7 +13,11 @@ EXPECTED_PC_TOOLS = {
     "pc.download_file",
     "pc.upload_file",
     "content.record_self_showcase",
-    "content.publish_to_instagram",
+    "content.save_showcase",
+    "content.delete_showcase",
+    "content.publish_to_socials",
+    "content.get_growth_report",
+    "content.list_viewer_missions",
     "pc.active_apps",
     "pc.open_app",
     "pc.focus_or_open_app",
@@ -23,6 +27,8 @@ EXPECTED_PC_TOOLS = {
     "pc.start_screen_recording",
     "pc.stop_screen_recording",
     "pc.list_recordings",
+    "pc.desktop_action",
+    "pc.autonomous_desktop",
     "pi.list_directory",
     "pi.read_text_file",
     "pi.search_files",
@@ -86,6 +92,9 @@ def test_factory_builds_complete_pc_runtime(tmp_path):
             bundle.mission_store
         )
         assert bundle.runtime.event_bus is bundle.event_bus
+        assert bundle.staging_directory == (
+            tmp_path / "staging"
+        ).resolve()
         assert bundle.task_queue.list_tasks() == []
     finally:
         bundle.close()

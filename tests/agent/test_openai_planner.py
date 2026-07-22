@@ -307,6 +307,57 @@ def test_rejects_tool_that_is_not_available():
         )
 
 
+def test_excludes_tools_marked_not_openai_plannable():
+    hidden = make_tool(
+        "pc.desktop_action",
+        parameters={
+            "type": "object",
+            "properties": {
+                "arguments": {
+                    "type": ["object", "null"],
+                    "additionalProperties": True,
+                },
+            },
+            "required": ["arguments"],
+            "additionalProperties": False,
+        },
+    )
+    hidden.metadata["openai_plannable"] = False
+    visible = make_tool(
+        "pc.ensure_online",
+        parameters=ENSURE_SCHEMA,
+    )
+    client = FakeClient([
+        make_plan_call([
+            {
+                "tool": "pc.ensure_online",
+                "description": "Check the PC connection.",
+                "arguments": {"wake_if_needed": False},
+            }
+        ])
+    ])
+    generator = OpenAIPlanGenerator(
+        client=client,
+        model="gpt-test",
+    )
+
+    result = generator.generate(
+        "Check whether my remote workstation is reachable.",
+        [hidden, visible],
+    )
+
+    assert result.proposal.steps[0].tool == "pc.ensure_online"
+    item_schema = client.responses.calls[0]["tools"][0][
+        "parameters"
+    ]["properties"]["steps"]["items"]
+    assert item_schema["properties"]["tool"]["enum"] == [
+        "pc.ensure_online"
+    ]
+    assert "pc.desktop_action" not in client.responses.calls[0][
+        "instructions"
+    ]
+
+
 def test_rejects_non_object_step_arguments():
     output = [
         make_plan_call(
@@ -1502,6 +1553,43 @@ RECORD_SELF_SHOWCASE_SCHEMA = {
     "required": ["mission", "beats"],
     "additionalProperties": False,
 }
+
+
+def test_recording_plan_preserves_complete_named_app_request_in_mission():
+    goal = (
+        "Record a Reel that includes MS Paint so viewers can watch you "
+        "paint; do not open terminals and do not publish it yet."
+    )
+    client = FakeClient(
+        [
+            make_plan_call(
+                [
+                    {
+                        "tool": "content.record_self_showcase",
+                        "description": "Record the requested Reel.",
+                        "arguments": {
+                            "mission": "Include requested PC shots.",
+                            "beats": None,
+                        },
+                    }
+                ]
+            )
+        ]
+    )
+    generator = OpenAIPlanGenerator(client=client, model="gpt-test")
+
+    result = generator.generate(
+        goal,
+        [
+            make_tool(
+                "content.record_self_showcase",
+                parameters=RECORD_SELF_SHOWCASE_SCHEMA,
+            )
+        ],
+    )
+
+    assert result.proposal.steps[0].arguments["mission"] == goal
+    assert result.proposal.steps[0].arguments["beats"] is None
 
 
 def test_self_showcase_recording_goal_not_hijacked_by_service_status():

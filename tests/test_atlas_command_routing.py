@@ -155,6 +155,24 @@ class CommandRoutingTests(unittest.TestCase):
             self.assertTrue(listen_and_answer.is_instagram_stats_query(phrase))
             self.assertEqual(listen_and_answer._classify_intent(phrase), "instagram_stats")
 
+    def test_instagram_publish_commands_are_not_misrouted_as_stats(self):
+        """Regression from the 2026-07-21 live Reel flow: ``post`` was
+        treated as a metrics keyword, so this command bypassed the agent
+        and silently read Insights instead of confirming publication."""
+        for phrase in (
+            "post your most recent reel to instagram",
+            "post that reel to Instagram",
+            "publish the video on Instagram",
+            "upload my latest reel to Instagram",
+        ):
+            self.assertFalse(
+                listen_and_answer.is_instagram_stats_query(phrase)
+            )
+            self.assertEqual(
+                listen_and_answer._classify_intent(phrase),
+                "ai_question",
+            )
+
     @mock.patch.object(listen_and_answer.instagram_stats, "get_stats")
     def test_instagram_stats_answer_is_local(self, get_stats):
         get_stats.return_value = {
@@ -279,6 +297,31 @@ class StreamConsumerTests(unittest.TestCase):
             )
 
         self.assertEqual(str(raised.exception), "temporary failure")
+
+
+class VoiceInstructionLimitTests(unittest.TestCase):
+    @mock.patch.object(listen_and_answer.memory_store, "build_memory_context_block")
+    @mock.patch.object(listen_and_answer.hud_stats, "get_weather_stats")
+    @mock.patch.object(listen_and_answer, "load_owner_name")
+    @mock.patch.object(listen_and_answer, "_in_quiet_hours")
+    def test_quiet_hours_keep_tool_call_room_and_atlas_name(
+        self, quiet, owner_name, weather, memory_context
+    ):
+        quiet.return_value = True
+        owner_name.return_value = "Owner"
+        weather.return_value = {}
+        memory_context.return_value = ""
+
+        instructions, max_tokens = (
+            listen_and_answer.build_instructions_and_limits()
+        )
+
+        self.assertEqual(
+            max_tokens,
+            listen_and_answer.MODEL_MAX_OUTPUT_TOKENS,
+        )
+        self.assertIn("You are Atlas", instructions)
+        self.assertIn("without periods", instructions)
 
 
 class ClearIntruderAlertsTests(unittest.TestCase):

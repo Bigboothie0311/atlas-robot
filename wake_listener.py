@@ -282,7 +282,7 @@ def listen_for_wake_word(model):
 
 def announce_waiting():
     print(
-        'A.T.L.A.S. is waiting for "Hey Atlas".',
+        'Atlas is waiting for "Hey Atlas".',
         flush=True
     )
 

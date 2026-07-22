@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
 import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from atlas_agent.events import AtlasEvent
 from atlas_agent.runtime_factory import RuntimeBundle
+from atlas_agent.tasks import ToolCall
 from atlas_agent.workflow import (
     StepOutcome,
     WorkflowResult,
@@ -23,6 +26,13 @@ _MISSION_STATUS_PHRASES = {
     "cancelled": "was cancelled",
 }
 
+_REEL_PUBLISH_TOOLS = frozenset({
+    "content.publish_to_instagram",
+    "content.publish_to_facebook",
+    "content.publish_to_youtube",
+    "content.publish_to_socials",
+})
+
 
 @dataclass(frozen=True, slots=True)
 class AgentVoiceResponse:
@@ -38,7 +48,8 @@ class AgentVoiceResponse:
 
 @dataclass(frozen=True, slots=True)
 class _PendingConfirmation:
-    """One paused CONFIRMATION_REQUIRED call, held in memory only, so a
+    """One paused CONFIRMATION_REQUIRED call, durably stored when it is
+    a social publish, so a
     later "yes, post it" turn can actually resume the exact call that
     asked for confirmation instead of starting a brand new, unrelated
     mission with no idea what file/caption it's supposed to act on.
@@ -48,11 +59,11 @@ class _PendingConfirmation:
     always builds a fresh plan from scratch for a new goal string, so a
     second, independent mission has no access to the first mission's
     concrete tool output (e.g. content.record_self_showcase's actual
-    video_path), and content.publish_to_instagram's schema requires an
+    video_path), and each social publishing schema requires an
     exact non-null path -- there was never a way for that second
     mission to know it."""
 
-    task: Any
+    task_id: str
     call: Any
     description: str
 
@@ -66,7 +77,36 @@ class AgentVoiceController:
     ) -> None:
         self.bundle = bundle
         self._lock = threading.RLock()
-        self._pending: _PendingConfirmation | None = None
+        staging_directory = getattr(
+            bundle,
+            "staging_directory",
+            None,
+        )
+        self._staging_directory = (
+            Path(staging_directory).expanduser().resolve()
+            if staging_directory is not None
+            else None
+        )
+        self._pending_path = (
+            self._staging_directory
+            / "pending_instagram_publish.json"
+            if self._staging_directory is not None
+            else None
+        )
+        registry = getattr(bundle, "registry", None)
+        self._facebook_publish_enabled = bool(
+            registry is not None
+            and "content.publish_to_facebook" in registry
+        )
+        self._youtube_publish_enabled = bool(
+            registry is not None
+            and "content.publish_to_youtube" in registry
+        )
+        self._combined_social_publish_enabled = bool(
+            registry is not None
+            and "content.publish_to_socials" in registry
+        )
+        self._pending = self._load_pending()
 
     def handle_goal(
         self,
@@ -103,8 +143,83 @@ class AgentVoiceController:
 
             workflow = result.workflow
             text = self._spoken_summary(workflow)
-            self._pending = (
-                self._extract_pending(result.task, workflow)
+            pending = self._extract_pending(result.task, workflow)
+            synthetic_confirmation = False
+
+            if pending is None:
+                pending = self._pending_for_completed_reel(
+                    result.task,
+                    workflow,
+                    requested_goal=goal,
+                    facebook_publish_enabled=(
+                        self._facebook_publish_enabled
+                    ),
+                    youtube_publish_enabled=(
+                        self._youtube_publish_enabled
+                    ),
+                    combined_social_publish_enabled=(
+                        self._combined_social_publish_enabled
+                    ),
+                )
+                synthetic_confirmation = pending is not None
+
+            self._set_pending(pending)
+
+            if synthetic_confirmation:
+                self._publish_waiting_confirmation(
+                    result.task,
+                    workflow,
+                    pending,
+                )
+                if (
+                    pending.call.tool_name
+                    == "content.publish_to_youtube"
+                ):
+                    question = (
+                        "Do you want me to upload it privately to YouTube "
+                        "and copy it to your Desktop, save it to your Desktop "
+                        "without posting, or delete it?"
+                    )
+                    if "Do you want me to" in text:
+                        text = text.split("Do you want me to", 1)[0] + question
+                    else:
+                        text = f"{text.rstrip()} {question}"
+                elif (
+                    pending.call.tool_name
+                    == "content.publish_to_facebook"
+                ):
+                    question = (
+                        "Do you want me to publish it to the ATLAS AI "
+                        "Robot Facebook Page and copy it to your Desktop, "
+                        "save it to your Desktop without posting, or delete it?"
+                    )
+                    if "Do you want me to" in text:
+                        text = text.split("Do you want me to", 1)[0] + question
+                    else:
+                        text = f"{text.rstrip()} {question}"
+                elif (
+                    pending.call.tool_name
+                    == "content.publish_to_socials"
+                ):
+                    question = (
+                        "Do you want me to publish this exact Reel to both "
+                        "Instagram and Facebook and copy it to your Desktop, "
+                        "save it to your Desktop without posting, or delete it?"
+                    )
+                    if "Do you want me to" in text:
+                        text = text.split("Do you want me to", 1)[0] + question
+                    else:
+                        text = f"{text.rstrip()} {question}"
+
+            response_status = (
+                WorkflowStatus.WAITING_CONFIRMATION
+                if synthetic_confirmation
+                else workflow.status
+            )
+            confirmation_call_id = (
+                pending.call.call_id
+                if synthetic_confirmation
+                else workflow.confirmation_call_id
             )
 
             return AgentVoiceResponse(
@@ -114,10 +229,8 @@ class AgentVoiceController:
                     is WorkflowStatus.COMPLETED
                 ),
                 task_id=result.task.task_id,
-                workflow_status=workflow.status.value,
-                confirmation_call_id=(
-                    workflow.confirmation_call_id
-                ),
+                workflow_status=response_status.value,
+                confirmation_call_id=confirmation_call_id,
                 input_tokens=(
                     result.planning.total_input_tokens
                 ),
@@ -127,17 +240,30 @@ class AgentVoiceController:
                 error=workflow.error,
             )
 
-    def confirm_pending(
-        self, *, confirm: bool
-    ) -> AgentVoiceResponse:
-        """Resolves the one call this controller is remembering as
-        paused on confirmation -- runs it for real with confirmed=True
-        if confirm, or discards it if not. Never re-plans or re-runs
-        any earlier step (e.g. never re-records a Reel just to publish
-        the one already sitting on disk)."""
+    def confirm_pending(self, *, confirm: bool) -> AgentVoiceResponse:
+        """Backward-compatible yes/no wrapper (no now means save)."""
+        return self.resolve_pending(action="post" if confirm else "save")
+
+    def resolve_pending(self, *, action: str) -> AgentVoiceResponse:
+        """Resolve a finished Reel as post, save-to-Desktop, or delete."""
+        choice = str(action or "").strip().casefold()
+        if choice not in {"post", "save", "delete"}:
+            return AgentVoiceResponse(
+                text="Choose post, save, or delete for the finished Reel.",
+                ok=False,
+                task_id=None,
+                workflow_status=None,
+                confirmation_call_id=None,
+                input_tokens=0,
+                output_tokens=0,
+                error="Invalid pending Reel action.",
+            )
+
         with self._lock:
             pending = self._pending
-            self._pending = None
+
+            if pending is None:
+                pending = self._recover_latest_reel()
 
             if pending is None:
                 return AgentVoiceResponse(
@@ -154,20 +280,139 @@ class AgentVoiceController:
                     error=None,
                 )
 
-            if not confirm:
+            is_reel = pending.call.tool_name in _REEL_PUBLISH_TOOLS
+            if not is_reel and choice != "post":
+                self._set_pending(None)
+                self._publish_confirmation_terminal(
+                    pending,
+                    status=WorkflowStatus.COMPLETED,
+                    error=None,
+                )
                 return AgentVoiceResponse(
                     text=(
                         "Okay, I won't "
                         f"{pending.description.rstrip('.').lower()}."
                     ),
                     ok=True,
-                    task_id=pending.task.task_id,
+                    task_id=pending.task_id,
                     workflow_status="cancelled",
                     confirmation_call_id=None,
                     input_tokens=0,
                     output_tokens=0,
                     error=None,
                 )
+
+            if is_reel and choice == "delete":
+                # Consume before the destructive action so a crash or partial
+                # delete cannot leave a stale prompt that targets missing data.
+                self._set_pending(None)
+                file_action = self._execute_reel_file_action(
+                    pending,
+                    tool_name="content.delete_showcase",
+                    confirmed=True,
+                )
+                if file_action is None:
+                    return AgentVoiceResponse(
+                        text="I couldn't delete that Reel because the delete tool is unavailable.",
+                        ok=False,
+                        task_id=pending.task_id,
+                        workflow_status="failed",
+                        confirmation_call_id=None,
+                        input_tokens=0,
+                        output_tokens=0,
+                        error="Reel delete tool unavailable.",
+                    )
+                _, verification = file_action
+                self._publish_confirmation_terminal(
+                    pending,
+                    status=(
+                        WorkflowStatus.COMPLETED
+                        if verification.verified
+                        else WorkflowStatus.FAILED
+                    ),
+                    error=None if verification.verified else verification.reason,
+                )
+                return AgentVoiceResponse(
+                    text=(
+                        "Deleted. I removed the new Reel and its local package; it was not posted or copied to your Desktop."
+                        if verification.verified
+                        else f"I couldn't fully delete that Reel: {verification.reason}"
+                    ),
+                    ok=verification.verified,
+                    task_id=pending.task_id,
+                    workflow_status=("completed" if verification.verified else "failed"),
+                    confirmation_call_id=None,
+                    input_tokens=0,
+                    output_tokens=0,
+                    error=None if verification.verified else verification.reason,
+                )
+
+            if is_reel:
+                file_action = self._execute_reel_file_action(
+                    pending,
+                    tool_name="content.save_showcase",
+                    confirmed=False,
+                )
+                if file_action is not None:
+                    save_result, save_verification = file_action
+                    if not save_verification.verified:
+                        # Keep the pending choice so the owner can retry after
+                        # the PC/Desktop transfer problem is repaired.
+                        return AgentVoiceResponse(
+                            text=(
+                                "I kept the Reel safely on Atlas, but I couldn't verify the required Desktop copy: "
+                                f"{save_verification.reason}"
+                            ),
+                            ok=False,
+                            task_id=pending.task_id,
+                            workflow_status="failed",
+                            confirmation_call_id=pending.call.call_id,
+                            input_tokens=0,
+                            output_tokens=0,
+                            error=save_verification.reason,
+                        )
+                    if choice == "save":
+                        self._set_pending(None)
+                        self._publish_confirmation_terminal(
+                            pending,
+                            status=WorkflowStatus.COMPLETED,
+                            error=None,
+                        )
+                        output = save_result.output if save_result is not None else {}
+                        folder = output.get("folder") if isinstance(output, dict) else None
+                        return AgentVoiceResponse(
+                            text=(
+                                "Saved. I verified the new Reel on your Windows Desktop"
+                                + (f" in {folder}" if folder else "")
+                                + ". I did not post it."
+                            ),
+                            ok=True,
+                            task_id=pending.task_id,
+                            workflow_status="completed",
+                            confirmation_call_id=None,
+                            input_tokens=0,
+                            output_tokens=0,
+                            error=None,
+                        )
+                elif choice == "save":
+                    # Compatibility for older/minimal runtimes without the new
+                    # Desktop tool. Production Atlas always registers it.
+                    self._set_pending(None)
+                    return AgentVoiceResponse(
+                        text="Saved locally. I won't post it.",
+                        ok=True,
+                        task_id=pending.task_id,
+                        workflow_status="completed",
+                        confirmation_call_id=None,
+                        input_tokens=0,
+                        output_tokens=0,
+                        error=None,
+                    )
+
+            # Consume the durable confirmation before the irreversible post.
+            # A process crash after a platform accepts the Reel must never
+            # leave a stale token that can publish it twice.
+            self._set_pending(None)
 
             try:
                 result = self.bundle.executor.execute(
@@ -180,7 +425,7 @@ class AgentVoiceController:
                         "action. The failure was recorded."
                     ),
                     ok=False,
-                    task_id=pending.task.task_id,
+                    task_id=pending.task_id,
                     workflow_status=None,
                     confirmation_call_id=None,
                     input_tokens=0,
@@ -194,7 +439,7 @@ class AgentVoiceController:
                 pending.call, result
             )
             synthetic_workflow = WorkflowResult(
-                task_id=pending.task.task_id,
+                task_id=pending.task_id,
                 plan_id="confirmation",
                 status=(
                     WorkflowStatus.COMPLETED
@@ -226,17 +471,60 @@ class AgentVoiceController:
                 ),
             )
             text = self._spoken_summary(synthetic_workflow)
+            self._publish_confirmation_terminal(
+                pending,
+                status=synthetic_workflow.status,
+                error=synthetic_workflow.error,
+            )
 
             return AgentVoiceResponse(
                 text=text,
                 ok=verification.verified,
-                task_id=pending.task.task_id,
+                task_id=pending.task_id,
                 workflow_status=synthetic_workflow.status.value,
                 confirmation_call_id=None,
                 input_tokens=0,
                 output_tokens=0,
                 error=synthetic_workflow.error,
             )
+
+    def _execute_reel_file_action(
+        self,
+        pending: _PendingConfirmation,
+        *,
+        tool_name: str,
+        confirmed: bool,
+    ) -> tuple[Any, Any] | None:
+        registry = getattr(self.bundle, "registry", None)
+        if registry is None or tool_name not in registry:
+            return None
+
+        video_path = pending.call.arguments.get("video_path")
+        if not isinstance(video_path, str) or not video_path:
+            return None
+        reel = Path(video_path).expanduser()
+        package = reel.with_name(f"{reel.stem}_package")
+        call = ToolCall(
+            tool_name=tool_name,
+            arguments={
+                "video_path": video_path,
+                "package_path": str(package) if package.is_dir() else None,
+            },
+            task_id=pending.task_id,
+        )
+        try:
+            result = self.bundle.executor.execute(call, confirmed=confirmed)
+            verification = self.bundle.verifier.verify(call, result)
+        except Exception as error:
+            result = type("FailedReelFileAction", (), {
+                "output": {"ok": False, "error": f"{type(error).__name__}: {error}"},
+                "error": str(error),
+            })()
+            verification = type("FailedReelFileVerification", (), {
+                "verified": False,
+                "reason": f"{type(error).__name__}: {error}",
+            })()
+        return result, verification
 
     @staticmethod
     def _extract_pending(
@@ -252,12 +540,553 @@ class AgentVoiceController:
         for step in workflow.steps:
             if step.call.call_id == workflow.confirmation_call_id:
                 return _PendingConfirmation(
-                    task=task,
+                    task_id=task.task_id,
                     call=step.call,
                     description=step.description,
                 )
 
         return None
+
+    @staticmethod
+    def _pending_for_completed_reel(
+        task: Any,
+        workflow: WorkflowResult,
+        *,
+        requested_goal: str | None = None,
+        facebook_publish_enabled: bool = False,
+        youtube_publish_enabled: bool = False,
+        combined_social_publish_enabled: bool = False,
+    ) -> _PendingConfirmation | None:
+        """Turn a successful record-only Reel workflow into the exact
+        publish confirmation its spoken summary promises.
+
+        The planner is allowed to produce only the recording step for a
+        goal such as "record yourself for Instagram". Previously that
+        completed workflow said "say post it" but stored no pending call,
+        so the follow-up could never work. Build the Level-2 publish call
+        directly from the verified recording output instead of asking a
+        later planner to rediscover an in-memory path and caption.
+        """
+        if (
+            workflow.status is not WorkflowStatus.COMPLETED
+            or not workflow.steps
+        ):
+            return None
+
+        reel_step = next(
+            (
+                step
+                for step in reversed(workflow.steps)
+                if step.call.tool_name == "content.record_self_showcase"
+                and step.result is not None
+                and isinstance(step.result.output, dict)
+                and step.result.output.get("ok") is True
+            ),
+            None,
+        )
+
+        if reel_step is None:
+            return None
+
+        output = (
+            reel_step.result.output
+            if reel_step.result is not None
+            else None
+        )
+
+        if not isinstance(output, dict) or output.get("ok") is not True:
+            return None
+
+        video_path = output.get("video_path")
+        caption = output.get("caption")
+
+        if (
+            not isinstance(video_path, str)
+            or not video_path.strip()
+            or not isinstance(caption, str)
+        ):
+            return None
+
+        goal = str(
+            requested_goal
+            if requested_goal is not None
+            else getattr(task, "goal", "")
+        ).casefold()
+        youtube_requested = youtube_publish_enabled and (
+            "youtube" in goal or "you tube" in goal
+        )
+        facebook_requested = facebook_publish_enabled and (
+            "facebook" in goal or "face book" in goal
+        )
+        growth_plan = output.get("growth_plan")
+        growth_title = (
+            growth_plan.get("title")
+            if isinstance(growth_plan, dict)
+            else None
+        )
+        first_line = next(
+            (
+                line.strip()
+                for line in caption.splitlines()
+                if line.strip() and not line.lstrip().startswith("#")
+            ),
+            "",
+        )
+        title = str(
+            growth_title
+            or first_line
+            or output.get("mission")
+            or "A.T.L.A.S. Raspberry Pi Project"
+        ).strip()
+        if combined_social_publish_enabled:
+            tool_name = "content.publish_to_socials"
+            arguments = {
+                "video_path": video_path,
+                "title": title[:255],
+                "caption": caption,
+                "mission": output.get("mission"),
+            }
+            description = (
+                "Publish the finished Reel to both Instagram and the ATLAS AI "
+                "Robot Facebook Page."
+            )
+        elif facebook_requested:
+            tool_name = "content.publish_to_facebook"
+            arguments = {
+                "video_path": video_path,
+                "title": title[:255],
+                "description": caption,
+                "mission": output.get("mission"),
+            }
+            description = (
+                "Publish the finished Reel to the ATLAS AI Robot Facebook Page."
+            )
+        elif youtube_requested:
+            tool_name = "content.publish_to_youtube"
+            arguments = {
+                "video_path": video_path,
+                "title": title[:100],
+                "description": caption,
+                # Google's current API policy forces uploads from an
+                # unaudited project to private regardless. Keep Atlas's
+                # default honest and safe until that audit is complete.
+                "privacy_status": "private",
+                "mission": output.get("mission"),
+            }
+            description = "Upload the finished Short privately to YouTube."
+        else:
+            tool_name = "content.publish_to_instagram"
+            arguments = {
+                "video_path": video_path,
+                "caption": caption,
+                "mission": output.get("mission"),
+            }
+            description = "Publish the finished Reel to Instagram."
+
+        call = ToolCall(
+            tool_name=tool_name,
+            arguments=arguments,
+            task_id=task.task_id,
+        )
+        return _PendingConfirmation(
+            task_id=task.task_id,
+            call=call,
+            description=description,
+        )
+
+    def _set_pending(
+        self,
+        pending: _PendingConfirmation | None,
+    ) -> None:
+        self._pending = pending
+        path = self._pending_path
+
+        if path is None:
+            return
+
+        if pending is None:
+            path.unlink(missing_ok=True)
+            return
+
+        if pending.call.tool_name not in {
+            "content.publish_to_instagram",
+            "content.publish_to_facebook",
+            "content.publish_to_youtube",
+            "content.publish_to_socials",
+        }:
+            path.unlink(missing_ok=True)
+            return
+        if (
+            pending.call.tool_name == "content.publish_to_facebook"
+            and not self._facebook_publish_enabled
+        ):
+            path.unlink(missing_ok=True)
+            return
+        if (
+            pending.call.tool_name == "content.publish_to_youtube"
+            and not self._youtube_publish_enabled
+        ):
+            path.unlink(missing_ok=True)
+            return
+        if (
+            pending.call.tool_name == "content.publish_to_socials"
+            and not self._combined_social_publish_enabled
+        ):
+            path.unlink(missing_ok=True)
+            return
+        if (
+            self._combined_social_publish_enabled
+            and pending.call.tool_name != "content.publish_to_socials"
+        ):
+            path.unlink(missing_ok=True)
+            return
+
+        arguments = self._validated_publish_arguments(
+            pending.call.arguments,
+            pending.call.tool_name,
+        )
+        if arguments is None:
+            path.unlink(missing_ok=True)
+            return
+
+        payload = {
+            "version": 2,
+            "task_id": pending.task_id,
+            "call_id": pending.call.call_id,
+            "description": pending.description,
+            "tool_name": pending.call.tool_name,
+            "arguments": arguments,
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = path.with_suffix(".tmp")
+        temporary_path.write_text(
+            json.dumps(payload, indent=2),
+            encoding="utf-8",
+        )
+        temporary_path.replace(path)
+
+    def _load_pending(self) -> _PendingConfirmation | None:
+        path = self._pending_path
+        if path is None or not path.is_file():
+            return None
+
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if (
+                not isinstance(payload, dict)
+                or payload.get("version") not in {1, 2}
+            ):
+                raise ValueError("invalid pending publish record")
+            tool_name = payload.get("tool_name")
+            if tool_name not in {
+                "content.publish_to_instagram",
+                "content.publish_to_facebook",
+                "content.publish_to_youtube",
+                "content.publish_to_socials",
+            }:
+                raise ValueError("invalid pending publish tool")
+            if (
+                tool_name == "content.publish_to_facebook"
+                and not self._facebook_publish_enabled
+            ):
+                raise ValueError("Facebook publishing is disabled")
+            if (
+                tool_name == "content.publish_to_youtube"
+                and not self._youtube_publish_enabled
+            ):
+                raise ValueError("YouTube publishing is disabled")
+            if (
+                tool_name == "content.publish_to_socials"
+                and not self._combined_social_publish_enabled
+            ):
+                raise ValueError("Combined social publishing is disabled")
+            if (
+                self._combined_social_publish_enabled
+                and tool_name != "content.publish_to_socials"
+            ):
+                raise ValueError("Old single-platform confirmation discarded")
+            task_id = payload.get("task_id")
+            call_id = payload.get("call_id")
+            description = payload.get("description")
+            arguments = self._validated_publish_arguments(
+                payload.get("arguments"),
+                tool_name,
+            )
+            if (
+                not isinstance(task_id, str)
+                or not task_id
+                or not isinstance(call_id, str)
+                or not call_id
+                or not isinstance(description, str)
+                or not description
+                or arguments is None
+            ):
+                raise ValueError("invalid pending publish fields")
+        except (OSError, ValueError, json.JSONDecodeError):
+            path.unlink(missing_ok=True)
+            return None
+
+        return _PendingConfirmation(
+            task_id=task_id,
+            call=ToolCall(
+                tool_name=tool_name,
+                arguments=arguments,
+                task_id=task_id,
+                call_id=call_id,
+            ),
+            description=description,
+        )
+
+    def _recover_latest_reel(self) -> _PendingConfirmation | None:
+        """Recover the newest locally verified Reel after an upgrade.
+
+        Older builds did not persist pending confirmations. This fallback
+        runs only after an explicit affirmative publish command and accepts
+        only a sidecar whose MP4 resolves inside the configured staging
+        directory.
+        """
+        staging = self._staging_directory
+        if staging is None or not staging.is_dir():
+            return None
+
+        manifests = sorted(
+            staging.glob("reel_*.mp4.json"),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )
+        for manifest in manifests:
+            try:
+                payload = json.loads(
+                    manifest.read_text(encoding="utf-8")
+                )
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            caption = payload.get("caption")
+            mission = payload.get("mission")
+            if self._combined_social_publish_enabled:
+                first_line = next(
+                    (
+                        line.strip()
+                        for line in str(caption or "").splitlines()
+                        if line.strip() and not line.lstrip().startswith("#")
+                    ),
+                    "A.T.L.A.S. Raspberry Pi Project",
+                )
+                tool_name = "content.publish_to_socials"
+                candidate_arguments = {
+                    "video_path": payload.get("video_path"),
+                    "title": first_line[:255],
+                    "caption": caption,
+                    "mission": mission,
+                }
+            else:
+                tool_name = "content.publish_to_instagram"
+                candidate_arguments = {
+                    "video_path": payload.get("video_path"),
+                    "caption": caption,
+                    "mission": mission,
+                }
+            arguments = self._validated_publish_arguments(
+                candidate_arguments, tool_name
+            )
+            if arguments is None:
+                continue
+            task_id = f"recovered-{Path(arguments['video_path']).stem}"
+            pending = _PendingConfirmation(
+                task_id=task_id,
+                call=ToolCall(
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    task_id=task_id,
+                ),
+                description=(
+                    "Publish the finished Reel to both Instagram and Facebook."
+                    if self._combined_social_publish_enabled
+                    else "Publish the finished Reel to Instagram."
+                ),
+            )
+            self._pending = pending
+            return pending
+
+        return None
+
+    def _validated_publish_arguments(
+        self,
+        arguments: Any,
+        tool_name: str = "content.publish_to_instagram",
+    ) -> dict[str, Any] | None:
+        staging = self._staging_directory
+        if staging is None or not isinstance(arguments, dict):
+            return None
+        if tool_name == "content.publish_to_instagram":
+            expected_fields = {"video_path", "caption", "mission"}
+        elif tool_name == "content.publish_to_socials":
+            expected_fields = {
+                "video_path", "title", "caption", "mission",
+            }
+        elif tool_name == "content.publish_to_facebook":
+            expected_fields = {
+                "video_path", "title", "description", "mission",
+            }
+        else:
+            expected_fields = {
+                "video_path",
+                "title",
+                "description",
+                "privacy_status",
+                "mission",
+            }
+        if set(arguments) != expected_fields:
+            return None
+
+        video_path = arguments.get("video_path")
+        mission = arguments.get("mission")
+        if (
+            not isinstance(video_path, str)
+            or (mission is not None and not isinstance(mission, str))
+        ):
+            return None
+
+        if tool_name == "content.publish_to_instagram":
+            caption = arguments.get("caption")
+            if not isinstance(caption, str) or not caption.strip():
+                return None
+        elif tool_name == "content.publish_to_socials":
+            title = arguments.get("title")
+            caption = arguments.get("caption")
+            if (
+                not isinstance(title, str)
+                or not title.strip()
+                or len(title) > 255
+                or not isinstance(caption, str)
+                or not caption.strip()
+            ):
+                return None
+        elif tool_name == "content.publish_to_facebook":
+            title = arguments.get("title")
+            description = arguments.get("description")
+            if (
+                not isinstance(title, str)
+                or not title.strip()
+                or len(title) > 255
+                or not isinstance(description, str)
+                or not description.strip()
+            ):
+                return None
+        else:
+            title = arguments.get("title")
+            description = arguments.get("description")
+            privacy_status = arguments.get("privacy_status")
+            if (
+                not isinstance(title, str)
+                or not title.strip()
+                or len(title) > 100
+                or not isinstance(description, str)
+                or not description.strip()
+                or privacy_status not in {"private", "unlisted", "public"}
+            ):
+                return None
+
+        try:
+            resolved_video = Path(video_path).expanduser().resolve(
+                strict=True
+            )
+            resolved_video.relative_to(staging)
+        except (OSError, ValueError):
+            return None
+
+        if resolved_video.suffix.casefold() != ".mp4":
+            return None
+
+        validated = {
+            "video_path": str(resolved_video),
+            "mission": mission,
+        }
+        if tool_name == "content.publish_to_instagram":
+            validated["caption"] = caption
+        elif tool_name == "content.publish_to_socials":
+            validated.update({"title": title, "caption": caption})
+        elif tool_name == "content.publish_to_facebook":
+            validated.update({
+                "title": title,
+                "description": description,
+            })
+        else:
+            validated.update({
+                "title": title,
+                "description": description,
+                "privacy_status": privacy_status,
+            })
+        return validated
+
+    def _publish_waiting_confirmation(
+        self,
+        task: Any,
+        workflow: WorkflowResult,
+        pending: _PendingConfirmation,
+    ) -> None:
+        self._publish_event(
+            "agent.workflow.waiting_confirmation",
+            {
+                "task_id": task.task_id,
+                "plan_id": getattr(workflow, "plan_id", None),
+                "status": WorkflowStatus.WAITING_CONFIRMATION.value,
+                "completed_steps": len(workflow.steps),
+                "failed_step": None,
+                "confirmation_call_id": pending.call.call_id,
+                "error": "Owner confirmation required before publishing.",
+            },
+        )
+
+    def _publish_confirmation_terminal(
+        self,
+        pending: _PendingConfirmation,
+        *,
+        status: WorkflowStatus,
+        error: str | None,
+    ) -> None:
+        self._publish_event(
+            f"agent.workflow.{status.value}",
+            {
+                "task_id": pending.task_id,
+                "plan_id": "confirmation",
+                "status": status.value,
+                "completed_steps": 1,
+                "failed_step": (
+                    None if status is WorkflowStatus.COMPLETED else 1
+                ),
+                "confirmation_call_id": None,
+                "error": error,
+            },
+        )
+
+    def _publish_event(
+        self,
+        name: str,
+        data: dict[str, Any],
+    ) -> None:
+        event_bus = getattr(self.bundle, "event_bus", None)
+
+        if event_bus is None:
+            return
+
+        try:
+            event_bus.publish(AtlasEvent(
+                name=name,
+                source="voice_controller",
+                data=data,
+            ))
+        except Exception as error:
+            # The Reel and pending action remain valid even if the HUD
+            # bridge is temporarily unavailable; never discard them over
+            # a best-effort presentation update.
+            print(
+                "Could not publish Reel confirmation HUD state: "
+                f"{type(error).__name__}: {error}",
+                flush=True,
+            )
 
     def close(self) -> None:
         with self._lock:
@@ -295,7 +1124,21 @@ class AgentVoiceController:
                 "and verified successfully."
             )
 
-        final_step = workflow.steps[-1]
+        # A recording workflow can legitimately finish with a diagnostic or
+        # packaging step. Prefer the successful Reel result wherever it sits
+        # in the completed workflow so Atlas never tells the owner that a
+        # valid video on disk failed merely because it was not the last step.
+        final_step = next(
+            (
+                step
+                for step in reversed(workflow.steps)
+                if step.call.tool_name == "content.record_self_showcase"
+                and step.result is not None
+                and isinstance(step.result.output, dict)
+                and step.result.output.get("ok") is True
+            ),
+            workflow.steps[-1],
+        )
         tool_name = final_step.call.tool_name
         output = (
             final_step.result.output
@@ -1150,12 +1993,50 @@ class AgentVoiceController:
                 else "no caption"
             )
 
+            preview_line = (
+                "I played it back for you with audio. "
+                if output.get("previewed") is not False
+                else "I couldn't play the local preview, but the file is safe. "
+            )
+            package_line = (
+                "I also prepared its cover, subtitles, two Trial variants, "
+                "translation files, collaboration draft, and platform exports. "
+                if output.get("growth_package")
+                else ""
+            )
+            desktop_export = output.get("desktop_export")
+            if (
+                isinstance(desktop_export, dict)
+                and desktop_export.get("ok")
+            ):
+                desktop_line = (
+                    "I also saved the Reel package to your Windows Desktop "
+                    f"in {desktop_export.get('folder')}. "
+                )
+            elif isinstance(desktop_export, dict):
+                desktop_line = (
+                    "The Reel is safe on Atlas, but the Desktop copy failed: "
+                    f"{desktop_export.get('error') or 'unknown error'}. "
+                )
+            else:
+                desktop_line = ""
+            publish_question = (
+                "Do you want me to post this exact Reel to both Instagram "
+                "and Facebook and copy it to your Desktop, save it to your "
+                "Desktop without posting, or delete it?"
+                if self._combined_social_publish_enabled
+                else (
+                    "Do you want me to post it to Instagram and copy it to "
+                    "your Desktop, save it to your Desktop without posting, "
+                    "or delete it?"
+                )
+            )
             return (
                 "Done. I recorded and edited a self-showcase "
-                f"Reel, saved as {filename} at {video_path}. "
-                f"Draft caption: {caption_line}. Say post it "
-                "if you want me to publish it to Instagram, "
-                "or say never mind."
+                f"Reel, saved as {filename}. {preview_line}"
+                f"{package_line}"
+                f"{desktop_line}"
+                f"Draft caption: {caption_line}. {publish_question}"
             )
 
         if (
@@ -1171,6 +2052,53 @@ class AgentVoiceController:
             return (
                 "I couldn't publish the Reel to Instagram: "
                 f"{output.get('error') or 'no reason given'}."
+            )
+
+        if (
+            tool_name == "content.publish_to_youtube"
+            and isinstance(output, dict)
+        ):
+            if output.get("ok") and output.get("permalink"):
+                privacy = output.get("privacy_status") or "unknown"
+                return (
+                    "Done. Uploaded the Short to YouTube as "
+                    f"{privacy}: {output['permalink']}"
+                )
+            return (
+                "I couldn't upload the Short to YouTube: "
+                f"{output.get('error') or 'no reason given'}."
+            )
+
+        if (
+            tool_name == "content.publish_to_facebook"
+            and isinstance(output, dict)
+        ):
+            if output.get("ok") and output.get("permalink"):
+                return (
+                    "Done. Published the Reel to the ATLAS AI Robot "
+                    f"Facebook Page: {output['permalink']}"
+                )
+            return (
+                "I couldn't publish the Reel to Facebook: "
+                f"{output.get('error') or 'no reason given'}."
+            )
+
+        if (
+            tool_name == "content.publish_to_socials"
+            and isinstance(output, dict)
+        ):
+            instagram = output.get("instagram") or {}
+            facebook = output.get("facebook") or {}
+            if output.get("ok"):
+                return (
+                    "Done. I published and verified the Reel on both "
+                    f"Instagram ({instagram.get('permalink')}) and Facebook "
+                    f"({facebook.get('permalink')})."
+                )
+            return (
+                "The coordinated publish was not fully verified. "
+                f"Instagram: {instagram.get('permalink') or instagram.get('error') or 'unknown'}. "
+                f"Facebook: {facebook.get('permalink') or facebook.get('error') or 'unknown'}."
             )
 
         step_count = len(workflow.steps)
@@ -1205,12 +2133,45 @@ class AgentVoiceController:
     ) -> str:
         call_id = workflow.confirmation_call_id
         description = None
+        pending_tool = None
 
         if call_id:
             for step in workflow.steps:
                 if step.call.call_id == call_id:
                     description = step.description
+                    pending_tool = step.call.tool_name
                     break
+
+        if pending_tool == "content.publish_to_instagram":
+            return (
+                "I played the finished Reel back for you with audio. "
+                "Do you want me to post it to Instagram and copy it to your "
+                "Desktop, save it to your Desktop without posting, or delete it?"
+            )
+
+        if pending_tool == "content.publish_to_youtube":
+            return (
+                "I played the finished Short back for you with audio. "
+                "Do you want me to upload this exact video privately to "
+                "YouTube and copy it to your Desktop, save it to your Desktop "
+                "without posting, or delete it?"
+            )
+
+        if pending_tool == "content.publish_to_facebook":
+            return (
+                "I played the finished Reel back for you with audio. "
+                "Do you want me to publish this exact video to the ATLAS AI "
+                "Robot Facebook Page and copy it to your Desktop, save it to "
+                "your Desktop without posting, or delete it?"
+            )
+
+        if pending_tool == "content.publish_to_socials":
+            return (
+                "I played the finished Reel back for you with audio. Do you "
+                "want me to publish this exact Reel to both Instagram and the "
+                "ATLAS AI Robot Facebook Page and copy it to your Desktop, "
+                "save it to your Desktop without posting, or delete it?"
+            )
 
         if description:
             return (

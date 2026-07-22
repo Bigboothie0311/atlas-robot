@@ -144,15 +144,18 @@ def test_focus_or_open_app_rejects_unconfigured_path(companion, monkeypatch):
 
 
 def test_active_window_returns_foreground_title(companion, monkeypatch):
+    runs = []
     monkeypatch.setattr(
         companion.subprocess,
         "run",
-        lambda *a, **k: SimpleNamespace(stdout="Fusion 360 - ATLAS.f3d\n"),
+        lambda *a, **k: runs.append(k)
+        or SimpleNamespace(stdout="Fusion 360 - ATLAS.f3d\n"),
     )
 
     result = companion.act_active_window({})
 
     assert result == {"ok": True, "title": "Fusion 360 - ATLAS.f3d"}
+    assert runs[0]["creationflags"] == companion._NO_WINDOW
 
 
 def test_active_window_handles_empty_title(companion, monkeypatch):
@@ -274,6 +277,36 @@ def test_start_recording_launches_ffmpeg_and_saves_state(companion, monkeypatch,
     assert launched[0][0] == "ffmpeg"
     state = companion._load_recording_state()
     assert state["active"]["pid"] == 4242
+
+
+def test_start_recording_hides_ffmpeg_console(companion, monkeypatch, tmp_path):
+    companion.CONFIG = {
+        **companion.CONFIG,
+        "recordings_folder": str(tmp_path / "recordings"),
+    }
+    monkeypatch.setattr(
+        companion, "_recording_state_path", lambda: tmp_path / "state.json"
+    )
+    monkeypatch.setattr(
+        companion,
+        "act_active_window",
+        lambda _body: {"ok": True, "title": "Notepad"},
+    )
+    launches = []
+
+    class FakeProcess:
+        pid = 4242
+
+    monkeypatch.setattr(
+        companion.subprocess,
+        "Popen",
+        lambda args, **kwargs: launches.append((args, kwargs)) or FakeProcess(),
+    )
+
+    result = companion.act_start_recording({"max_seconds": 5})
+
+    assert result["ok"] is True
+    assert launches[0][1]["creationflags"] == companion._NO_WINDOW
 
 
 def test_start_recording_uses_broadly_compatible_encoder_flags(companion, monkeypatch, tmp_path):
@@ -435,6 +468,62 @@ def test_new_capture_actions_are_whitelisted(companion):
 def test_pc_power_and_recycle_bin_actions_are_whitelisted(companion):
     for action in ("shutdown_pc", "cancel_pc_shutdown", "empty_recycle_bin", "youtube_search"):
         assert action in companion.ACTIONS
+
+
+def test_private_youtube_search_uses_a_fresh_private_browser(
+    companion, monkeypatch
+):
+    runs = []
+    popens = []
+    monkeypatch.setattr(
+        companion.subprocess,
+        "run",
+        lambda args, **kwargs: runs.append(args)
+        or SimpleNamespace(returncode=0, stderr=""),
+    )
+    monkeypatch.setattr(
+        companion.subprocess,
+        "Popen",
+        lambda args, **kwargs: popens.append(args),
+    )
+
+    result = companion.act_youtube_search({
+        "query": "robotics builds",
+        "private": True,
+        "fullscreen": False,
+    })
+
+    assert result == {"ok": True, "query": "robotics builds"}
+    assert len(runs) == 1
+    script = runs[0][-1]
+    assert "--inprivate" in script
+    assert "--incognito" in script
+    assert "youtube.com/results" in script
+    assert popens == []
+
+
+def test_private_youtube_search_fails_closed_without_a_private_browser(
+    companion, monkeypatch
+):
+    monkeypatch.setattr(
+        companion.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=1,
+            stderr="No private-capable browser found.",
+        ),
+    )
+
+    result = companion.act_youtube_search({
+        "query": "robotics builds",
+        "private": True,
+        "fullscreen": False,
+    })
+
+    assert result == {
+        "ok": False,
+        "error": "No private-capable browser found.",
+    }
 
 
 def test_shutdown_pc_schedules_delayed_shutdown(companion, monkeypatch):
@@ -720,3 +809,183 @@ def test_notepad_ships_in_the_default_approved_apps(companion):
 
     assert entry["path"] == "notepad.exe"
     assert entry["match"] == "Notepad"
+
+
+def test_general_control_actions_are_registered(companion):
+    expected = {
+        "control_status", "control_stop", "control_resume",
+        "observe_desktop", "desktop_input", "window_control",
+        "clipboard", "file_operation", "launch_process", "process_control",
+    }
+
+    assert expected <= set(companion.ACTIONS)
+
+
+def test_emergency_stop_blocks_general_desktop_actions(companion):
+    companion.act_control_stop({"reason": "test stop"})
+
+    result = companion.act_desktop_input({"action": "click", "x": 1, "y": 2})
+
+    assert result["ok"] is False
+    assert "emergency-stopped" in result["error"]
+    assert companion.act_control_status({})["stop_reason"] == "test stop"
+    assert companion.act_control_resume({})["enabled"] is True
+
+
+def test_general_file_operations_cover_user_files(companion, tmp_path):
+    target = tmp_path / "notes" / "atlas.txt"
+
+    written = companion.act_file_operation({
+        "operation": "write",
+        "path": str(target),
+        "text": "Atlas made this.",
+    })
+    read = companion.act_file_operation({
+        "operation": "read",
+        "path": str(target),
+    })
+    deleted = companion.act_file_operation({
+        "operation": "delete",
+        "path": str(target),
+    })
+
+    assert written == {"ok": True, "path": str(target), "bytes": 16}
+    assert read["ok"] is True
+    assert read["data_b64"] == "QXRsYXMgbWFkZSB0aGlzLg=="
+    assert deleted["deleted"] is True
+    assert not target.exists()
+
+
+def test_general_file_operations_reject_protected_roots(
+    companion, tmp_path, monkeypatch
+):
+    protected = tmp_path / "Windows"
+    protected.mkdir()
+    monkeypatch.setattr(
+        companion, "_protected_windows_roots", lambda: (str(protected),)
+    )
+
+    with pytest.raises(PermissionError, match="protected"):
+        companion.act_file_operation({
+            "operation": "write",
+            "path": str(protected / "system.ini"),
+            "text": "nope",
+        })
+
+
+def test_control_audit_omits_payload_contents(companion, tmp_path):
+    companion._audit_control(
+        "observe_desktop",
+        {"text": "private words"},
+        {"image_b64": "c2NyZWVu", "data_b64": "ZmlsZQ=="},
+    )
+
+    entry = json.loads(
+        (tmp_path / "control_audit.jsonl").read_text().strip()
+    )
+
+    assert entry["request"]["text"]["characters"] == 13
+    assert entry["result"]["image_b64"]["encoded_chars"] == 8
+    assert entry["result"]["data_b64"]["encoded_chars"] == 8
+    assert "private words" not in json.dumps(entry)
+    assert "c2NyZWVu" not in json.dumps(entry)
+
+
+# --- Regression: on-camera console-window spam -------------------------
+#
+# The desktop autonomy loop calls observe_desktop once per step, and
+# observe_desktop fans out to act_screenshot + act_active_window +
+# act_active_apps. Any of those that shells out to PowerShell without
+# CREATE_NO_WINDOW pops a real console window onto the owner's desktop --
+# which is exactly what got recorded into a Reel instead of the demo.
+
+
+def _record_powershell_runs(companion, monkeypatch):
+    runs = []
+
+    def fake_run(command, **kwargs):
+        runs.append({"command": command, **kwargs})
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(companion.subprocess, "run", fake_run)
+    return runs
+
+
+@pytest.mark.parametrize(
+    "action_name",
+    [
+        "act_screenshot",
+        "act_active_apps",
+        "act_active_window",
+        "act_system_info",
+    ],
+)
+def test_console_actions_never_pop_a_visible_window(
+    companion, monkeypatch, action_name
+):
+    runs = _record_powershell_runs(companion, monkeypatch)
+
+    getattr(companion, action_name)({})
+
+    assert runs, f"{action_name} ran no subprocess"
+    for run in runs:
+        assert run.get("creationflags") == companion._NO_WINDOW, (
+            f"{action_name} ran {run['command'][0]} with a visible console"
+        )
+
+
+def test_observe_desktop_pops_no_console_windows(companion, monkeypatch):
+    runs = _record_powershell_runs(companion, monkeypatch)
+    monkeypatch.setattr(companion.os, "name", "posix")
+
+    companion.act_observe_desktop({})
+
+    assert runs
+    assert all(
+        run.get("creationflags") == companion._NO_WINDOW for run in runs
+    )
+
+
+# --- Regression: Paint opened but nothing was ever drawn ---------------
+#
+# act_desktop_input exposed move/click/double_click/scroll only. Freehand
+# drawing needs the button held down across a path, so the desktop agent
+# could open Paint and then had no action available that could make a
+# mark -- it clicked, saw an unchanged canvas, and stalled.
+
+
+def test_desktop_input_supports_drag_for_freehand_drawing(
+    companion, monkeypatch
+):
+    scripts = []
+
+    def fake_hidden(script, **kwargs):
+        scripts.append(script)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(companion, "_run_hidden_powershell", fake_hidden)
+
+    result = companion.act_desktop_input({
+        "action": "drag",
+        "path": [[10, 20], [30, 40], [50, 60]],
+    })
+
+    assert result["ok"] is True
+    assert result["action"] == "drag"
+    assert result["points"] == 3
+    script = scripts[0]
+    # Button goes down once at the start, up once at the end, with the
+    # cursor moved through every intermediate point in between. Flags are
+    # emitted as decimal, matching the existing click path.
+    assert script.count("mouse_event(2,") == 1
+    assert script.count("mouse_event(4,") == 1
+    assert "SetCursorPos(10,20)" in script
+    assert "SetCursorPos(30,40)" in script
+    assert "SetCursorPos(50,60)" in script
+
+
+def test_desktop_input_drag_rejects_a_degenerate_path(companion):
+    result = companion.act_desktop_input({"action": "drag", "path": [[1, 2]]})
+
+    assert result["ok"] is False
+    assert "two" in result["error"].lower()

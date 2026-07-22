@@ -256,6 +256,33 @@ def register_pc_tools(
             pc_client.execute("list_recordings")
         )
 
+    def desktop_action(
+        action: str,
+        arguments: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        endpoints = {
+            "observe": "observe_desktop",
+            "input": "desktop_input",
+            "window": "window_control",
+            "clipboard": "clipboard",
+            "file": "file_operation",
+            "launch": "launch_process",
+            "process": "process_control",
+            "status": "control_status",
+            "stop": "control_stop",
+            "resume": "control_resume",
+        }
+        if action not in endpoints:
+            raise ValueError(
+                "action must be observe/input/window/clipboard/file/"
+                "launch/process/status/stop/resume"
+            )
+        if arguments is not None and not isinstance(arguments, dict):
+            raise ValueError("arguments must be an object or null")
+        return asdict(
+            pc_client.execute(endpoints[action], arguments or {})
+        )
+
     tools = [
         AtlasTool(
             name="pc.ensure_online",
@@ -650,6 +677,56 @@ def register_pc_tools(
                 }
             },
         ),
+        AtlasTool(
+            name="pc.desktop_action",
+            description=(
+                "General logged control of the current interactive Windows "
+                "desktop. Observe the screen, use mouse/keyboard, manage "
+                "windows and clipboard, launch/stop user processes, and "
+                "read/write/copy/move/delete any non-system user file. "
+                "Protected Windows/program/control paths and elevation are "
+                "excluded. Use action='observe' between mutations when the "
+                "result depends on what is visible. Input arguments: "
+                "input {action: move|click|double_click|drag|scroll|text|keys, "
+                "x?,y?,path?,button?,delta?,text?,keys?} where drag holds the "
+                "button through path=[[x,y],...] and is the only action that "
+                "draws; window {action,title}; "
+                "clipboard {action:read|write,text?}; file {operation,path,"
+                "destination?,text?,data_b64?}; launch {executable,arguments,"
+                "working_directory?,hidden?}; process {action:list|stop,pid?}."
+            ),
+            runs_on="pc",
+            handler=desktop_action,
+            permission_level=1,
+            timeout_seconds=150,
+            metadata={
+                # This low-level escape hatch intentionally accepts a
+                # different free-form payload for each companion endpoint.
+                # OpenAI strict function schemas reject such objects; the
+                # higher-level pc.autonomous_desktop tool is the model-facing
+                # route, while local callers can keep using this primitive.
+                "openai_plannable": False,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": [
+                                "observe", "input", "window", "clipboard",
+                                "file", "launch", "process", "status",
+                                "stop", "resume",
+                            ],
+                        },
+                        "arguments": {
+                            "type": ["object", "null"],
+                            "additionalProperties": True,
+                        },
+                    },
+                    "required": ["action", "arguments"],
+                    "additionalProperties": False,
+                }
+            },
+        ),
     ]
 
     for tool in tools:
@@ -760,6 +837,10 @@ def register_pc_tools(
             result.output,
             required_data_field="recordings",
         ),
+    )
+    verifier.register(
+        "pc.desktop_action",
+        lambda call, result: _verify_pc_action(result.output),
     )
 
     return tools

@@ -238,7 +238,15 @@ class OpenAIPlanGenerator:
             )
 
         tools = sorted(
-            list(available_tools),
+            (
+                tool
+                for tool in available_tools
+                if tool.metadata.get(
+                    "openai_plannable",
+                    True,
+                )
+                is not False
+            ),
             key=lambda tool: tool.name,
         )
 
@@ -321,6 +329,25 @@ class OpenAIPlanGenerator:
             payload,
             set(tool_names),
         )
+        # A Reel's mission is the recording director's only copy of the
+        # owner's exact visual request. Models sometimes generalized "show me
+        # using MS Paint" into "include requested PC shots", which made the
+        # director legally free to omit Paint. Preserve the complete owner
+        # goal verbatim for every recording step; downstream privacy redaction
+        # still runs before any creative-model call.
+        steps = [
+            PlanStepProposal(
+                tool=step.tool,
+                description=step.description,
+                arguments={
+                    **step.arguments,
+                    "mission": normalized_goal,
+                },
+            )
+            if step.tool == "content.record_self_showcase"
+            else step
+            for step in steps
+        ]
         usage = _attribute(response, "usage")
         input_tokens = int(
             _attribute(
@@ -383,7 +410,7 @@ class OpenAIPlanGenerator:
         # real planner whenever one of these words is present.
         if words & {
             "reel", "showcase", "record", "recording",
-            "publish", "publishing",
+            "publish", "publishing", "upload", "youtube",
         }:
             return None
 
@@ -1393,6 +1420,9 @@ class OpenAIPlanGenerator:
             "or reinterpret permission levels. Use exact "
             "argument property names and provide every "
             "field required by the selected tool schema. "
+            "For content.record_self_showcase, copy the owner's complete "
+            "request into mission without generalizing or dropping named "
+            "apps, required demonstrations, or on-camera constraints. "
             "Use null for nullable fields when no value is "
             "needed. Add no undeclared fields. When a later "
             "step requires data produced by an earlier "

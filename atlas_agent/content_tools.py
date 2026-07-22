@@ -1,6 +1,6 @@
 """Agent tools for the self-showcase pipeline: narrate a tour of Atlas's
 own HUD, edit it into a Reel, and (only with explicit confirmation)
-publish it to Instagram.
+publish it to Instagram or YouTube.
 
 content.record_self_showcase records Atlas's own screen -- the physical
 HUD kiosk on the Pi (see hud_capture.py) -- by default, not the Windows
@@ -36,25 +36,33 @@ scripting fails: it randomizes phrasing, beat selection, and order, but
 its *content* is a fixed handful of talking points, which is exactly
 why every early Reel felt like the same video.
 
-content.publish_to_instagram is the one tool in this codebase that uses
-PermissionLevel.CONFIRMATION_REQUIRED: it's the step the safety model
-explicitly requires confirming the exact media and caption for before
-anything goes public.
+The social publishing tools use PermissionLevel.CONFIRMATION_REQUIRED:
+the safety model explicitly requires confirming the exact media and
+metadata before any upload runs.
 """
 
 from __future__ import annotations
 
+import json
+import math
 import random
+import re
+import shutil
 import time
 import wave
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 import requests
 
 import content_pipeline
+import facebook_publish
 import hud_capture
 import instagram_publish
+import reel_package
+import social_publish
+import youtube_publish
+from atlas_growth import DEFAULT_DATABASE_PATH, GrowthStore
 from atlas_agent.tool_registry import ToolRegistry
 from atlas_agent.tools import AtlasTool
 from atlas_agent.verifier import ResultVerifier, VerificationCheck
@@ -70,31 +78,206 @@ RECORDING_BUFFER_SECONDS = 3
 # Lets the HUD's own CSS transition/animation finish before frame
 # capture starts, so the clip doesn't open on a mid-transition frame.
 HUD_ACTION_SETTLE_SECONDS = 1.0
+REEL_PREVIEW_TIMEOUT_SECONDS = 180
+MIN_REEL_SECONDS = 40.0
+MAX_REEL_SECONDS = 80.0
+SHOWCASE_TOOL_TIMEOUT_SECONDS = 900
 
 # How far before the end of a "type_text" beat the typing should finish.
 # edit_reel trims each clip back to its narration length, so typing
 # paced to the full clip would get cut off mid-word; this lands the last
 # character just inside the final cut.
 TYPING_LEAD_SECONDS = 2.0
+PC_SAFE_SURFACE_SETTLE_SECONDS = 4.0
+PC_RECORDING_FINALIZE_SECONDS = 1.0
+PC_DOWNLOAD_ATTEMPTS = 3
+PC_DOWNLOAD_RETRY_SECONDS = 1.0
 
-# The default tour for "make a promo video of yourself" -- an honest,
-# narrated walk through real, currently-working features. Wesley's ask:
-# Atlas should show his own screen and actually talk about what he can
-# do, not just sit on one static shot -- and not post the exact same
-# script and clip every single time either, so this is randomized
-# (phrasing, and which extra beats show up) rather than one fixed
-# tuple. Weather radar and self-diagnostics always run -- they're the
-# only two beats with a real HUD-driving action -- everything else
-# varies. All EXTRA_BEATS use action="idle" because system status,
-# printer, and gaming-PC panels are already part of the always-visible
-# HUD dashboard (see hud/app.js's #printer-panel, .panel-system-status,
-# .panel-gaming-pc), not separate overlays that need driving open.
+# A desktop_goal beat drives a vision loop: every step is a full-screen
+# screenshot, a model decision, and a real input action. That is far
+# slower than the beat's narration, and ffmpeg's -t is a hard
+# self-terminating cap -- a cap sized to the narration ended the
+# recording during the launch phase, so the finished Reel showed Paint
+# opening and never showed it being used. Size the cap from the step
+# budget instead, then stop as soon as the goal actually reports done.
+PC_DESKTOP_GOAL_STEP_SECONDS = 15.0
+PC_DESKTOP_GOAL_MAX_RECORDING_SECONDS = 600
+
+DESKTOP_EXPORT_PACKAGE_FOLDERS = frozenset(
+    {"subtitles", "translations", "trials"}
+)
+
+_MS_PAINT_REQUEST = re.compile(
+    r"\b(?:microsoft\s+paint|ms\s+paint|mspaint)\b",
+    re.IGNORECASE,
+)
+
+
+def _export_reel_to_desktop(
+    *,
+    video_path: str | Path,
+    package_path: str | Path | None,
+    pc_client: Any,
+    sftp_client: Any,
+    remote_root: str,
+) -> dict[str, Any]:
+    """Copy one curated, hash-verified Reel package to Windows."""
+    source_video = Path(video_path).resolve()
+    destination = PureWindowsPath(remote_root) / source_video.stem
+    try:
+        connection = pc_client.ensure_online(wake_if_needed=True)
+        if not getattr(connection, "success", False):
+            raise RuntimeError(
+                getattr(connection, "error", None)
+                or getattr(connection, "message", None)
+                or "the PC is offline"
+            )
+        sftp_client.make_directory(destination)
+        sources: list[tuple[Path, PureWindowsPath]] = [
+            (source_video, PureWindowsPath("reel.mp4"))
+        ]
+        package = Path(package_path).resolve() if package_path else None
+        if package is not None and package.is_dir():
+            root_files = {
+                "caption.txt",
+                "cover.png",
+                "manifest.json",
+                "collaboration_kit.json",
+                "collaboration_pitch.txt",
+            }
+            for item in sorted(package.rglob("*")):
+                if not item.is_file():
+                    continue
+                relative = item.relative_to(package)
+                if (
+                    relative.as_posix() in root_files
+                    or relative.parts[0] in DESKTOP_EXPORT_PACKAGE_FOLDERS
+                ):
+                    sources.append(
+                        (item, PureWindowsPath(*relative.parts))
+                    )
+
+        created_directories = {destination}
+        uploaded: list[str] = []
+        for local_path, relative_path in sources:
+            remote_path = destination / relative_path
+            parent = remote_path.parent
+            if parent not in created_directories:
+                sftp_client.make_directory(parent)
+                created_directories.add(parent)
+            transfer = sftp_client.upload(local_path, remote_path)
+            if not (
+                getattr(transfer, "ok", False)
+                and getattr(transfer, "verified", False)
+            ):
+                raise RuntimeError(
+                    getattr(transfer, "error", None)
+                    or f"verification failed for {remote_path.name}"
+                )
+            uploaded.append(str(remote_path))
+        return {
+            "ok": True,
+            "folder": str(destination),
+            "files": uploaded,
+            "file_count": len(uploaded),
+        }
+    except Exception as error:
+        return {
+            "ok": False,
+            "folder": str(destination),
+            "files": [],
+            "file_count": 0,
+            "error": f"{type(error).__name__}: {error}",
+        }
+
+
+def _required_pc_scene(mission: str | None) -> dict[str, Any] | None:
+    """Return a deterministic scene for an explicit owner request.
+
+    Model-written tours are intentionally creative, but named visual
+    requirements are contracts rather than suggestions. Keep this small and
+    deterministic so a request to show Paint cannot be generalized into a
+    generic "PC shot" or silently replaced with more HUD footage.
+    """
+    if not isinstance(mission, str) or not _MS_PAINT_REQUEST.search(mission):
+        return None
+
+    return {
+        "narration": (
+            "You asked to watch me use Microsoft Paint, so here is the real "
+            "desktop while I make a clean original picture from scratch."
+        ),
+        "source": "pc",
+        "action": "idle",
+        "pc_action": {
+            "type": "desktop_goal",
+            "goal": (
+                "On camera, focus an existing Microsoft Paint window or open "
+                "Microsoft Paint exactly once if it is not running. Maximize "
+                "it, then draw a clean, simple original picture on the canvas "
+                "using drag strokes -- a click alone leaves no visible mark, "
+                "so every stroke must be a drag along a path of points. Keep "
+                "Paint as the only main app on screen, do not open a terminal "
+                "or duplicate Paint windows, and leave the finished painting "
+                "clearly visible."
+            ),
+            # Opening Paint, maximizing it, choosing a tool and drawing
+            # several strokes cannot fit in a handful of steps; too small a
+            # budget produced a Reel of Paint sitting open and untouched.
+            "max_steps": 14,
+        },
+    }
+
+
+def _ensure_required_pc_scene(
+    tour: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+    mission: str | None,
+) -> tuple[dict[str, Any], ...]:
+    required = _required_pc_scene(mission)
+    directed = tuple(dict(beat) for beat in tour)
+    if required is None:
+        return directed
+
+    for beat in directed:
+        action = beat.get("pc_action")
+        if (
+            beat.get("source") == "pc"
+            and isinstance(action, dict)
+            and action.get("type") == "desktop_goal"
+            and _MS_PAINT_REQUEST.search(str(action.get("goal") or ""))
+        ):
+            return directed
+
+    insert_at = max(1, len(directed) - 1)
+    if len(directed) < 8:
+        return directed[:insert_at] + (required,) + directed[insert_at:]
+
+    # Preserve the hook and closing question when an eight-beat model tour
+    # has already used the maximum shot budget.
+    replacement = min(max(1, len(directed) - 2), len(directed) - 1)
+    return directed[:replacement] + (required,) + directed[replacement + 1:]
+
+# Each completed Reel records the exact narration and shots used. The next
+# script request receives this bounded history, making "do not repeat" a
+# real constraint instead of an impossible stateless instruction.
+SHOWCASE_HISTORY_FILENAME = "showcase_history.json"
+SHOWCASE_HISTORY_LIMIT = 8
+FALLBACK_TOUR_ATTEMPTS = 24
+
+# Offline fallback material. Every item drives a visibly different HUD
+# state; weather and diagnostics are options, never mandatory fixtures.
+# The selector below rotates away from recently used states before it
+# randomizes, so an API/budget failure cannot silently resurrect the old
+# HUD -> weather -> diagnostics template.
 INTRO_LINES: tuple[str, ...] = (
-    "Hi, I'm A.T.L.A.S. Let me show you around my own screen.",
-    "Hey, it's A.T.L.A.S. -- here's a quick look at what's live on my "
-    "display right now.",
-    "A.T.L.A.S. here. Let me walk you through what I've got running "
-    "today.",
+    "Hi, I'm Atlas. This is not a static mockup. Let me show you "
+    "what is genuinely live on my own screen and what I can do with it.",
+    "Hey, it's Atlas -- here's a quick look at what's live on my "
+    "display right now, how the pieces connect, and why I keep the "
+    "evidence visible instead of asking you to take my word for it.",
+    "Atlas here. Let me walk you through what I've got running "
+    "today. Every panel you are about to see is part of the real system, "
+    "not a collection of screenshots prepared ahead of time.",
 )
 
 WEATHER_LINES: tuple[str, ...] = (
@@ -116,36 +299,67 @@ DIAGNOSTICS_LINES: tuple[str, ...] = (
 )
 
 OUTRO_LINES: tuple[str, ...] = (
-    "That's a quick look at what I can do.",
-    "That's just a slice of what's running on me right now.",
-    "And that's a peek at my own screen -- there's more where that "
-    "came from.",
+    "That is one honest look at what I can do without hiding the machinery. "
+    "What real task should I take on and show you next?",
+    "That is only one slice of what is running on me right now. Which part "
+    "should I push further in the next video?",
+    "That was my own screen and a real run, not a staged demo. What should "
+    "I build, test, or try on camera next?",
 )
 
-EXTRA_BEATS: tuple[dict[str, str], ...] = (
+HUD_FEATURE_BEATS: tuple[dict[str, str], ...] = (
     {
         "narration": (
             "Over here is my system status -- live CPU, memory, and "
             "thermal readings straight off this Pi."
         ),
-        "action": "idle",
+        "action": "focus_system",
     },
     {
         "narration": (
             "This panel tracks my printer -- real status from the "
             "device, not a guess."
         ),
-        "action": "idle",
+        "action": "focus_printer",
     },
     {
         "narration": (
             "And this keeps an eye on the gaming PC on the network -- "
             "health and what's running over there."
         ),
-        "action": "idle",
+        "action": "focus_pc",
+    },
+    {
+        "narration": (
+            "This is my social link -- the account and latest Reel "
+            "telemetry come back to my own display."
+        ),
+        "action": "focus_instagram",
+    },
+    {
+        "narration": (
+            "My live system log keeps moving while I work, mixing real "
+            "telemetry with the interface activity around it."
+        ),
+        "action": "focus_terminal",
+    },
+    {
+        "narration": (
+            "The center core is where my current state, workload, and "
+            "voice activity stay visible."
+        ),
+        "action": "focus_core",
+    },
+    {
+        "narration": random.choice(WEATHER_LINES),
+        "action": "weather_open",
+    },
+    {
+        "narration": random.choice(DIAGNOSTICS_LINES),
+        "action": "diagnostics",
     },
 )
-MAX_EXTRA_BEATS = 2
+MAX_FEATURE_BEATS = 5
 
 # Beats with "source": "pc" record the Windows PC's own screen instead
 # of the HUD (via pc.start_screen_recording's underlying primitive) --
@@ -178,6 +392,30 @@ PC_DEMO_BEATS: tuple[dict[str, Any], ...] = (
             "query": "robotics project builds",
         },
     },
+    {
+        "narration": (
+            "This time I'm leaving a note on the PC while I narrate "
+            "the rest from here."
+        ),
+        "source": "pc",
+        "pc_action": {
+            "type": "type_text",
+            "app": "notepad",
+            "text": "Atlas was here — fresh run, fresh evidence.",
+        },
+    },
+    {
+        "narration": (
+            "A quick hop to the desktop: I can write to the screen and "
+            "bring the result back into my own edit."
+        ),
+        "source": "pc",
+        "pc_action": {
+            "type": "type_text",
+            "app": "notepad",
+            "text": "Robot on the Pi. Hands on the PC. One finished Reel.",
+        },
+    },
 )
 # open_app is a real, supported pc_action for custom 'beats' -- it's
 # just not in this default pool. It only launches apps from the PC
@@ -191,52 +429,85 @@ PC_DEMO_BEATS: tuple[dict[str, Any], ...] = (
 # tour uses; a caller who knows a real approved app name can still pass
 # open_app explicitly via a custom 'beats' list.
 MAX_PC_DEMO_BEATS = 1
-PC_DEMO_PROBABILITY = 0.5
+# A canned desktop action is rarely interesting twice. The live writer may use
+# the whole desktop creatively; the offline fallback stays on Atlas's own HUD
+# instead of forcing the same YouTube/Notepad insert into every video.
+PC_DEMO_PROBABILITY = 0.0
 
 
 def _build_default_tour(
-    *, pc_demo_available: bool = False
+    *,
+    pc_demo_available: bool = False,
+    recent_tours: tuple[dict[str, Any], ...] = (),
 ) -> tuple[dict[str, Any], ...]:
-    """Builds one varied instance of the default tour: randomized
-    intro/outro phrasing, the always-on weather + diagnostics beats
-    (with randomized phrasing too), a random subset of extra HUD
-    beats, and -- only when this runtime actually has a PC connection
-    (pc_demo_available) -- a coin-flip chance of hopping over to a PC
-    demo beat before hopping back to the HUD for the outro. None of
-    this is deterministic: consecutive "record a promo video" calls
-    shouldn't produce the same script, beat selection, or clip mix
-    twice in a row."""
-    extra = random.sample(
-        EXTRA_BEATS,
-        k=random.randint(0, min(MAX_EXTRA_BEATS, len(EXTRA_BEATS))),
-    )
+    """Build a genuinely rotating offline tour.
+
+    The previous fallback hardcoded weather and diagnostics into every
+    Reel. This one selects two least-recently-used visual features and
+    never puts weather and diagnostics in the same automatic video.
+    """
+    recent_actions = [
+        str(beat.get("action") or "idle")
+        for entry in recent_tours
+        for beat in entry.get("beats", [])
+        if isinstance(entry, dict) and isinstance(beat, dict)
+    ]
+    action_counts = {
+        beat["action"]: recent_actions.count(beat["action"])
+        for beat in HUD_FEATURE_BEATS
+    }
+    minimum_count = min(action_counts.values(), default=0)
+    preferred = [
+        beat for beat in HUD_FEATURE_BEATS
+        if action_counts[beat["action"]] == minimum_count
+    ]
+    remaining = [
+        beat for beat in HUD_FEATURE_BEATS if beat not in preferred
+    ]
+    random.shuffle(preferred)
+    random.shuffle(remaining)
+    selected: list[dict[str, Any]] = []
+
+    for beat in [*preferred, *remaining]:
+        actions = {item["action"] for item in selected}
+        if (
+            beat["action"] == "weather_open"
+            and "diagnostics" in actions
+        ) or (
+            beat["action"] == "diagnostics"
+            and "weather_open" in actions
+        ):
+            continue
+        selected.append(dict(beat))
+        if len(selected) == MAX_FEATURE_BEATS:
+            break
 
     pc_demo: tuple[dict[str, Any], ...] = ()
     if pc_demo_available and random.random() < PC_DEMO_PROBABILITY:
+        recent_pc_details = {
+            shot[2]
+            for entry in recent_tours
+            for shot in _tour_signature(
+                entry.get("beats") if isinstance(entry, dict) else ()
+            )
+            if len(shot) >= 3 and shot[0] == "pc"
+        }
+        pc_pool = [
+            beat for beat in PC_DEMO_BEATS
+            if str(
+                (beat.get("pc_action") or {}).get("query")
+                or (beat.get("pc_action") or {}).get("text")
+                or ""
+            ).casefold() not in recent_pc_details
+        ] or list(PC_DEMO_BEATS)
         pc_demo = tuple(
             random.sample(
-                PC_DEMO_BEATS,
-                k=min(MAX_PC_DEMO_BEATS, len(PC_DEMO_BEATS)),
+                pc_pool,
+                k=min(MAX_PC_DEMO_BEATS, len(pc_pool)),
             )
         )
 
-    # Weather and diagnostics always show up somewhere (the only two
-    # beats with a real HUD-driving action, and existing callers rely
-    # on that), but not always in the same relative order or position
-    # -- shuffled together with whatever extra/PC beats got picked, so
-    # the whole middle of the tour, not just its phrasing, varies.
-    middle = [
-        {
-            "narration": random.choice(WEATHER_LINES),
-            "action": "weather_open",
-        },
-        {
-            "narration": random.choice(DIAGNOSTICS_LINES),
-            "action": "diagnostics",
-        },
-        *extra,
-        *pc_demo,
-    ]
+    middle = [*selected, *pc_demo]
     random.shuffle(middle)
 
     return (
@@ -256,6 +527,17 @@ def _apply_hud_action(action: str) -> None:
     a HUD-state hiccup shouldn't abort the whole recording, it just
     means that beat's clip won't show the intended overlay."""
     try:
+        focus = (
+            action.removeprefix("focus_")
+            if action.startswith("focus_")
+            else None
+        )
+        requests.post(
+            f"{HUB}/hud/showcase_focus",
+            json={"focus": focus},
+            timeout=HUD_REQUEST_TIMEOUT_SECONDS,
+        )
+
         if action == "weather_open":
             requests.post(
                 f"{HUB}/hud/weather_overlay",
@@ -305,6 +587,9 @@ def _perform_pc_action(
     pc_client: Any,
     pc_action: dict[str, Any] | None,
     clip_seconds: float = 0.0,
+    *,
+    strict: bool = False,
+    pc_demo_director: Any = None,
 ) -> None:
     """Drives one real action on the PC during a "source": "pc" beat --
     best-effort, like _apply_hud_action: an unrecognized or missing
@@ -316,12 +601,18 @@ def _perform_pc_action(
     action_type = pc_action.get("type")
 
     try:
+        result = None
         if action_type == "youtube_search":
-            import pc_control
-
-            pc_control.youtube_search(str(pc_action.get("query", "")))
+            result = pc_client.execute(
+                "youtube_search",
+                {
+                    "query": str(pc_action.get("query", "")),
+                    "fullscreen": True,
+                    "private": True,
+                },
+            )
         elif action_type == "open_app":
-            pc_client.execute(
+            result = pc_client.execute(
                 "open_app", {"app": str(pc_action.get("app", ""))}
             )
         elif action_type == "type_text":
@@ -332,7 +623,7 @@ def _perform_pc_action(
             # static shot -- and isn't still going when edit_reel trims
             # the clip back to the narration's length. TYPING_LEAD_
             # SECONDS lands the last character just before the cut.
-            pc_client.execute(
+            result = pc_client.execute(
                 "type_text",
                 {
                     "app": str(pc_action.get("app") or "notepad"),
@@ -342,12 +633,71 @@ def _perform_pc_action(
                     ),
                 },
             )
+        elif action_type == "desktop_goal":
+            if pc_demo_director is None:
+                raise RuntimeError("general desktop director is unavailable")
+            directed = pc_demo_director(
+                str(pc_action.get("goal") or "Demonstrate one useful PC action."),
+                max_steps=int(pc_action.get("max_steps") or 3),
+            )
+            if not isinstance(directed, dict) or not directed.get("ok"):
+                raise RuntimeError(
+                    (directed or {}).get("error")
+                    if isinstance(directed, dict)
+                    else "desktop direction failed"
+                )
+        elif strict:
+            raise RuntimeError(f"unsupported PC demo action: {action_type}")
+
+        if result is not None and (
+            not result.ok or not (result.data or {}).get("ok")
+        ):
+            raise RuntimeError(
+                result.error
+                or (result.data or {}).get("error")
+                or f"{action_type} failed"
+            )
     except Exception as error:
+        if strict:
+            raise PcDemoCaptureError(
+                f"PC demo action '{action_type}' failed: {error}"
+            ) from error
         print(
             f"PC demo action '{action_type}' failed during "
             f"self-showcase recording: {error}",
             flush=True,
         )
+
+
+def _prepare_pc_demo_surface(
+    pc_client: Any,
+    pc_action: dict[str, Any] | None,
+) -> None:
+    """Move the PC onto a known non-personal surface before capture starts.
+
+    YouTube demos open the generated public search in a private browser
+    window first. Typing demos open their approved blank editor first.
+    This prevents the opening frames from exposing whichever personal app
+    happened to be focused before Atlas began the Reel.
+    """
+    if not isinstance(pc_action, dict):
+        return
+
+    action_type = pc_action.get("type")
+    if action_type == "youtube_search":
+        _perform_pc_action(pc_client, pc_action, strict=True)
+    elif action_type == "type_text":
+        app = str(pc_action.get("app") or "notepad")
+        result = pc_client.execute("focus_or_open_app", {"app": app})
+        if not result.ok or not (result.data or {}).get("ok"):
+            raise PcDemoCaptureError(
+                "could not prepare a clean PC demo surface: "
+                f"{result.error or (result.data or {}).get('error')}"
+            )
+    else:
+        return
+
+    time.sleep(PC_SAFE_SURFACE_SETTLE_SECONDS)
 
 
 def _record_pc_demo_clip(
@@ -356,6 +706,7 @@ def _record_pc_demo_clip(
     pc_action: dict[str, Any] | None,
     clip_seconds: float,
     mission: str | None,
+    pc_demo_director: Any = None,
 ) -> str:
     """Records a real clip of the Windows PC's own screen: starts a PC
     screen recording (the same primitive pc.start_screen_recording
@@ -364,15 +715,31 @@ def _record_pc_demo_clip(
     duration, stops the recording, and downloads the finished file.
     Raises PcDemoCaptureError with a clear reason on any failure --
     start, stop, or download -- never silently returns a bad path."""
+    _prepare_pc_demo_surface(pc_client, pc_action)
+    is_desktop_goal = (
+        isinstance(pc_action, dict)
+        and pc_action.get("type") == "desktop_goal"
+    )
+    if is_desktop_goal:
+        # One extra step covers the loop's final verification turn.
+        steps = int(pc_action.get("max_steps") or 3) + 1
+        recording_seconds = min(
+            PC_DESKTOP_GOAL_MAX_RECORDING_SECONDS,
+            max(
+                math.ceil(clip_seconds),
+                math.ceil(steps * PC_DESKTOP_GOAL_STEP_SECONDS),
+            ),
+        )
+    else:
+        recording_seconds = max(1, math.ceil(clip_seconds))
+    started_clock = time.monotonic()
     start_result = pc_client.execute(
         "start_recording",
         {
             "target": "full",
             "mission": mission,
             "privacy": False,
-            "max_seconds": max(
-                1, round(clip_seconds) + RECORDING_BUFFER_SECONDS
-            ),
+            "max_seconds": recording_seconds,
         },
     )
     start_data = start_result.data or {}
@@ -382,8 +749,29 @@ def _record_pc_demo_clip(
             f"{start_result.error or start_data.get('error')}"
         )
 
-    _perform_pc_action(pc_client, pc_action, clip_seconds)
-    time.sleep(clip_seconds)
+    try:
+        _perform_pc_action(
+            pc_client,
+            pc_action,
+            clip_seconds,
+            strict=True,
+            pc_demo_director=pc_demo_director,
+        )
+        # The desktop_goal cap above is deliberately generous so ffmpeg
+        # cannot truncate the demo. Don't turn that headroom into dead
+        # air: once the goal reports done, only hold the recording long
+        # enough to cover the narration this clip has to fill.
+        hold_seconds = clip_seconds if is_desktop_goal else recording_seconds
+        elapsed = time.monotonic() - started_clock
+        time.sleep(
+            max(0.0, hold_seconds - elapsed)
+            + PC_RECORDING_FINALIZE_SECONDS
+        )
+    except Exception:
+        # Never strand the companion's recording_state.json when an input
+        # action (most commonly Windows foreground focus) fails mid-beat.
+        pc_client.execute("stop_recording")
+        raise
 
     stop_result = pc_client.execute("stop_recording")
     stop_data = stop_result.data or {}
@@ -399,10 +787,20 @@ def _record_pc_demo_clip(
             "PC recording stopped but reported no file path"
         )
 
-    download_result = sftp_client.download(remote_path)
+    download_result = None
+    for attempt in range(1, PC_DOWNLOAD_ATTEMPTS + 1):
+        download_result = sftp_client.download(remote_path)
+        if getattr(download_result, "verified", False):
+            break
+        if attempt < PC_DOWNLOAD_ATTEMPTS:
+            time.sleep(PC_DOWNLOAD_RETRY_SECONDS)
+
     if not getattr(download_result, "verified", False):
+        detail = getattr(download_result, "error", None)
         raise PcDemoCaptureError(
-            "downloaded PC recording failed size/hash verification"
+            "downloaded PC recording failed size/hash verification after "
+            f"{PC_DOWNLOAD_ATTEMPTS} attempts"
+            + (f": {detail}" if detail else "")
         )
 
     return str(download_result.local_path)
@@ -419,24 +817,315 @@ def _live_context() -> dict[str, Any]:
     try:
         import hud_stats
 
-        context["hud"] = hud_stats.get_hud_stats()
-    except Exception as error:
-        context["hud_error"] = str(error)
+        raw_hud = hud_stats.get_hud_stats()
+
+        def public_fields(section: Any, names: tuple[str, ...]) -> dict[str, Any]:
+            if not isinstance(section, dict):
+                return {}
+            return {
+                name: section[name]
+                for name in names
+                if name in section
+                and section[name] is not None
+                and isinstance(section[name], (bool, int, float, str))
+            }
+
+        context["hud"] = {
+            "cpu": public_fields(raw_hud.get("cpu"), ("percent", "temp_c")),
+            "memory": public_fields(raw_hud.get("memory"), ("percent",)),
+            "disk": public_fields(raw_hud.get("disk"), ("percent",)),
+            "weather": public_fields(
+                raw_hud.get("weather"),
+                ("temp_f", "high_f", "low_f", "precip_chance", "condition", "stale"),
+            ),
+            "gaming_pc": public_fields(
+                raw_hud.get("gaming_pc"),
+                (
+                    "online", "cpu_percent", "cpu_temp_c", "gpu_percent",
+                    "gpu_temp_c", "ram_percent",
+                ),
+            ),
+            "uptime_seconds": raw_hud.get("uptime_seconds"),
+        }
+    except Exception:
+        context["hud_available"] = False
 
     try:
         import diagnostics
 
-        context["diagnostics"] = diagnostics.run_structured_checks()
-    except Exception as error:
-        context["diagnostics_error"] = str(error)
+        context["diagnostics"] = [
+            {
+                "component": str(finding.get("component", "")),
+                "ok": bool(finding.get("ok")),
+            }
+            for finding in diagnostics.run_structured_checks()
+            if isinstance(finding, dict) and finding.get("component")
+        ]
+    except Exception:
+        context["diagnostics_available"] = False
 
     return context
+
+
+_PRIVATE_TEXT_PATTERNS = (
+    re.compile(r"\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b"),
+    re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"),
+    re.compile(r"\b[A-Za-z]:\\[^\s]+"),
+    re.compile(r"/(?:home|Users|var|etc)/[^\s]+", re.IGNORECASE),
+    re.compile(r"@[A-Za-z0-9_.-]+"),
+)
+
+
+def _redact_private_text(value: Any) -> str:
+    """Remove private identifiers before creative context reaches a model."""
+    text = str(value or "")
+
+    for pattern in _PRIVATE_TEXT_PATTERNS:
+        text = pattern.sub("[private detail omitted]", text)
+
+    try:
+        import robot_config
+
+        configured_terms = (
+            robot_config.get("HOME_CITY", ""),
+            robot_config.get("STATION_NAME", ""),
+        )
+    except Exception:
+        configured_terms = ()
+
+    expanded_terms = {
+        part.strip()
+        for term in configured_terms
+        for part in (str(term or ""), *str(term or "").split(","))
+        if len(part.strip()) >= 3
+    }
+
+    for term in sorted(expanded_terms, key=len, reverse=True):
+        if term.casefold() not in {"home", "station-01"}:
+            text = re.sub(
+                rf"(?<!\w){re.escape(term)}(?!\w)",
+                "[private detail omitted]",
+                text,
+                flags=re.IGNORECASE,
+            )
+
+    return text
+
+
+def _public_recent_tours(
+    recent_tours: tuple[dict[str, Any], ...],
+) -> list[dict[str, Any]]:
+    """History for diversity without paths, captions, missions, or PII."""
+    public: list[dict[str, Any]] = []
+
+    for entry in recent_tours:
+        beats = []
+        for beat in entry.get("beats", []):
+            if not isinstance(beat, dict):
+                continue
+            action = beat.get("pc_action")
+            safe_action = None
+            if isinstance(action, dict):
+                safe_action = {
+                    "type": action.get("type"),
+                    "query": _redact_private_text(action.get("query")),
+                    "text": _redact_private_text(action.get("text")),
+                    "goal": _redact_private_text(action.get("goal")),
+                }
+            beats.append({
+                "narration": _redact_private_text(beat.get("narration")),
+                "action": beat.get("action"),
+                "source": beat.get("recorded_source")
+                or beat.get("source")
+                or "hud",
+                "pc_action": safe_action,
+            })
+        public.append({"beats": beats})
+
+    return public
+
+
+def _tour_signature(tour: Any) -> tuple[tuple[str, ...], ...]:
+    """Visual fingerprint used to reject a recently repeated clip plan.
+
+    Narration is deliberately excluded: swapping synonyms over the same
+    dashboard/weather/diagnostics shots is the exact failure this guard is
+    meant to catch. PC action content is included because a different
+    search or typed message produces genuinely different footage.
+    """
+    signature: list[tuple[str, ...]] = []
+
+    for beat in tour or ():
+        if not isinstance(beat, dict):
+            continue
+
+        source = str(
+            beat.get("recorded_source")
+            or beat.get("source")
+            or "hud"
+        )
+
+        if source == "pc":
+            action = beat.get("pc_action")
+            action = action if isinstance(action, dict) else {}
+            action_type = str(action.get("type") or "desktop")
+            detail = str(
+                action.get("query")
+                or action.get("text")
+                or action.get("goal")
+                or action.get("app")
+                or ""
+            ).casefold()
+            signature.append(("pc", action_type, detail))
+            continue
+
+        signature.append(("hud", str(beat.get("action") or "idle")))
+
+    return tuple(signature)
+
+
+def _tour_is_fresh(
+    tour: Any,
+    recent_tours: tuple[dict[str, Any], ...],
+) -> bool:
+    candidate = _tour_signature(tour)
+
+    if not candidate:
+        return False
+
+    recent_signatures = {
+        _tour_signature(entry.get("beats"))
+        for entry in recent_tours
+        if isinstance(entry, dict)
+    }
+    if candidate in recent_signatures:
+        return False
+
+    if not recent_tours:
+        return True
+
+    def meaningful(signature: tuple[tuple[str, ...], ...]) -> set[tuple[str, ...]]:
+        return {
+            shot for shot in signature
+            if shot not in {("hud", "idle"), ("hud", "weather_close")}
+        }
+
+    candidate_shots = meaningful(candidate)
+    latest_shots = meaningful(
+        _tour_signature(recent_tours[-1].get("beats"))
+    )
+    required_new = min(2, len(candidate_shots))
+    return len(candidate_shots - latest_shots) >= required_new
+
+
+def _load_showcase_history(
+    staging_path: Path,
+) -> tuple[dict[str, Any], ...]:
+    path = staging_path / SHOWCASE_HISTORY_FILENAME
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return ()
+
+    tours = payload.get("tours") if isinstance(payload, dict) else None
+
+    if not isinstance(tours, list):
+        return ()
+
+    return tuple(
+        entry for entry in tours[-SHOWCASE_HISTORY_LIMIT:]
+        if isinstance(entry, dict)
+    )
+
+
+def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    temporary = path.with_name(
+        f".{path.name}.{time.time_ns()}.tmp"
+    )
+    temporary.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+
+
+def _save_showcase_history(
+    staging_path: Path,
+    entry: dict[str, Any],
+) -> None:
+    try:
+        tours = list(_load_showcase_history(staging_path))
+        tours.append(entry)
+        tours = tours[-SHOWCASE_HISTORY_LIMIT:]
+        _write_json_atomic(
+            staging_path / SHOWCASE_HISTORY_FILENAME,
+            {"version": 1, "tours": tours},
+        )
+        # Keep the caption/shot evidence beside its exact media file too.
+        video_path = entry.get("video_path")
+        if isinstance(video_path, str) and video_path:
+            reel_path = Path(video_path)
+            _write_json_atomic(
+                reel_path.with_suffix(reel_path.suffix + ".json"),
+                {"version": 1, **entry},
+            )
+    except (OSError, TypeError, ValueError) as error:
+        print(
+            "Could not save showcase history: "
+            f"{type(error).__name__}: {error}",
+            flush=True,
+        )
+
+
+def _apply_growth_direction(
+    tour: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+    plan: dict[str, Any],
+) -> tuple[dict[str, Any], ...]:
+    """Guarantee the selected promise and viewer question reach the script."""
+    directed = tuple(dict(beat) for beat in tour)
+    if not directed:
+        return directed
+    hook = str(plan.get("hook") or "").strip()
+    cta = str(plan.get("cta") or "").strip()
+    first = directed[0]
+    last = directed[-1]
+    opening = str(first.get("narration") or "").strip()
+    if (
+        hook
+        and hook.casefold() not in opening.casefold()
+        and not _opening_covers_hook(hook, opening)
+    ):
+        first["narration"] = f"{hook} {str(first.get('narration') or '').strip()}".strip()
+    closing = str(last.get("narration") or "").strip()
+    if cta and "?" not in closing:
+        last["narration"] = f"{closing} {cta}".strip()
+    return directed
+
+
+def _opening_covers_hook(hook: str, opening: str) -> bool:
+    """Recognize a model-written paraphrase so growth does not say it twice."""
+    stop_words = {
+        "a", "an", "and", "can", "in", "is", "it", "of", "on", "one",
+        "really", "the", "this", "to", "today",
+    }
+    hook_words = set(re.findall(r"[a-z0-9]+", hook.casefold())) - stop_words
+    first_sentence = re.split(r"[.!?]", opening, maxsplit=1)[0]
+    opening_words = (
+        set(re.findall(r"[a-z0-9]+", first_sentence.casefold())) - stop_words
+    )
+    if not hook_words or not opening_words:
+        return False
+    shared = len(hook_words & opening_words)
+    return shared / min(len(hook_words), len(opening_words)) >= 0.7
 
 
 def _resolve_tour(
     script_writer: Any,
     *,
     pc_demo_available: bool,
+    recent_tours: tuple[dict[str, Any], ...] = (),
+    creative_brief: str | None = None,
 ) -> tuple[dict[str, Any], ...]:
     """Picks the tour for a default (no explicit 'beats') recording.
 
@@ -444,21 +1133,69 @@ def _resolve_tour(
     randomized tour if scripting is unavailable or returns anything this
     runtime can't actually execute. The fallback is the point: a dead
     API key or a budget stop should cost variety, not the video."""
-    if script_writer is None:
-        return _build_default_tour(pc_demo_available=pc_demo_available)
+    live_context = _live_context()
+    live_context["recent_showcase_tours"] = _public_recent_tours(
+        recent_tours
+    )
+    live_context["creative_brief"] = _redact_private_text(
+        creative_brief
+    )
 
-    try:
-        return script_writer(
+    if script_writer is not None:
+        try:
+            written = script_writer(
+                pc_demo_available=pc_demo_available,
+                context=live_context,
+            )
+            if _tour_is_fresh(written, recent_tours):
+                return written
+
+            raise RuntimeError(
+                "the generated shot sequence repeats a recent Reel"
+            )
+        except Exception as error:
+            print(
+                "Unscripted showcase generation failed, falling back to "
+                f"the canned tour: {error}",
+                flush=True,
+            )
+
+    fallback = _build_default_tour(
+        pc_demo_available=pc_demo_available,
+        recent_tours=recent_tours,
+    )
+
+    for _ in range(FALLBACK_TOUR_ATTEMPTS - 1):
+        if _tour_is_fresh(fallback, recent_tours):
+            break
+        fallback = _build_default_tour(
             pc_demo_available=pc_demo_available,
-            context=_live_context(),
+            recent_tours=recent_tours,
         )
-    except Exception as error:
-        print(
-            "Unscripted showcase generation failed, falling back to "
-            f"the canned tour: {error}",
-            flush=True,
+
+    return fallback
+
+
+def _preview_reel(video_path: str) -> tuple[bool, str | None]:
+    """Play the finished Reel on Atlas's HUD and HDMI speaker.
+
+    The hub request intentionally blocks until playback finishes, which
+    guarantees the voice controller cannot ask "post or save?" early.
+    A preview failure never destroys an otherwise valid finished Reel.
+    """
+    try:
+        response = requests.post(
+            f"{HUB}/hud/reel_preview",
+            json={"video_path": video_path},
+            timeout=REEL_PREVIEW_TIMEOUT_SECONDS,
         )
-        return _build_default_tour(pc_demo_available=pc_demo_available)
+        response.raise_for_status()
+        payload = response.json()
+        if isinstance(payload, dict) and not payload.get("ok"):
+            return False, str(payload.get("error") or "preview failed")
+        return True, None
+    except (requests.RequestException, AttributeError, ValueError) as error:
+        return False, f"{type(error).__name__}: {error}"
 
 
 def register_content_tools(
@@ -469,8 +1206,23 @@ def register_content_tools(
     pc_client: Any = None,
     sftp_client: Any = None,
     script_writer: Any = None,
+    caption_writer: Any = None,
+    growth_writer: Any = None,
+    enable_growth_package: bool = False,
+    enable_facebook_publish: bool = False,
+    enable_youtube_publish: bool = False,
+    enable_combined_social_publish: bool = False,
+    desktop_reels_remote_root: str | None = None,
+    growth_database_path: str | Path | None = None,
+    enforce_reel_duration: bool = False,
+    pc_demo_director: Any = None,
 ) -> list[AtlasTool]:
     staging_path = Path(staging_directory)
+    growth_store = (
+        GrowthStore(growth_database_path or DEFAULT_DATABASE_PATH)
+        if enable_growth_package
+        else None
+    )
 
     def record_self_showcase(
         mission: str | None = None,
@@ -495,16 +1247,66 @@ def register_content_tools(
             )
 
         is_custom_script = bool(beats)
+        recent_tours = _load_showcase_history(staging_path)
+        growth_plan = growth_store.plan_reel(mission) if growth_store is not None else {}
+        creative_brief = mission
+        if growth_plan:
+            creative_brief = "\n".join(
+                part for part in (
+                    mission,
+                    f"Series: {growth_plan['series']}",
+                    f"Opening promise: {growth_plan['hook']}",
+                    f"Closing viewer question: {growth_plan['cta']}",
+                    f"Angle: {growth_plan['series_angle']}",
+                )
+                if part
+            )
         tour = beats if beats else _resolve_tour(
             script_writer,
             pc_demo_available=(
                 pc_client is not None and sftp_client is not None
             ),
+            recent_tours=recent_tours,
+            creative_brief=creative_brief,
         )
+        required_scene = _required_pc_scene(mission)
+        if required_scene is not None and (
+            pc_client is None
+            or sftp_client is None
+            or pc_demo_director is None
+        ):
+            return {
+                "ok": False,
+                "error": (
+                    "This Reel explicitly requires a recorded Microsoft "
+                    "Paint demonstration, but verified PC recording/control "
+                    "is unavailable. No misleading HUD-only Reel was produced."
+                ),
+            }
+        tour = _ensure_required_pc_scene(tour, mission)
+        if enable_growth_package and not is_custom_script:
+            tour = _apply_growth_direction(tour, growth_plan)
+
+        if (
+            is_custom_script
+            and any(beat.get("source") == "pc" for beat in tour)
+            and (pc_client is None or sftp_client is None)
+        ):
+            return {
+                "ok": False,
+                "error": (
+                    "This Reel explicitly requested a PC clip, but "
+                    "this runtime has no PC connection."
+                ),
+            }
+
         staging_path.mkdir(parents=True, exist_ok=True)
 
         clip_paths: list[str] = []
         narration_lines: list[str] = []
+        recorded_beats: list[dict[str, Any]] = []
+        subtitle_cues: list[dict[str, Any]] = []
+        narration_duration_seconds = 0.0
 
         _set_recording_indicator(True)
         try:
@@ -520,57 +1322,76 @@ def register_content_tools(
                 except content_pipeline.ContentPipelineError as error:
                     return {"ok": False, "error": str(error)}
 
-                clip_seconds = (
-                    _wav_duration_seconds(wav_path)
-                    + RECORDING_BUFFER_SECONDS
+                narration_seconds = _wav_duration_seconds(wav_path)
+                cue_start = narration_duration_seconds
+                narration_duration_seconds += narration_seconds
+                subtitle_cues.append(
+                    {
+                        "start": round(cue_start, 3),
+                        "end": round(narration_duration_seconds, 3),
+                        "text": narration_text,
+                    }
                 )
+                clip_seconds = narration_seconds + RECORDING_BUFFER_SECONDS
 
-                # A PC beat that can't be captured is fatal only when
-                # the caller explicitly asked for it: they named that
-                # clip, so silently substituting a different one would
-                # be lying about what got recorded. In a tour Atlas
-                # wrote himself, the PC hop is his own idea and the PC
-                # being asleep or unreachable shouldn't cost the whole
-                # video -- that beat just gets recorded on the HUD
-                # instead, narration and all.
                 record_on_hud = source != "pc"
 
                 if source == "pc":
                     if pc_client is None or sftp_client is None:
-                        if is_custom_script:
+                        Path(wav_path).unlink(missing_ok=True)
+                        for prior_clip in clip_paths:
+                            Path(prior_clip).unlink(missing_ok=True)
+                        return {
+                            "ok": False,
+                            "error": (
+                                "This Reel requires a PC demo clip, but "
+                                "the runtime has no PC connection. No "
+                                "incomplete HUD-only Reel was produced."
+                            ),
+                        }
+                    else:
+                        pc_error = None
+                        # Freeform desktop goals can already have visible side
+                        # effects when their director fails to verify the last
+                        # step. Replaying the whole beat duplicated Paint in a
+                        # live Reel attempt. Retry capture/transfer beats that
+                        # are safe to repeat, but never restart an autonomous
+                        # desktop task from the beginning.
+                        pc_attempts = (
+                            1
+                            if isinstance(beat.get("pc_action"), dict)
+                            and beat["pc_action"].get("type") == "desktop_goal"
+                            else 2
+                        )
+                        for pc_attempt in range(pc_attempts):
+                            try:
+                                raw_clip_path = _record_pc_demo_clip(
+                                    pc_client,
+                                    sftp_client,
+                                    beat.get("pc_action"),
+                                    clip_seconds,
+                                    mission,
+                                    pc_demo_director,
+                                )
+                                pc_error = None
+                                break
+                            except PcDemoCaptureError as error:
+                                pc_error = error
+                                if pc_attempt + 1 < pc_attempts:
+                                    time.sleep(PC_DOWNLOAD_RETRY_SECONDS)
+                        if pc_error is not None:
                             Path(wav_path).unlink(missing_ok=True)
+                            for prior_clip in clip_paths:
+                                Path(prior_clip).unlink(missing_ok=True)
                             return {
                                 "ok": False,
                                 "error": (
-                                    "This beat asked for a PC demo "
-                                    "clip, but this runtime wasn't "
-                                    "configured with a PC connection."
+                                    "PC footage failed"
+                                    + (" after retry" if pc_attempts > 1 else "")
+                                    + f": {pc_error}. No "
+                                    "incomplete HUD-only Reel was produced."
                                 ),
                             }
-                        record_on_hud = True
-                    else:
-                        try:
-                            raw_clip_path = _record_pc_demo_clip(
-                                pc_client,
-                                sftp_client,
-                                beat.get("pc_action"),
-                                clip_seconds,
-                                mission,
-                            )
-                        except PcDemoCaptureError as error:
-                            if is_custom_script:
-                                Path(wav_path).unlink(missing_ok=True)
-                                return {
-                                    "ok": False,
-                                    "error": str(error),
-                                }
-
-                            print(
-                                "PC beat failed, recording it on the "
-                                f"HUD instead: {error}",
-                                flush=True,
-                            )
-                            record_on_hud = True
 
                 if record_on_hud:
                     _apply_hud_action(action)
@@ -606,28 +1427,251 @@ def register_content_tools(
 
                 clip_paths.append(str(beat_clip_path))
                 narration_lines.append(narration_text)
+                recorded_beats.append({
+                    **beat,
+                    "recorded_source": (
+                        "hud" if record_on_hud else "pc"
+                    ),
+                })
         finally:
             _set_recording_indicator(False)
             _apply_hud_action("idle")
 
-        out_path = staging_path / f"reel_{int(time.time())}.mp4"
+        if enforce_reel_duration and not (
+            MIN_REEL_SECONDS
+            <= narration_duration_seconds
+            <= MAX_REEL_SECONDS
+        ):
+            for clip_path in clip_paths:
+                Path(clip_path).unlink(missing_ok=True)
+            return {
+                "ok": False,
+                "error": (
+                    "The generated Reel narration would run "
+                    f"{narration_duration_seconds:.1f} seconds; finished "
+                    f"Reels must be {MIN_REEL_SECONDS:.0f}-"
+                    f"{MAX_REEL_SECONDS:.0f} seconds. No out-of-range Reel "
+                    "was saved."
+                ),
+            }
+
+        reel_stamp = int(time.time())
+        out_path = staging_path / f"reel_{reel_stamp}.mp4"
+        concat_path = (
+            staging_path / f"reel_{reel_stamp}_unbranded.mp4"
+            if enable_growth_package
+            else out_path
+        )
 
         try:
-            content_pipeline.concat_clips(clip_paths, out_path)
+            content_pipeline.concat_clips(clip_paths, concat_path)
         except content_pipeline.ContentPipelineError as error:
             return {"ok": False, "error": str(error)}
         finally:
             for clip_path in clip_paths:
                 Path(clip_path).unlink(missing_ok=True)
 
-        return {
+        branding_error = None
+        if enable_growth_package:
+            try:
+                content_pipeline.brand_reel(
+                    concat_path,
+                    out_path,
+                    cues=subtitle_cues,
+                    title=str(growth_plan.get("title") or "Atlas"),
+                    series=str(growth_plan.get("series") or "Building Atlas"),
+                )
+            except content_pipeline.ContentPipelineError as error:
+                branding_error = str(error)
+                Path(concat_path).replace(out_path)
+            else:
+                Path(concat_path).unlink(missing_ok=True)
+
+        caption = None
+        if caption_writer is not None:
+            try:
+                caption = caption_writer(
+                    beats=recorded_beats,
+                    recent_captions=[
+                        str(entry.get("caption") or "")
+                        for entry in recent_tours
+                        if isinstance(entry, dict)
+                    ],
+                )
+            except Exception as error:
+                print(
+                    "Personality caption generation failed; using the "
+                    f"local caption fallback: {error}",
+                    flush=True,
+                )
+        if not caption:
+            caption = content_pipeline.build_caption(
+                " ".join(narration_lines)
+            )
+        caption = content_pipeline.ensure_raspberry_pi_hashtags(caption)
+        translations: dict[str, dict[str, Any]] = {}
+        generated_growth_assets: dict[str, Any] = {}
+        growth_asset_error = None
+        if enable_growth_package and growth_writer is not None:
+            try:
+                generated_growth_assets = growth_writer(
+                    beats=recorded_beats,
+                    plan=growth_plan,
+                )
+                growth_plan["title"] = (
+                    generated_growth_assets.get("title")
+                    or growth_plan.get("title")
+                )
+                model_hooks = generated_growth_assets.get("hook_candidates") or []
+                if len(model_hooks) >= 2:
+                    growth_plan["hook_candidates"] = [
+                        {"text": str(hook), "score": max(50, 90 - index * 5)}
+                        for index, hook in enumerate(model_hooks)
+                    ]
+                translations = generated_growth_assets.get("translations") or {}
+            except Exception as error:
+                growth_asset_error = f"{type(error).__name__}: {error}"
+
+        package_manifest = None
+        package_error = None
+        package_path = staging_path / f"reel_{reel_stamp}_package"
+        if enable_growth_package:
+            try:
+                package_manifest = reel_package.create_distribution_package(
+                    master_video=out_path,
+                    package_directory=package_path,
+                    plan=growth_plan,
+                    caption=caption,
+                    cues=subtitle_cues,
+                    translations=translations,
+                )
+            except (OSError, ValueError, content_pipeline.ContentPipelineError) as error:
+                package_error = f"{type(error).__name__}: {error}"
+
+        created_at = time.time()
+        output = {
             "ok": True,
             "video_path": str(out_path),
-            "caption": content_pipeline.build_caption(
-                " ".join(narration_lines)
-            ),
+            "caption": caption,
             "mission": mission,
+            "beats": recorded_beats,
+            "duration_seconds": round(narration_duration_seconds, 3),
+            "growth_plan": growth_plan or None,
+            "growth_package": package_manifest,
+            "package_path": str(package_path) if package_manifest else None,
+            "branding_error": branding_error,
+            "growth_asset_error": growth_asset_error,
+            "package_error": package_error,
         }
+        # Keep the draft local until the owner chooses post, save, or delete.
+        # Both post and save explicitly call content.save_showcase first, so a
+        # delete choice never leaves an unwanted copy behind on the Desktop.
+        if enable_growth_package:
+            local_id = growth_store.record_draft(
+                {
+                    **output,
+                    "created_at": created_at,
+                }
+            )
+            output["growth_local_id"] = local_id
+            for variant in (package_manifest or {}).get("trial_variants", []):
+                growth_store.record_experiment(
+                    local_id,
+                    str(variant.get("name")),
+                    str(variant.get("hook")),
+                    str(variant.get("video_path")),
+                )
+        _save_showcase_history(
+            staging_path,
+            {
+                "created_at": created_at,
+                "video_path": str(out_path),
+                "caption": caption,
+                "mission": mission,
+                "beats": recorded_beats,
+                "growth_plan": growth_plan or None,
+                "package_path": str(package_path) if package_manifest else None,
+            },
+        )
+        previewed, preview_error = _preview_reel(str(out_path))
+        output["previewed"] = previewed
+        output["preview_error"] = preview_error
+        return output
+
+    def save_showcase(
+        video_path: str,
+        package_path: str | None = None,
+    ) -> dict[str, Any]:
+        if (
+            desktop_reels_remote_root is None
+            or pc_client is None
+            or sftp_client is None
+        ):
+            return {
+                "ok": False,
+                "error": "Verified Windows Desktop export is not configured.",
+            }
+        try:
+            reel = Path(video_path).expanduser().resolve(strict=True)
+            reel.relative_to(staging_path.resolve())
+            if reel.suffix.casefold() != ".mp4":
+                raise ValueError("the saved Reel must be an MP4")
+            package = None
+            if package_path is not None:
+                package = Path(package_path).expanduser().resolve(strict=True)
+                package.relative_to(staging_path.resolve())
+                if not package.is_dir():
+                    raise ValueError("the Reel package is not a directory")
+        except (OSError, ValueError) as error:
+            return {"ok": False, "error": f"Invalid Reel path: {error}"}
+
+        return _export_reel_to_desktop(
+            video_path=reel,
+            package_path=package,
+            pc_client=pc_client,
+            sftp_client=sftp_client,
+            remote_root=desktop_reels_remote_root,
+        )
+
+    def delete_showcase(
+        video_path: str,
+        package_path: str | None = None,
+    ) -> dict[str, Any]:
+        try:
+            root = staging_path.resolve()
+            reel = Path(video_path).expanduser().resolve(strict=True)
+            reel.relative_to(root)
+            if reel.suffix.casefold() != ".mp4" or not reel.name.startswith("reel_"):
+                raise ValueError("only a staged reel_*.mp4 may be deleted")
+            targets: list[Path] = [
+                reel,
+                reel.with_suffix(reel.suffix + ".json"),
+            ]
+            if package_path is not None:
+                package = Path(package_path).expanduser().resolve(strict=True)
+                package.relative_to(root)
+                if not package.is_dir():
+                    raise ValueError("the Reel package is not a directory")
+                targets.append(package)
+        except (OSError, ValueError) as error:
+            return {"ok": False, "error": f"Invalid Reel path: {error}"}
+
+        deleted: list[str] = []
+        try:
+            for target in targets:
+                if target.is_dir():
+                    shutil.rmtree(target)
+                    deleted.append(str(target))
+                elif target.exists():
+                    target.unlink()
+                    deleted.append(str(target))
+        except OSError as error:
+            return {
+                "ok": False,
+                "deleted": deleted,
+                "error": f"Could not delete the complete Reel: {error}",
+            }
+        return {"ok": True, "deleted": deleted, "video_path": str(reel)}
 
     def publish_to_instagram(
         video_path: str,
@@ -658,6 +1702,7 @@ def register_content_tools(
             )
 
         try:
+            caption = content_pipeline.ensure_raspberry_pi_hashtags(caption)
             result = instagram_publish.publish_reel(
                 video_path,
                 caption,
@@ -667,33 +1712,193 @@ def register_content_tools(
         except instagram_publish.InstagramPublishError as error:
             return {"ok": False, "error": str(error)}
 
+        if growth_store is not None:
+            growth_store.record_publish(
+                {
+                    **result,
+                    "video_path": result.get("video_path") or video_path,
+                    "caption": result.get("caption") or caption,
+                    "mission": result.get("mission") or mission,
+                }
+            )
         return {"ok": True, **result}
+
+    def publish_to_youtube(
+        video_path: str,
+        title: str,
+        description: str,
+        privacy_status: str,
+        mission: str | None = None,
+    ) -> dict[str, Any]:
+        if not isinstance(video_path, str) or not video_path.strip():
+            raise ValueError("video_path must be a non-empty string")
+        if not isinstance(title, str) or not title.strip():
+            raise ValueError("title must be a non-empty string")
+        if not isinstance(description, str) or not description.strip():
+            raise ValueError("description must be a non-empty string")
+        if privacy_status not in youtube_publish.ALLOWED_PRIVACY_STATUSES:
+            raise ValueError(
+                "privacy_status must be private, unlisted, or public"
+            )
+        if mission is not None and not isinstance(mission, str):
+            raise ValueError("mission must be a string or null")
+
+        description = content_pipeline.ensure_raspberry_pi_hashtags(
+            description
+        )
+        try:
+            result = youtube_publish.publish_short(
+                video_path,
+                title[: youtube_publish.YOUTUBE_TITLE_MAX_LENGTH],
+                description,
+                privacy_status=privacy_status,
+                mission=mission,
+                tags=[
+                    hashtag.lstrip("#")
+                    for hashtag in content_pipeline.RASPBERRY_PI_HASHTAGS
+                ],
+            )
+        except youtube_publish.YouTubePublishError as error:
+            return {"ok": False, "error": str(error)}
+
+        if growth_store is not None:
+            growth_store.record_publish(
+                {
+                    **result,
+                    "platform": "youtube",
+                    "media_id": (
+                        f"youtube:{result.get('video_id')}"
+                        if result.get("video_id")
+                        else None
+                    ),
+                    "caption": description,
+                }
+            )
+        return {"ok": True, **result}
+
+    def publish_to_facebook(
+        video_path: str,
+        title: str,
+        description: str,
+        mission: str | None = None,
+    ) -> dict[str, Any]:
+        if not isinstance(video_path, str) or not video_path.strip():
+            raise ValueError("video_path must be a non-empty string")
+        if not isinstance(title, str) or not title.strip():
+            raise ValueError("title must be a non-empty string")
+        if not isinstance(description, str) or not description.strip():
+            raise ValueError("description must be a non-empty string")
+        if mission is not None and not isinstance(mission, str):
+            raise ValueError("mission must be a string or null")
+
+        description = content_pipeline.ensure_raspberry_pi_hashtags(
+            description
+        )
+        try:
+            result = facebook_publish.publish_reel(
+                video_path,
+                title[: facebook_publish.MAX_TITLE_LENGTH],
+                description,
+                mission=mission,
+            )
+        except facebook_publish.FacebookPublishError as error:
+            return {"ok": False, "error": str(error)}
+
+        if growth_store is not None:
+            growth_store.record_publish({
+                **result,
+                "platform": "facebook",
+                "media_id": (
+                    f"facebook:{result.get('video_id')}"
+                    if result.get("video_id")
+                    else None
+                ),
+                "caption": description,
+            })
+        return {"ok": True, **result}
+
+    def publish_to_socials(
+        video_path: str,
+        title: str,
+        caption: str,
+        mission: str | None = None,
+    ) -> dict[str, Any]:
+        if not isinstance(video_path, str) or not video_path.strip():
+            raise ValueError("video_path must be a non-empty string")
+        if not isinstance(title, str) or not title.strip():
+            raise ValueError("title must be a non-empty string")
+        if not isinstance(caption, str) or not caption.strip():
+            raise ValueError("caption must be a non-empty string")
+        if mission is not None and not isinstance(mission, str):
+            raise ValueError("mission must be a string or null")
+
+        caption = content_pipeline.ensure_raspberry_pi_hashtags(caption)
+        try:
+            result = social_publish.publish_reel(
+                video_path,
+                title[: facebook_publish.MAX_TITLE_LENGTH],
+                caption,
+                mission=mission,
+            )
+        except social_publish.SocialPublishError as error:
+            return {"ok": False, "error": str(error)}
+
+        if growth_store is not None and result.get("ok"):
+            instagram_result = result.get("instagram") or {}
+            growth_store.record_publish(
+                {
+                    "platform": "instagram_and_facebook",
+                    "media_id": instagram_result.get("media_id"),
+                    "permalink": instagram_result.get("permalink"),
+                    "video_path": result.get("video_path") or video_path,
+                    "caption": result.get("caption") or caption,
+                    "mission": result.get("mission") or mission,
+                    "posted_at": result.get("released_at"),
+                }
+            )
+        return result
+
+    def get_growth_report() -> dict[str, Any]:
+        if growth_store is None:
+            return {"ok": False, "error": "growth memory is disabled"}
+        return {"ok": True, **growth_store.report()}
+
+    def list_viewer_missions(limit: int = 5) -> dict[str, Any]:
+        if growth_store is None:
+            return {"ok": False, "error": "growth memory is disabled"}
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 25:
+            raise ValueError("limit must be an integer from 1 through 25")
+        missions = growth_store.list_mission_drafts(limit)
+        return {"ok": True, "missions": missions, "count": len(missions)}
 
     tools = [
         AtlasTool(
             name="content.record_self_showcase",
             description=(
                 "Records a narrated tour of Atlas's own HUD screen -- "
-                "and, when a PC connection is configured, optionally "
-                "hops over to a real clip of the Windows PC's own "
+                "and, when a PC connection is configured, can "
+                "hop over to a real clip of the Windows PC's own "
                 "screen for one or more beats (opening a YouTube video, "
                 "opening an app) before hopping back -- then edits "
                 "everything into one 9:16 Reel, returning the finished "
                 "local video path and a draft caption. Does not "
-                "publish anything. With no 'beats', Atlas writes the "
+                "publish anything. Atlas writes the "
                 "whole video fresh at record time -- what he talks "
                 "about, in what order, how many beats, and whether he "
                 "hops over to the PC and what he does there -- using "
-                "his real current state as context, so no two videos "
-                "are the same. Pass 'beats' with any narration "
-                "lines, in any order, any length, mixing HUD and PC "
-                "beats however wanted, to record a fully custom video "
-                "saying and showing whatever is asked for instead."
+                "his real current state and saved shot history as "
+                "context. The finished Reel is automatically played "
+                "back on Atlas with audio before this tool returns. "
+                "Put every requested subject, named app, and required "
+                "on-camera scene verbatim in 'mission'; explicit scenes "
+                "are mandatory and the recording fails rather than "
+                "substituting HUD footage. Do not write a beat list in "
+                "the planning step."
             ),
             runs_on="pi",
             handler=record_self_showcase,
             permission_level=0,
-            timeout_seconds=300,
+            timeout_seconds=SHOWCASE_TOOL_TIMEOUT_SECONDS,
             metadata={
                 "parameters": {
                     "type": "object",
@@ -701,97 +1906,57 @@ def register_content_tools(
                         "mission": {
                             "type": ["string", "null"],
                         },
-                        "beats": {
-                            "type": ["array", "null"],
-                            "description": (
-                                "A fully custom script overriding the "
-                                "default tour -- any number of beats, "
-                                "any narration text, in any order. "
-                                "Each item: {narration: str, action: "
-                                "str, source: 'hud'|'pc', pc_action: "
-                                "object}. 'source' (default 'hud') "
-                                "picks which screen that beat's clip "
-                                "comes from. For source='hud': "
-                                "'action' drives a real HUD state -- "
-                                "'weather_open'/'weather_close' opens/"
-                                "closes the weather radar, "
-                                "'diagnostics' runs and shows "
-                                "self-diagnostics, 'idle' (or any "
-                                "other/omitted value) leaves the HUD "
-                                "showing whatever it's currently on; "
-                                "unrecognized actions never error, "
-                                "they just don't change the display. "
-                                "For source='pc': records a real clip "
-                                "of the Windows PC's own screen instead "
-                                "-- requires this runtime to have a PC "
-                                "connection configured, otherwise this "
-                                "beat fails with a clear error. "
-                                "'pc_action' optionally drives one real "
-                                "action on the PC during that clip: "
-                                "{type: 'youtube_search', query: str}, "
-                                "{type: 'open_app', app: str}, or "
-                                "{type: 'type_text', app: 'notepad', "
-                                "text: str} to open Notepad and type a "
-                                "message on screen for viewers to read "
-                                "while narrating over it (paced to "
-                                "finish as the beat ends); omitted or "
-                                "unrecognized just records the PC "
-                                "screen as-is."
-                            ),
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "narration": {
-                                        "type": "string",
-                                    },
-                                    "action": {
-                                        "type": ["string", "null"],
-                                    },
-                                    "source": {
-                                        "type": ["string", "null"],
-                                    },
-                                    "pc_action": {
-                                        "type": ["object", "null"],
-                                        "properties": {
-                                            "type": {
-                                                "type": [
-                                                    "string", "null",
-                                                ],
-                                            },
-                                            "query": {
-                                                "type": [
-                                                    "string", "null",
-                                                ],
-                                            },
-                                            "app": {
-                                                "type": [
-                                                    "string", "null",
-                                                ],
-                                            },
-                                            "text": {
-                                                "type": [
-                                                    "string", "null",
-                                                ],
-                                            },
-                                        },
-                                        "required": [
-                                            "type", "query", "app",
-                                            "text",
-                                        ],
-                                        "additionalProperties": False,
-                                    },
-                                },
-                                "required": [
-                                    "narration", "action",
-                                    "source", "pc_action",
-                                ],
-                                "additionalProperties": False,
-                            },
-                        },
                     },
-                    "required": ["mission", "beats"],
+                    "required": ["mission"],
                     "additionalProperties": False,
                 }
+            },
+        ),
+        AtlasTool(
+            name="content.save_showcase",
+            description=(
+                "Copy an exact finished local Reel and its curated package "
+                "to the owner's Windows Desktop with transfer verification. "
+                "Used only after the owner chooses save or post."
+            ),
+            runs_on="pi",
+            handler=save_showcase,
+            permission_level=0,
+            timeout_seconds=300,
+            metadata={
+                "openai_plannable": False,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "video_path": {"type": "string"},
+                        "package_path": {"type": ["string", "null"]},
+                    },
+                    "required": ["video_path", "package_path"],
+                    "additionalProperties": False,
+                },
+            },
+        ),
+        AtlasTool(
+            name="content.delete_showcase",
+            description=(
+                "Delete the exact staged Reel, its evidence sidecar, and its "
+                "local package after the owner explicitly chooses delete."
+            ),
+            runs_on="pi",
+            handler=delete_showcase,
+            permission_level=2,
+            timeout_seconds=60,
+            metadata={
+                "openai_plannable": False,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "video_path": {"type": "string"},
+                        "package_path": {"type": ["string", "null"]},
+                    },
+                    "required": ["video_path", "package_path"],
+                    "additionalProperties": False,
+                },
             },
         ),
         AtlasTool(
@@ -837,7 +2002,215 @@ def register_content_tools(
                 }
             },
         ),
+        AtlasTool(
+            name="content.publish_to_youtube",
+            description=(
+                "Upload an exact finished vertical MP4 as a YouTube Short. "
+                "Public and irreversible even when requested as private -- "
+                "requires explicit owner confirmation of the exact video, "
+                "title, description, and privacy status before it runs. "
+                "Google restricts uploads from unaudited API projects to "
+                "private viewing regardless of the requested status."
+            ),
+            runs_on="pi",
+            handler=publish_to_youtube,
+            permission_level=2,
+            timeout_seconds=720,
+            metadata={
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "video_path": {
+                            "type": "string",
+                            "description": (
+                                "Exact local MP4 path returned by "
+                                "content.record_self_showcase."
+                            ),
+                        },
+                        "title": {
+                            "type": "string",
+                            "maxLength": 100,
+                        },
+                        "description": {
+                            "type": "string",
+                            "maxLength": 5000,
+                        },
+                        "privacy_status": {
+                            "type": "string",
+                            "enum": ["private", "unlisted", "public"],
+                        },
+                        "mission": {
+                            "type": ["string", "null"],
+                        },
+                    },
+                    "required": [
+                        "video_path",
+                        "title",
+                        "description",
+                        "privacy_status",
+                        "mission",
+                    ],
+                    "additionalProperties": False,
+                }
+            },
+        ),
+        AtlasTool(
+            name="content.publish_to_facebook",
+            description=(
+                "Publish an exact finished vertical MP4 as a Reel on the "
+                "ATLAS AI Robot Facebook Page. Public and externally visible "
+                "-- requires explicit owner confirmation of the exact video, "
+                "title, and description before it runs."
+            ),
+            runs_on="pi",
+            handler=publish_to_facebook,
+            permission_level=2,
+            timeout_seconds=720,
+            metadata={
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "video_path": {
+                            "type": "string",
+                            "description": (
+                                "Exact local MP4 path returned by "
+                                "content.record_self_showcase."
+                            ),
+                        },
+                        "title": {
+                            "type": "string",
+                            "maxLength": 255,
+                        },
+                        "description": {
+                            "type": "string",
+                            "maxLength": 5000,
+                        },
+                        "mission": {"type": ["string", "null"]},
+                    },
+                    "required": [
+                        "video_path",
+                        "title",
+                        "description",
+                        "mission",
+                    ],
+                    "additionalProperties": False,
+                }
+            },
+        ),
+        AtlasTool(
+            name="content.publish_to_socials",
+            description=(
+                "Publish one exact finished Reel to both Instagram and the "
+                "ATLAS AI Robot Facebook Page as one coordinated action. Both "
+                "uploads are prepared first, then the final publish requests "
+                "are started together. Public and irreversible -- one explicit "
+                "owner confirmation approves both exact posts."
+            ),
+            runs_on="pi",
+            handler=publish_to_socials,
+            permission_level=2,
+            timeout_seconds=900,
+            metadata={
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "video_path": {
+                            "type": "string",
+                            "description": (
+                                "Exact local MP4 path returned by "
+                                "content.record_self_showcase."
+                            ),
+                        },
+                        "title": {"type": "string", "maxLength": 255},
+                        "caption": {"type": "string", "maxLength": 5000},
+                        "mission": {"type": ["string", "null"]},
+                    },
+                    "required": [
+                        "video_path", "title", "caption", "mission",
+                    ],
+                    "additionalProperties": False,
+                }
+            },
+        ),
     ]
+
+    if not enable_facebook_publish:
+        tools = [
+            tool
+            for tool in tools
+            if tool.name != "content.publish_to_facebook"
+        ]
+    if not enable_youtube_publish:
+        tools = [
+            tool
+            for tool in tools
+            if tool.name != "content.publish_to_youtube"
+        ]
+    if enable_combined_social_publish:
+        tools = [
+            tool for tool in tools
+            if tool.name not in {
+                "content.publish_to_instagram",
+                "content.publish_to_facebook",
+                "content.publish_to_youtube",
+            }
+        ]
+    else:
+        tools = [
+            tool for tool in tools
+            if tool.name != "content.publish_to_socials"
+        ]
+
+    if growth_store is not None:
+        tools.extend(
+            [
+                AtlasTool(
+                    name="content.get_growth_report",
+                    description=(
+                        "Read Atlas's local Reel growth memory: published/draft "
+                        "counts, newest performance, best observed series, and "
+                        "the internally recommended next series. Read-only and "
+                        "does not contact or publish to any social platform."
+                    ),
+                    runs_on="pi",
+                    handler=get_growth_report,
+                    permission_level=0,
+                    metadata={
+                        "parameters": {
+                            "type": "object",
+                            "properties": {},
+                            "required": [],
+                            "additionalProperties": False,
+                        }
+                    },
+                ),
+                AtlasTool(
+                    name="content.list_viewer_missions",
+                    description=(
+                        "List safe local video-mission drafts derived from public "
+                        "viewer requests. This never replies to viewers and never "
+                        "records or publishes by itself."
+                    ),
+                    runs_on="pi",
+                    handler=list_viewer_missions,
+                    permission_level=0,
+                    metadata={
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "limit": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 25,
+                                }
+                            },
+                            "required": ["limit"],
+                            "additionalProperties": False,
+                        }
+                    },
+                ),
+            ]
+        )
 
     for tool in tools:
         registry.register(tool)
@@ -847,9 +2220,41 @@ def register_content_tools(
         _verify_record_self_showcase,
     )
     verifier.register(
+        "content.save_showcase",
+        _verify_save_showcase,
+    )
+    verifier.register(
+        "content.delete_showcase",
+        _verify_delete_showcase,
+    )
+    verifier.register(
         "content.publish_to_instagram",
         _verify_publish_to_instagram,
     )
+    if enable_combined_social_publish:
+        verifier.register(
+            "content.publish_to_socials",
+            _verify_publish_to_socials,
+        )
+    if enable_facebook_publish:
+        verifier.register(
+            "content.publish_to_facebook",
+            _verify_publish_to_facebook,
+        )
+    if enable_youtube_publish:
+        verifier.register(
+            "content.publish_to_youtube",
+            _verify_publish_to_youtube,
+        )
+    if growth_store is not None:
+        verifier.register(
+            "content.get_growth_report",
+            _verify_growth_read,
+        )
+        verifier.register(
+            "content.list_viewer_missions",
+            _verify_growth_read,
+        )
 
     return tools
 
@@ -870,7 +2275,6 @@ def _verify_record_self_showcase(call, result) -> VerificationCheck:
         and Path(video_path).is_file()
         and Path(video_path).stat().st_size > 0
     )
-
     return VerificationCheck(
         verified=verified,
         reason=(
@@ -885,6 +2289,46 @@ def _verify_record_self_showcase(call, result) -> VerificationCheck:
     )
 
 
+def _verify_save_showcase(call, result) -> VerificationCheck:
+    output = result.output
+    verified = (
+        isinstance(output, dict)
+        and output.get("ok") is True
+        and isinstance(output.get("folder"), str)
+        and bool(output.get("folder"))
+        and isinstance(output.get("file_count"), int)
+        and output.get("file_count") >= 1
+    )
+    return VerificationCheck(
+        verified=verified,
+        reason=(
+            "The Reel was hash-verified on the Windows Desktop."
+            if verified
+            else "The Windows Desktop copy was not verified."
+        ),
+        evidence=output if isinstance(output, dict) else {},
+    )
+
+
+def _verify_delete_showcase(call, result) -> VerificationCheck:
+    output = result.output
+    video_path = output.get("video_path") if isinstance(output, dict) else None
+    verified = (
+        isinstance(output, dict)
+        and output.get("ok") is True
+        and isinstance(video_path, str)
+        and not Path(video_path).exists()
+    )
+    return VerificationCheck(
+        verified=verified,
+        reason=(
+            "The staged Reel and its local package were deleted."
+            if verified
+            else "The staged Reel deletion was not verified."
+        ),
+        evidence=output if isinstance(output, dict) else {},
+    )
+
 def _verify_publish_to_instagram(call, result) -> VerificationCheck:
     output = result.output
 
@@ -898,7 +2342,6 @@ def _verify_publish_to_instagram(call, result) -> VerificationCheck:
         output.get("ok") is True
         and bool(output.get("permalink"))
     )
-
     return VerificationCheck(
         verified=verified,
         reason=(
@@ -911,4 +2354,119 @@ def _verify_publish_to_instagram(call, result) -> VerificationCheck:
             "media_id": output.get("media_id"),
             "error": output.get("error"),
         },
+    )
+
+
+def _verify_publish_to_youtube(call, result) -> VerificationCheck:
+    output = result.output
+
+    if not isinstance(output, dict):
+        return VerificationCheck(
+            verified=False,
+            reason="YouTube publish output was not an object.",
+        )
+
+    verified = (
+        output.get("ok") is True
+        and bool(output.get("video_id"))
+        and bool(output.get("permalink"))
+        and output.get("privacy_status")
+        in youtube_publish.ALLOWED_PRIVACY_STATUSES
+    )
+    return VerificationCheck(
+        verified=verified,
+        reason=(
+            "The YouTube upload was read back with a real video id and privacy status."
+            if verified
+            else "The YouTube upload could not be verified live."
+        ),
+        evidence={
+            "video_id": output.get("video_id"),
+            "permalink": output.get("permalink"),
+            "privacy_status": output.get("privacy_status"),
+            "processing_status": output.get("processing_status"),
+            "error": output.get("error"),
+        },
+    )
+
+
+def _verify_publish_to_facebook(call, result) -> VerificationCheck:
+    output = result.output
+    if not isinstance(output, dict):
+        return VerificationCheck(
+            verified=False,
+            reason="Facebook publish output was not an object.",
+        )
+    verified = (
+        output.get("ok") is True
+        and bool(output.get("video_id"))
+        and bool(output.get("permalink"))
+        and output.get("publishing_status")
+        in facebook_publish.TERMINAL_SUCCESS_STATUSES
+    )
+    return VerificationCheck(
+        verified=verified,
+        reason=(
+            "The Facebook Reel was verified live with a video id and permalink."
+            if verified
+            else "The Facebook Reel publish could not be verified live."
+        ),
+        evidence={
+            "video_id": output.get("video_id"),
+            "permalink": output.get("permalink"),
+            "publishing_status": output.get("publishing_status"),
+            "error": output.get("error"),
+        },
+    )
+
+
+def _verify_publish_to_socials(call, result) -> VerificationCheck:
+    output = result.output
+    if not isinstance(output, dict):
+        return VerificationCheck(
+            verified=False,
+            reason="Coordinated social publish output was not an object.",
+        )
+    instagram = output.get("instagram")
+    facebook = output.get("facebook")
+    verified = (
+        output.get("ok") is True
+        and isinstance(instagram, dict)
+        and instagram.get("verified") is True
+        and bool(instagram.get("permalink"))
+        and isinstance(facebook, dict)
+        and facebook.get("verified") is True
+        and bool(facebook.get("permalink"))
+    )
+    return VerificationCheck(
+        verified=verified,
+        reason=(
+            "Both social posts were verified live with real permalinks."
+            if verified
+            else "Both social posts could not be verified; inspect each platform result."
+        ),
+        evidence={
+            "instagram_permalink": (
+                instagram.get("permalink")
+                if isinstance(instagram, dict) else None
+            ),
+            "facebook_permalink": (
+                facebook.get("permalink")
+                if isinstance(facebook, dict) else None
+            ),
+            "error": output.get("error"),
+        },
+    )
+
+def _verify_growth_read(call, result) -> VerificationCheck:
+    output = result.output
+    verified = isinstance(output, dict) and output.get("ok") is True
+    return VerificationCheck(
+        verified=verified,
+        reason=(
+            "Local growth memory was read successfully."
+            if verified
+            else "Local growth memory could not be read."
+        ),
+        evidence={"tool": call.tool_name},
     )

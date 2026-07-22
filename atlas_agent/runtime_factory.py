@@ -8,6 +8,10 @@ from typing import Any
 import logbook
 
 from atlas_agent.content_tools import register_content_tools
+from atlas_agent.desktop_autonomy import (
+    DesktopAutonomyAgent,
+    register_desktop_autonomy_tool,
+)
 from atlas_agent.event_bus import EventBus
 from atlas_agent.executor import ToolExecutor
 from atlas_agent.local_tools import register_local_tools
@@ -24,7 +28,11 @@ from atlas_agent.planning_service import (
 from atlas_agent.router import ToolRouter
 from atlas_agent.runtime import AgentRuntime
 from atlas_agent.sftp_client import SFTPClient
-from atlas_agent.showcase_script import generate_showcase_tour
+from atlas_agent.showcase_script import (
+    generate_showcase_caption,
+    generate_showcase_growth_assets,
+    generate_showcase_tour,
+)
 from atlas_agent.task_queue import TaskQueue
 from atlas_agent.tool_registry import ToolRegistry
 from atlas_agent.verifier import ResultVerifier
@@ -43,6 +51,7 @@ class RuntimeBundle:
     event_bus: EventBus
     task_queue: TaskQueue
     mission_store: MissionStore
+    staging_directory: Path
 
     def close(self) -> None:
         self.executor.close()
@@ -65,6 +74,7 @@ def build_pc_agent_runtime(
     normalized_host = host.strip()
     normalized_username = username.strip()
     roots = tuple(approved_remote_roots)
+    staging_path = Path(staging_directory).expanduser().resolve()
 
     if not normalized_host:
         raise ValueError("host must not be empty")
@@ -103,7 +113,7 @@ def build_pc_agent_runtime(
         host=normalized_host,
         username=normalized_username,
         identity_file=identity_file,
-        staging_directory=staging_directory,
+        staging_directory=staging_path,
         approved_remote_roots=roots,
         port=ssh_port,
     )
@@ -123,6 +133,17 @@ def build_pc_agent_runtime(
         ),
         sftp_client=sftp_client,
     )
+    desktop_agent = DesktopAutonomyAgent(
+        openai_client, model, pc_client
+    )
+    register_desktop_autonomy_tool(
+        registry,
+        verifier,
+        client=openai_client,
+        model=model,
+        pc_client=pc_client,
+        agent=desktop_agent,
+    )
     register_local_tools(
         registry,
         verifier,
@@ -138,13 +159,38 @@ def build_pc_agent_runtime(
             **kwargs,
         )
 
+    def write_showcase_caption(**kwargs: Any):
+        return generate_showcase_caption(
+            openai_client,
+            model,
+            **kwargs,
+        )
+
+    def write_showcase_growth_assets(**kwargs: Any):
+        return generate_showcase_growth_assets(
+            openai_client,
+            model,
+            **kwargs,
+        )
+
     register_content_tools(
         registry,
         verifier,
-        staging_directory=staging_directory,
+        staging_directory=staging_path,
         pc_client=pc_client,
         sftp_client=sftp_client,
         script_writer=write_showcase_script,
+        caption_writer=write_showcase_caption,
+        growth_writer=write_showcase_growth_assets,
+        enable_growth_package=True,
+        enable_facebook_publish=True,
+        enable_youtube_publish=False,
+        enable_combined_social_publish=True,
+        desktop_reels_remote_root=(
+            rf"C:\Users\{normalized_username}\Desktop\Atlas Reels"
+        ),
+        enforce_reel_duration=True,
+        pc_demo_director=desktop_agent.run,
     )
 
     if recordings_remote_root is not None:
@@ -153,7 +199,7 @@ def build_pc_agent_runtime(
             verifier,
             sftp_client=sftp_client,
             recordings_remote_root=recordings_remote_root,
-            staging_directory=staging_directory,
+            staging_directory=staging_path,
         )
 
     planning_service = (
@@ -196,4 +242,5 @@ def build_pc_agent_runtime(
         event_bus=event_bus,
         task_queue=task_queue,
         mission_store=mission_store,
+        staging_directory=staging_path,
     )

@@ -150,7 +150,7 @@ def test_real_pc_tools_are_registered() -> None:
         tools,
     ) = build_tools()
 
-    assert len(tools) == 13
+    assert len(tools) == 14
     assert [
         tool.name
         for tool in registry.list_tools()
@@ -159,6 +159,7 @@ def test_real_pc_tools_are_registered() -> None:
         "pc.active_window",
         "pc.capture_screenshot",
         "pc.capture_window",
+        "pc.desktop_action",
         "pc.download_file",
         "pc.ensure_online",
         "pc.focus_or_open_app",
@@ -178,6 +179,11 @@ def test_real_pc_tools_are_registered() -> None:
     assert registry.get(
         "pc.download_file"
     ).permission_level == 0
+    assert registry.get("pc.desktop_action").permission_level == 1
+    assert (
+        registry.get("pc.desktop_action").metadata["openai_plannable"]
+        is False
+    )
     assert (
         registry.get(
             "pc.search_files"
@@ -841,3 +847,40 @@ def test_list_recordings_executes_and_verifies() -> None:
 
     assert result.status is ResultStatus.SUCCESS
     assert verification.status is VerificationStatus.VERIFIED
+
+
+def test_general_desktop_action_maps_to_companion_and_verifies() -> None:
+    (
+        registry,
+        verifier,
+        pc_client,
+        _file_search,
+        _sftp_client,
+        _tools,
+    ) = build_tools()
+    pc_client.action_result = PCActionResult(
+        action="desktop_input",
+        ok=True,
+        data={"ok": True, "action": "click"},
+        error=None,
+        started_at="start",
+        finished_at="finish",
+        duration_ms=1,
+    )
+    call = ToolCall(
+        tool_name="pc.desktop_action",
+        arguments={
+            "action": "input",
+            "arguments": {"action": "click", "x": 10, "y": 20},
+        },
+    )
+
+    result = execute(registry, call)
+    verification = verifier.verify(call, result)
+
+    assert result.status is ResultStatus.SUCCESS
+    assert pc_client.action_arguments == (
+        "desktop_input",
+        {"action": "click", "x": 10, "y": 20},
+    )
+    assert verification.verified is True

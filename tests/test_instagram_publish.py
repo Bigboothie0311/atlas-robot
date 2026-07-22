@@ -17,10 +17,17 @@ CONFIGURED = {
 
 
 class FakeResponse:
-    def __init__(self, payload, status_code=200, text=""):
+    def __init__(
+        self,
+        payload,
+        status_code=200,
+        text="",
+        headers=None,
+    ):
         self._payload = payload
         self.status_code = status_code
         self.text = text or json.dumps(payload)
+        self.headers = headers or {}
 
     def json(self):
         return self._payload
@@ -273,6 +280,64 @@ class FunnelEnabledTests(unittest.TestCase):
         self.assertIn("Funnel is not enabled", str(ctx.exception))
 
 
+class FunnelReadinessTests(unittest.TestCase):
+    @mock.patch.object(instagram_publish.requests, "head")
+    def test_accepts_public_url_with_expected_file_size(self, head):
+        head.return_value = FakeResponse(
+            {},
+            headers={"Content-Length": "16"},
+        )
+
+        instagram_publish._wait_for_public_video(
+            "https://atlaspi.example.ts.net/token/reel.mp4",
+            expected_size=16,
+        )
+
+        head.assert_called_once()
+
+    @mock.patch.object(instagram_publish.time, "sleep")
+    @mock.patch.object(instagram_publish.requests, "head")
+    def test_retries_until_public_url_is_ready(self, head, sleep):
+        head.side_effect = [
+            requests.ConnectionError("edge not ready"),
+            FakeResponse({}, headers={"Content-Length": "16"}),
+        ]
+
+        instagram_publish._wait_for_public_video(
+            "https://atlaspi.example.ts.net/token/reel.mp4",
+            expected_size=16,
+        )
+
+        self.assertEqual(head.call_count, 2)
+        sleep.assert_called_once_with(
+            instagram_publish.FUNNEL_READINESS_RETRY_SECONDS
+        )
+
+    @mock.patch.object(instagram_publish, "FUNNEL_READINESS_ATTEMPTS", 2)
+    @mock.patch.object(instagram_publish.time, "sleep")
+    @mock.patch.object(instagram_publish.requests, "head")
+    def test_raises_when_public_url_never_becomes_ready(
+        self,
+        head,
+        _sleep,
+    ):
+        head.return_value = FakeResponse(
+            {},
+            status_code=503,
+            headers={"Content-Length": "0"},
+        )
+
+        with self.assertRaises(
+            instagram_publish.InstagramPublishError
+        ) as context:
+            instagram_publish._wait_for_public_video(
+                "https://atlaspi.example.ts.net/token/reel.mp4",
+                expected_size=16,
+            )
+
+        self.assertIn("did not become ready", str(context.exception))
+
+
 class OwnTailnetDnsNameTests(unittest.TestCase):
     @mock.patch.object(instagram_publish.subprocess, "run")
     def test_parses_dns_name_from_status_json(self, run):
@@ -383,6 +448,72 @@ class PublishReelOrchestrationTests(unittest.TestCase):
                 self.assertEqual(len(ledger), 1)
                 self.assertEqual(ledger[0]["media_id"], "media-1")
                 self.assertEqual(ledger[0]["mission"], "test-post")
+                self.assertEqual(
+                    ledger[0]["video_path"],
+                    str(Path(video_file.name).resolve()),
+                )
+
+    @mock.patch.object(instagram_publish.time, "sleep")
+    @mock.patch.object(
+        instagram_publish,
+        "create_container_with_video_url",
+        side_effect=["container-1", "container-2"],
+    )
+    @mock.patch.object(
+        instagram_publish,
+        "poll_container_status",
+        side_effect=[
+            instagram_publish.ContainerProcessingError(
+                "container-1", "ERROR"
+            ),
+            "FINISHED",
+        ],
+    )
+    @mock.patch.object(
+        instagram_publish,
+        "publish",
+        return_value="media-2",
+    )
+    @mock.patch.object(
+        instagram_publish,
+        "verify",
+        return_value={
+            "permalink": "https://instagram.com/reel/media-2",
+            "timestamp": "2026-07-21T00:00:00+0000",
+        },
+    )
+    def test_retries_one_terminal_container_error_before_publishing(
+        self,
+        _verify,
+        publish,
+        poll,
+        create_container,
+        sleep,
+    ):
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(suffix=".mp4") as video_file:
+            video_file.write(b"video bytes")
+            video_file.flush()
+
+            with mock.patch.object(
+                instagram_publish, "_funnel_video_url", self._fake_video_url
+            ), mock.patch.object(
+                instagram_publish, "LEDGER_PATH", self._tmp_ledger_path()
+            ):
+                result = instagram_publish.publish_reel(
+                    video_file.name,
+                    "caption",
+                    dry_run=False,
+                )
+
+        self.assertEqual(result["media_id"], "media-2")
+        self.assertEqual(create_container.call_count, 2)
+        self.assertEqual(poll.call_count, 2)
+        publish.assert_called_once_with("container-2")
+        sleep.assert_called_once_with(
+            instagram_publish.CONTAINER_RETRY_SECONDS
+        )
 
     def _tmp_ledger_path(self):
         import tempfile
